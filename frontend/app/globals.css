@@ -1,0 +1,131 @@
+body {
+    font-family: Arial, sans-serif;
+    margin: 0;
+    /* padding: 20px; */
+    background-color: #f4f4f4;
+    color: #333;
+}
+
+.hide-scrollbar-log-display {
+    -ms-overflow-style: none;  /* IE and Edge */
+    scrollbar-width: none;  /* Firefox */
+  }
+
+  .hide-scrollbar-log-display::-webkit-scrollbar {
+    display: none;  /* Safari and Chrome */
+  }
+  
+.game-section {
+    background-color: #fff;
+    padding: 15px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    margin-bottom: 20px;
+}
+
+h2 {
+    color: #555;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 10px;
+    margin-top: 0;
+}
+
+.log-display {
+    min-height: 150px;
+    max-height: 400px;
+    overflow-y: auto;
+    border: 1px solid #ddd;
+    padding: 10px;
+    background-color: #fafafa;
+    border-radius: 4px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.log-entry {
+    margin-bottom: 5px;
+    padding-bottom: 5px;
+    border-bottom: 1px dotted #eee;
+}
+
+.log-entry:last-child {
+    border-bottom: none;
+}
+
+.player-card {
+    border: 1px solid #ccc;
+    padding: 10px;
+    border-radius: 5px;
+    background-color: #f9f9f9;
+    width: calc(50% - 1em); /* Adjusted for gap */
+    box-sizing: border-box;
+    min-width: 280px;
+    margin-bottom: 1em;
+}
+
+.player-properties {
+    font-size: 0.9em;
+    padding-left: 20px;
+    max-height: 100px;
+    overflow-y: auto;
+    list-style: none;
+}
+
+.player-properties li {
+    margin-bottom: 3px;
+}
+
+.error-log {
+    color: red;
+    font-weight: bold;
+}
+
+.db-log {
+    color: green;
+}
+
+.db_trace-log {
+    color: darkseagreen;
+}
+
+.debug_loop-log,
+.debug_trace-log {
+    color: #555;
+    font-size: 0.9em;
+}
+
+.state_debug-log {
+    color: magenta;
+    font-size: 0.9em;
+}
+
+.method_trace-log {
+    color: dodgerblue;
+    font-size: 0.9em;
+}
+
+.warning_log-log {
+    color: orange;
+    font-weight: bold;
+}
+
+.turn-info-log {
+    color: #337ab7;
+    font-weight: bold;
+}
+
+.agent-thinking-log {
+    color: #5bc0de;
+}
+
+.agent-decision-log {
+    color: #f0ad4e;
+}
+
+.action-result-log {
+    color: #5cb85c;
+}
+
+.info-log {
+    color: #31708f;
+} 

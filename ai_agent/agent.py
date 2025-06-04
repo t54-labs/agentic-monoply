@@ -3,6 +3,7 @@ from typing import Tuple, Dict, List, Any, Optional
 from abc import ABC, abstractmethod
 import json # Ensure json is imported
 import re   # For potential cleanup of JSON string if needed
+import time # Added for time measurement
 
 from dotenv import load_dotenv
 
@@ -13,19 +14,35 @@ except ImportError:
     openai = None
     print("OpenAI library not found. Please install it via pip: pip install openai")
 
+# Attempt to import MAX_TRADE_REJECTIONS if defined in main.py or game_logic.game_controller
+# This is for providing context to the AI in the prompt.
+MAX_TRADE_REJECTIONS_FOR_PROMPT = 3 # Default value
+try:
+    from main import MAX_TRADE_REJECTIONS as MTR_MAIN
+    MAX_TRADE_REJECTIONS_FOR_PROMPT = MTR_MAIN
+except ImportError:
+    try:
+        from game_logic.game_controller import MAX_TRADE_REJECTIONS as MTR_GC
+        MAX_TRADE_REJECTIONS_FOR_PROMPT = MTR_GC
+    except ImportError:
+        print("[Agent Prompt] MAX_TRADE_REJECTIONS constant not found, using default for prompt.")
+
 class BaseAgent(ABC):
     def __init__(self, player_id: int, name: str):
         self.player_id = player_id
         self.name = name
 
     @abstractmethod
-    def decide_action(self, game_state: Dict[str, Any], available_actions: List[str]) -> Tuple[str, Dict[str, Any]]:
+    def decide_action(self, game_state: Dict[str, Any], available_actions: List[str], 
+                      current_gc_turn: int, action_sequence_num: int) -> Tuple[str, Dict[str, Any]]:
         """
         Decides which action/tool to use based on the game state and available actions.
 
         Args:
             game_state: A dictionary representing the current state of the game.
             available_actions: A list of strings representing the names of tools the agent can currently use.
+            current_gc_turn: The current game turn number.
+            action_sequence_num: The sequence number of the action within the current game turn.
 
         Returns:
             A tuple containing the chosen tool name (str) and a dictionary of its parameters (Dict[str, Any]).
@@ -36,8 +53,12 @@ class BaseAgent(ABC):
         """Returns the agent's thought process for the last decision (optional)."""
         return "No detailed thought process recorded."
 
+    def get_last_decision_details_for_db(self) -> Dict[str, Any]:
+        """Returns a dictionary of details from the last decision for DB logging."""
+        return {}
+
 class OpenAIAgent(BaseAgent):
-    def __init__(self, player_id: int, name: str, model_name: str = "gpt-4", api_key: str = None):
+    def __init__(self, player_id: int, name: str, model_name: str = "gpt-4.1-mini", api_key: str = None):
         super().__init__(player_id, name)
 
         load_dotenv()
@@ -56,8 +77,18 @@ class OpenAIAgent(BaseAgent):
         self.last_raw_llm_response_content: str = ""
         self.last_thought_process: str = ""
         self.last_parsed_action_json_str: str = "" # Store the string that was successfully parsed as JSON
+        self.last_chosen_tool_name: Optional[str] = None
+        self.last_tool_parameters: Optional[Dict[str, Any]] = None
+        self.last_available_actions_json_before: str = ""
+        self.last_pending_decision_type_before: Optional[str] = None
+        self.last_pending_decision_context_json_before: str = ""
+        self.last_gc_turn_number: int = 0
+        self.last_action_sequence_in_gc_turn: int = 0
+        self.last_agent_thoughts: str = ""
+        self.last_llm_raw_response: str = ""
+        self.last_tool_parameters_json: str = "{}"
 
-    def _build_prompt(self, game_state: Dict[str, Any], available_actions: List[str]) -> str:
+    def _build_prompt(self, game_state: Dict[str, Any], available_actions: List[str]) -> Tuple[str, List[Dict[str, str]]]:
         # Prompt for the AI agent in a Monopoly game
         
         # Introduction and Goal
@@ -127,14 +158,140 @@ class OpenAIAgent(BaseAgent):
             for log_entry in game_state.get('game_log_tail', [])[-5:]:
                 prompt += f"- {log_entry}\n"
 
+        # Current Trade Information (if applicable)
+        current_trade_info = game_state.get('current_trade_info')
+        if current_trade_info:
+            prompt += "\n--- Current Trade Details ---\n"
+            prompt += f"Trade ID: {current_trade_info['trade_id']}\n"
+            prompt += f"Proposer: P{current_trade_info['proposer_id']}\n"
+            prompt += f"Recipient: P{current_trade_info['recipient_id']}\n"
+            prompt += f"Status: {current_trade_info['status']}\n"
+            if current_trade_info.get('message'):
+                prompt += f"Message: \"{current_trade_info['message']}\"\n"
+            
+            prompt += "Items offered by proposer:\n"
+            for item in current_trade_info['items_offered_by_proposer']:
+                if item['item_type'] == 'money':
+                    prompt += f"  - ${item['quantity']}\n"
+                elif item['item_type'] == 'property':
+                    prop_name = "Unknown Property"
+                    for sq in game_state.get('board_squares', []):
+                        if sq.get('id') == item['item_id']:
+                            prop_name = sq.get('name', 'Unknown Property')
+                            break
+                    prompt += f"  - Property: {prop_name} (ID: {item['item_id']})\n"
+                elif item['item_type'] == 'get_out_of_jail_card':
+                    prompt += f"  - Get Out of Jail Free Card x{item['quantity']}\n"
+            
+            prompt += "Items requested from recipient:\n"
+            for item in current_trade_info['items_requested_from_recipient']:
+                if item['item_type'] == 'money':
+                    prompt += f"  - ${item['quantity']}\n"
+                elif item['item_type'] == 'property':
+                    prop_name = "Unknown Property"
+                    for sq in game_state.get('board_squares', []):
+                        if sq.get('id') == item['item_id']:
+                            prop_name = sq.get('name', 'Unknown Property')
+                            break
+                    prompt += f"  - Property: {prop_name} (ID: {item['item_id']})\n"
+                elif item['item_type'] == 'get_out_of_jail_card':
+                    prompt += f"  - Get Out of Jail Free Card x{item['quantity']}\n"
+
+        # Recent Trade History
+        recent_trades = game_state.get('recent_trade_offers', [])
+        if recent_trades:
+            prompt += "\n--- Recent Trade History ---\n"
+            for trade in recent_trades:
+                prompt += f"Trade {trade['trade_id']}: P{trade['proposer_id']} → P{trade['recipient_id']} ({trade['status']})\n"
+                if trade.get('message'):
+                    prompt += f"  Message: \"{trade['message']}\"\n"
+                
+                # Show money amounts for context
+                money_offered = 0
+                money_requested = 0
+                for item in trade['items_offered_by_proposer']:
+                    if item['item_type'] == 'money':
+                        money_offered = item['quantity']
+                for item in trade['items_requested_from_recipient']:
+                    if item['item_type'] == 'money':
+                        money_requested = item['quantity']
+                
+                if money_offered > 0 or money_requested > 0:
+                    prompt += f"  Money: Offered ${money_offered}, Requested ${money_requested}\n"
+
         # Call to Action
         prompt += "\n--- Your Action Required ---\n"
-        if game_state.get('current_player_id') != self.player_id:
-             prompt += "Warning: It appears it is NOT my turn. I should 'wait'.\n"
+        if game_state.get('current_turn_player_id') != self.player_id and game_state.get('pending_decision_type') not in ["respond_to_trade_offer", "auction_bid", "propose_new_trade_after_rejection"] :
+             prompt += "Warning: It appears it is NOT my main turn. I should usually 'wait' unless I have a specific decision like responding to a trade or bidding in an auction.\n"
         
-        prompt += f"Current pending decision: {game_state.get('pending_decision_type', 'None')}\n"
-        if game_state.get('pending_decision_context'): prompt += f"Decision context: {json.dumps(game_state.get('pending_decision_context'))}\n"
-        prompt += f"Dice roll outcome processed: {game_state.get('dice_roll_outcome_processed')}\n"
+        current_pending_decision = game_state.get('pending_decision_type', 'None')
+        prompt += f"Current pending decision: {current_pending_decision}\n"
+        decision_context = game_state.get('pending_decision_context')
+        if decision_context: 
+            prompt += f"Decision context: {json.dumps(decision_context)}\n"
+            if current_pending_decision == "respond_to_trade_offer":
+                proposer_id_ctx = decision_context.get("proposer_id")
+                proposer_name_ctx = "Unknown Player"
+                # Search for proposer name in other_players or in my_name if I am the proposer (should not happen for respond_to_trade_offer)
+                for p_info_list in [game_state.get('other_players', []), [{"player_id": game_state.get("my_player_id"), "name": game_state.get("my_name")}] ]:
+                    for p_info in p_info_list:
+                        if p_info and p_info.get('player_id') == proposer_id_ctx: proposer_name_ctx = p_info.get('name', 'Unknown'); break
+                    if proposer_name_ctx != "Unknown Player": break
+                
+                message_from_proposer = decision_context.get("message_from_proposer")
+                prompt += f"You have received a trade offer (ID: {decision_context.get('trade_id')}) from P{proposer_id_ctx} ({proposer_name_ctx}).\n"
+                if message_from_proposer:
+                    prompt += f"Message from P{proposer_name_ctx}: \"{message_from_proposer}\"\n"
+                prompt += "Review the offer details (usually logged or in game state if fully detailed) and choose to accept, reject, or propose a counter-offer (tool_propose_counter_offer, you can add a 'counter_message').\n"
+            
+            elif current_pending_decision == "propose_new_trade_after_rejection":
+                rejected_by_player_id = decision_context.get("rejected_by_player_id")
+                rejected_by_player_name = "Unknown Player"
+                for p_info_list in [game_state.get('other_players', []), [{"player_id": game_state.get("my_player_id"), "name": game_state.get("my_name")}] ]:
+                    for p_info in p_info_list:
+                         if p_info and p_info.get('player_id') == rejected_by_player_id: rejected_by_player_name = p_info.get('name', 'Unknown'); break
+                    if rejected_by_player_name != "Unknown Player": break
+                
+                rejection_count = decision_context.get("negotiation_rejection_count", 0)
+                last_offer_msg_from_context = decision_context.get("message_from_rejector", "(No specific rejection message was provided, assume general rejection of your last offer.)") # This context message is from GC
+                prompt += f"Your previous trade offer (Original ID: {decision_context.get('original_trade_id_rejected')}) to P{rejected_by_player_id} ({rejected_by_player_name}) was REJECTED.\n"
+                prompt += f"{last_offer_msg_from_context}\n" # Display the message from GC about rejection
+                prompt += f"This negotiation has been rejected {rejection_count} time(s). Maximum allowed is {MAX_TRADE_REJECTIONS_FOR_PROMPT}.\n"
+                
+                # Add specific guidance for improving the offer
+                if current_trade_info:
+                    prompt += "\nTo improve your offer, you could:\n"
+                    
+                    # Analyze current money in the trade
+                    current_money_offered = 0
+                    for item in current_trade_info['items_offered_by_proposer']:
+                        if item['item_type'] == 'money':
+                            current_money_offered = item['quantity']
+                            break
+                    
+                    if current_money_offered > 0:
+                        prompt += f"- Increase money offer (currently ${current_money_offered})\n"
+                    else:
+                        prompt += f"- Add money to your offer (currently $0)\n"
+                    
+                    prompt += f"- Add additional properties to your offer\n"
+                    prompt += f"- Request different items\n"
+                    prompt += f"- Change your message to be more persuasive\n"
+                    prompt += f"\nIMPORTANT: When you say 'add $X', make sure your 'offered_money' parameter is the TOTAL amount (current + additional), not just the additional amount.\n"
+                
+                if rejection_count < MAX_TRADE_REJECTIONS_FOR_PROMPT:
+                    prompt += f"You can either propose a new trade (tool_propose_trade) to P{rejected_by_player_id} (include new terms and an optional 'message' parameter), or end this negotiation (tool_end_trade_negotiation).\n"
+                else:
+                    prompt += f"You have reached the maximum number of rejections for this negotiation. You must choose to end the negotiation (tool_end_trade_negotiation).\n"
+            
+            elif current_pending_decision == "jail_options":
+                # ... (existing jail options prompt enhancement)
+                if decision_context.get("max_rolls_attempted"): 
+                     prompt += "You have used all your roll attempts to get out of jail this time. You must now pay, use a card, or end your turn if no other options.\n"
+                elif decision_context.get("roll_failed"): 
+                     prompt += f"Your last roll to get out of jail ({decision_context.get('last_roll_dice')}) failed. You have {3 - decision_context.get('jail_turns_attempted_this_incarceration',0)} roll attempts left this incarceration.\n"
+
+        prompt += f"Dice roll outcome processed by game logic: {game_state.get('dice_roll_outcome_processed')}\n"
         prompt += "\nAvailable actions for you now are:\n"
         for i, action_name in enumerate(available_actions):
             prompt += f"{i+1}. {action_name}\n"
@@ -143,149 +300,213 @@ class OpenAIAgent(BaseAgent):
         prompt += "1. First, briefly write your step-by-step thinking process or strategy TO YOURSELF (this part will be logged but not parsed by the game)."
         prompt += "2. After your thoughts, on A NEW LINE, provide your chosen action as a single JSON object."
         prompt += "3. The JSON object MUST have a key 'tool_name' with the exact name of the chosen action from the list above."
-        prompt += "4. If the action requires parameters (e.g., property_id, bid_amount, recipient_player_id), include a 'parameters' key in the JSON object. The value of 'parameters' should be another JSON object containing these parameters."
+        prompt += "4. If the action requires parameters (e.g., property_id, bid_amount, recipient_player_id, offered_money, requested_money, message, counter_message), include a 'parameters' key in the JSON object. The value of 'parameters' should be another JSON object containing these parameters."
         prompt += "5. If an action takes no parameters (e.g., 'tool_roll_dice', 'tool_end_turn'), the 'parameters' key should be an empty JSON object ({})."
-        prompt += "Example for 'tool_buy_property' (assuming property_id is 12 based on game state):"
-        prompt += "Thought: This property completes my set, I should buy it.\n"
-        prompt += "{\"tool_name\": \"tool_buy_property\", \"parameters\": {\"property_id\": 12}}\n"
+        prompt += "Example for 'tool_propose_trade' with a message:"
+        prompt += "Thought: I want Baltic Avenue. Maybe Player B will accept this offer if I explain my reasoning.\n"
+        prompt += "{\"tool_name\": \"tool_propose_trade\", \"parameters\": {\"recipient_player_id\": 1, \"offered_property_ids\": [1], \"offered_money\": 50, \"requested_property_ids\": [3], \"message\": \"Baltic would complete my set! How about this deal?\"}}\n"
+        prompt += "Example for 'tool_propose_counter_offer' with a message:"
+        prompt += "Thought: Their offer is okay, but I want a bit more money and will explain why.\n"
+        prompt += "{\"tool_name\": \"tool_propose_counter_offer\", \"parameters\": {\"trade_id\": 123, \"offered_money\": 100, \"counter_message\": \"I need a bit more cash for repairs, how about this?\"}}\n"
         prompt += "Example for 'tool_roll_dice':"
         prompt += "Thought: I need to move."
         prompt += "{\"tool_name\": \"tool_roll_dice\", \"parameters\": {}}\n"
         prompt += "Respond ONLY with your thoughts (optional) followed by the JSON object on a new line. Ensure the JSON is valid."
 
         self.last_prompt = prompt
-        return prompt
+
+        # For brevity, assuming this method is correctly implemented and returns system_prompt, messages
+        # It's crucial this produces a valid prompt for the LLM.
+        # Simplified example:
+        system_prompt = (
+            "You are an expert Monopoly player. You are playing a game of Monopoly. "
+            "Your goal is to bankrupt all other players while avoiding bankruptcy yourself. "
+            "Analyze the provided game state and choose the best action from the list of available actions. "
+            "You MUST respond with a JSON object containing two keys: \"tool_name\" and \"parameters\". "
+            "The \"tool_name\" must be one of the available_actions. "
+            "The \"parameters\" must be an object containing the parameters for that tool, or an empty object if no parameters are needed. "
+            "Include your thought process and reasoning in a key named \"thoughts\" within the JSON response, before tool_name and parameters."
+        )
+        
+        prompt = f"""Current Game State:
+        {json.dumps(game_state, indent=2)}
+
+        Available Actions:
+        {json.dumps(available_actions, indent=2)}
+
+        Choose your action based on the rules and your strategy. Format your response as a JSON object with 'thoughts', 'tool_name', and 'parameters' keys."""
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ]
+        return system_prompt, messages # Returning system_prompt for potential logging, though not used by client.chat.completions.create directly
 
     def _clean_llm_json_str(self, json_str: str) -> str:
-        """Cleans common LLM mistakes from a string that should be JSON."""
-        # Remove markdown code block fences if present
-        if json_str.startswith("```json"): json_str = json_str[len("```json"):]
-        if json_str.endswith("```"): json_str = json_str[:-len("```")]
-        json_str = json_str.strip()
-        
-        # Attempt to fix common issues like trailing commas or unquoted keys (simple cases)
-        # This is heuristic. Complex repairs are beyond this scope.
-        # For example, remove trailing comma before closing brace/bracket
-        json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
-        return json_str
+        cleaned_str = json_str
+        if cleaned_str.startswith("```json"): cleaned_str = cleaned_str[len("```json"):]
+        if cleaned_str.endswith("```"): cleaned_str = cleaned_str[:-len("```")]
+        cleaned_str = cleaned_str.strip()
+        return cleaned_str
 
     def _extract_json_from_response(self, llm_response_content: str) -> Optional[Dict[str, Any]]:
-        self.last_thought_process = ""
+        agent_name_logging = f"Agent {self.name} (P{self.player_id})"
+        # print(f"{agent_name_logging}: Attempting to extract JSON. Raw LLM response content (len: {len(llm_response_content)}):\n--BEGIN LLM RAW--\n{llm_response_content}\n--END LLM RAW--")
+        
+        self.last_agent_thoughts = ""
         self.last_parsed_action_json_str = ""
         json_action_obj = None
 
-        lines = llm_response_content.strip().split('\n')
-        thought_lines = []
-        json_candidate_lines = []
+        cleaned_content = self._clean_llm_json_str(llm_response_content)
+        # print(f"{agent_name_logging}: Cleaned content for JSON parsing (len: {len(cleaned_content)}):\n--BEGIN CLEANED--\n{cleaned_content}\n--END CLEANED--")
 
-        for line in lines:
-            stripped_line = line.strip()
-            if stripped_line.startswith("{") and stripped_line.endswith("}"):
-                json_candidate_lines.append(stripped_line)
-            elif json_candidate_lines: # If we started collecting JSON lines and hit a non-JSON line
-                thought_lines.append(line) # Assume it might be trailing thoughts or errors
-            else:
-                thought_lines.append(line) # Assume it's part of the thought process
-
-        if json_candidate_lines:
-            # Try to parse the last JSON candidate found, as per prompt instruction
-            potential_json_str = self._clean_llm_json_str(json_candidate_lines[-1])
+        # Attempt 1: Parse the entire cleaned content as JSON
+        try:
+            json_action_obj = json.loads(cleaned_content)
+            self.last_parsed_action_json_str = cleaned_content
+            # print(f"{agent_name_logging}: Successfully parsed entire cleaned content as JSON directly.")
+        except json.JSONDecodeError as e_full:
+            # print(f"{agent_name_logging}: Failed to parse entire cleaned content directly. Error: {e_full}. Content was: '{cleaned_content[:500]}...'")
+            
+            # Attempt 2: Try to find the first '{' and last '}' and parse that substring
             try:
-                json_action_obj = json.loads(potential_json_str)
-                self.last_parsed_action_json_str = potential_json_str
-                # If successfully parsed the last JSON-like line, assume preceding lines were thoughts.
-                # Reconstruct thoughts from lines *not* part of the successfully parsed JSON string line.
-                # This is a bit tricky if JSON was multi-line and extracted by regex later.
-                # For now, if last line parse works, preceding lines are thoughts.
-                self.last_thought_process = "\n".join(thought_lines + json_candidate_lines[:-1]).strip()
-            except json.JSONDecodeError:
-                self.last_thought_process = llm_response_content # Could not parse, keep all as thoughts
-                json_action_obj = None # Ensure it's None
-        
-        # Fallback: if no line-wise JSON found, try regex for a JSON blob anywhere (more desperate)
-        if json_action_obj is None:
-            # Regex to find a string that starts with { and ends with }, being as non-greedy as possible for internal {} 
-            # and allowing for nested structures.
-            # This regex is hard to get perfect for all edge cases of malformed LLM JSON.
-            match = re.search(r'(\{\s*\"tool_name\".*\})\s*$', llm_response_content, re.DOTALL | re.MULTILINE)
-            if match:
-                potential_json_str = self._clean_llm_json_str(match.group(1))
-                try:
+                first_brace = cleaned_content.find('{')
+                last_brace = cleaned_content.rfind('}')
+                if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                    potential_json_str = cleaned_content[first_brace : last_brace + 1]
+                    print(f"{agent_name_logging}: Fallback Attempt 2: Trying to parse substring from first {{ to last }}: '{potential_json_str[:500]}...'")
                     json_action_obj = json.loads(potential_json_str)
                     self.last_parsed_action_json_str = potential_json_str
-                    # Attempt to get thoughts before this regex match
-                    match_start_index = match.start(1)
-                    self.last_thought_process = llm_response_content[:match_start_index].strip()
-                except json.JSONDecodeError:
-                    json_action_obj = None # Failed again
+                    # If this succeeds, text outside this substring might be thoughts.
+                    pre_json_text = cleaned_content[:first_brace].strip()
+                    post_json_text = cleaned_content[last_brace+1:].strip()
+                    if pre_json_text or post_json_text:
+                        self.last_agent_thoughts = f"Pre-JSON: {pre_json_text} | Post-JSON: {post_json_text}".strip(" | ")
+                    print(f"{agent_name_logging}: Successfully parsed substring as JSON.")
+                else:
+                    print(f"{agent_name_logging}: Fallback Attempt 2: Could not find valid {{...}} block.")
+                    self.last_agent_thoughts = llm_response_content # Treat all as thoughts if no JSON found
+            except json.JSONDecodeError as e_substring:
+                print(f"{agent_name_logging}: Fallback Attempt 2: Failed to parse substring as JSON. Error: {e_substring}. Substring was: '{potential_json_str[:500]}...'")
+                self.last_agent_thoughts = llm_response_content # Treat all as thoughts
+            except Exception as e_general_fallback:
+                print(f"{agent_name_logging}: Unexpected error during fallback JSON extraction: {e_general_fallback}")
+                self.last_agent_thoughts = llm_response_content
+        except Exception as e_outer:
+             print(f"{agent_name_logging}: Unexpected error before or during primary JSON parsing: {e_outer}")
+             self.last_agent_thoughts = llm_response_content
         
-        if json_action_obj is None and not self.last_thought_process: # If no JSON and no thoughts captured yet
-             self.last_thought_process = llm_response_content # Treat all of it as thoughts if no JSON
-
+        if json_action_obj and isinstance(json_action_obj, dict) and 'thoughts' in json_action_obj and isinstance(json_action_obj['thoughts'], str):
+            # If thoughts are successfully parsed from within the JSON, prioritize them.
+            # Concatenate if there were also pre/post thoughts from substring parsing.
+            json_thoughts = json_action_obj['thoughts']
+            if self.last_agent_thoughts and self.last_agent_thoughts != llm_response_content:
+                self.last_agent_thoughts = f"Pre/Post Text: {self.last_agent_thoughts} | JSON Thoughts: {json_thoughts}"
+            else:
+                self.last_agent_thoughts = json_thoughts
+            # print(f"{agent_name_logging}: Extracted/Combined thoughts: '{self.last_agent_thoughts}'")
+        elif json_action_obj and not self.last_agent_thoughts: # JSON parsed but no specific thoughts field or pre/post text
+             self.last_agent_thoughts = "JSON action parsed, no separate \"thoughts\" field found or pre/post text."
+        elif not json_action_obj and not self.last_agent_thoughts: # Complete failure to parse and no thoughts otherwise
+            self.last_agent_thoughts = llm_response_content # Default to full response if nothing else
+        
+        # print(f"{agent_name_logging}: Final extracted JSON object for action: {json.dumps(json_action_obj) if json_action_obj else 'None'}")
+        # print(f"{agent_name_logging}: Final agent thoughts for DB: '{self.last_agent_thoughts[:500]}...'") # Log truncated thoughts
         return json_action_obj
 
-    def decide_action(self, game_state: Dict[str, Any], available_actions: List[str]) -> Tuple[str, Dict[str, Any]]:
+    def decide_action(self, game_state: Dict[str, Any], available_actions: List[str], current_gc_turn: int, action_sequence_num: int) -> Tuple[str, Dict[str, Any]]:
+        self.last_gc_turn_number = current_gc_turn
+        self.last_action_sequence_in_gc_turn = action_sequence_num
+        self.last_pending_decision_type_before = game_state.get("pending_decision_type")
+        self.last_pending_decision_context_json_before = json.dumps(game_state.get("pending_decision_context"))
+        self.last_available_actions_json_before = json.dumps(available_actions)
+        self.last_agent_thoughts = ""
+        self.last_llm_raw_response = ""
+        self.last_parsed_action_json_str = ""
+        self.last_chosen_tool_name = ""
+        self.last_tool_parameters_json = "{}"
+
         if not available_actions:
-            self.last_thought_process = "No actions available, deciding to 'wait'."
-            return "wait", {}
+            self.last_agent_thoughts = "No actions available, choosing to do nothing."
+            self.last_chosen_tool_name = "tool_do_nothing"
+            return "tool_do_nothing", {}
 
-        prompt_text = self._build_prompt(game_state, available_actions)
-        # For debugging the prompt:
-        # print(f"--- PROMPT for {self.name} ---\n{prompt_text}\n-------------------------")
-        self.last_thought_process = f"LLM Prompting. Available actions: {', '.join(available_actions)}"
+        _, messages_for_prompt = self._build_prompt(game_state, available_actions)
         
-        action_name = available_actions[0] # Default fallback
-        params = {}
-
+        self.last_agent_thoughts = f"Attempting to call reasoning for P{self.player_id}. Available actions: {available_actions}. Pending: {self.last_pending_decision_type_before}"
+        start_time = time.time() # Import time if not already
+        
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=[
-                    {"role": "system", "content": "You are a highly intelligent and strategic Monopoly AI player. Your goal is to win. Follow the JSON response format precisely."},
-                    {"role": "user", "content": prompt_text}
-                ],
-                temperature=0.5, 
-                max_tokens=250 
+                messages=messages_for_prompt,
+                temperature=0.7, 
+                response_format={"type": "json_object"} # Requires GPT-4 Turbo or newer for guaranteed JSON
             )
-            self.last_raw_llm_response_content = response.choices[0].message.content.strip()
-            # print(f"--- RAW LLM RESPONSE for {self.name} ---\n{self.last_raw_llm_response_content}\n-------------------------")
-
-            parsed_json = self._extract_json_from_response(self.last_raw_llm_response_content)
-
-            if parsed_json and isinstance(parsed_json.get("tool_name"), str):
-                potential_action_name = parsed_json["tool_name"]
-                if potential_action_name in available_actions:
-                    action_name = potential_action_name
-                    # Parameters should be a dict, default to empty if not present or not a dict
-                    potential_params = parsed_json.get("parameters")
-                    if isinstance(potential_params, dict):
-                        params = potential_params
-                    elif potential_params is not None:
-                         self.last_thought_process += f"\n[Warning] LLM 'parameters' was not a dict: {potential_params}. Using empty params."
-                    # else: params remains {}
-                    self.last_thought_process += f"\nLLM Valid Action Parsed: '{action_name}', Params: {params}."
-                else:
-                    self.last_thought_process += f"\n[Warning] LLM chose action '{potential_action_name}' which is NOT in available actions: {available_actions}. Falling back to '{action_name}'."
-            else:
-                self.last_thought_process += f"\n[Warning] LLM response did not contain a valid JSON with 'tool_name'. Raw: '{self.last_raw_llm_response_content}'. Falling back to '{action_name}'."
-
+            self.last_llm_raw_response = response.choices[0].message.content if response.choices else ""
         except Exception as e:
-            self.last_thought_process += f"\n[Error] OpenAI API call or JSON parsing failed: {e}. Raw response: '{self.last_raw_llm_response_content if self.last_raw_llm_response_content else 'N/A'}'. Falling back to '{action_name}'."
-        
-        # Final validation
-        if action_name not in available_actions:
-            self.last_thought_process += f"\nCritical Fallback: Derived action '{action_name}' is invalid. Defaulting to first available: {available_actions[0] if available_actions else 'wait'}."
-            action_name = available_actions[0] if available_actions else "wait"
-            params = {}
+            error_message = f"Agent {self.name} (P{self.player_id}): OpenAI API call EXCEPTION: {e}"
+            print(error_message)
+            self.last_agent_thoughts += f" | OpenAI API call failed: {e}"
+            self.last_llm_raw_response = error_message
+            self.last_chosen_tool_name = "tool_do_nothing" # Fallback action
+            # Also log this error to the game log via GC if possible, or ensure server log catches it
+            return "tool_do_nothing", {}
+
+        end_time = time.time()
+        print(f"Agent {self.name} (P{self.player_id}): reasoning completed in {end_time - start_time:.2f} seconds.")
+
+        if not self.last_llm_raw_response:
+            self.last_agent_thoughts += " | LLM returned an empty response."
+            self.last_chosen_tool_name = "tool_do_nothing"
+            return "tool_do_nothing", {}
+
+        extracted_json = self._extract_json_from_response(self.last_llm_raw_response)
+        self.last_parsed_action_json_str = json.dumps(extracted_json) if extracted_json else "{}"
+
+        if extracted_json and "tool_name" in extracted_json:
+            chosen_tool_name = extracted_json.get("tool_name")
+            params = extracted_json.get("parameters", {})
+            llm_thoughts = extracted_json.get("thoughts", "No thoughts provided by LLM.")
+            self.last_agent_thoughts = llm_thoughts # Overwrite or append based on preference
+            self.last_chosen_tool_name = chosen_tool_name
+            self.last_tool_parameters_json = json.dumps(params)
             
-        self.last_response_text = f"Chosen: {action_name}, Params: {params}. Thought: {self.last_thought_process}"
-        return action_name, params
+            if chosen_tool_name in available_actions:
+                self.last_agent_thoughts += f" | LLM Valid Action Parsed: {chosen_tool_name} with params {params}."
+                print(f"Agent {self.name} (P{self.player_id}) parsed action: {chosen_tool_name}, Params: {params}")
+                return chosen_tool_name, params
+            else:
+                self.last_agent_thoughts += f" | LLM chose an UNAVAILABLE action: '{chosen_tool_name}'. Fallback."
+                print(f"Agent {self.name} (P{self.player_id}): LLM chose unavailable action '{chosen_tool_name}'. Available: {available_actions}. Fallback to tool_wait or tool_do_nothing.")
+        else:
+            self.last_agent_thoughts += " | Failed to parse valid JSON action from LLM response."
+            print(f"Agent {self.name} (P{self.player_id}): Failed to parse JSON action. Raw: {self.last_llm_raw_response}... Fallback.")
+
+        # Fallback if parsing failed or action was unavailable
+        fallback_action = "tool_wait" if "tool_wait" in available_actions else "tool_do_nothing"
+        self.last_chosen_tool_name = fallback_action
+        self.last_agent_thoughts += f" | Fallback to {fallback_action}."
+        return fallback_action, {}
 
     def get_player_thought_process(self) -> str:
         # Return a more structured thought process including prompt if desired for debugging.
         # return f"Last Prompt:\n{self.last_prompt}\n\nLast Thought Process Log:\n{self.last_thought_process}"
-        return self.last_thought_process
+        return self.last_agent_thoughts
 
+    def get_last_decision_details_for_db(self) -> Dict[str, Any]:
+        return {
+            "gc_turn_number": self.last_gc_turn_number,
+            "action_sequence_in_gc_turn": self.last_action_sequence_in_gc_turn,
+            "pending_decision_type_before": self.last_pending_decision_type_before,
+            "pending_decision_context_json_before": self.last_pending_decision_context_json_before,
+            "available_actions_json_before": self.last_available_actions_json_before,
+            "agent_thoughts_text": self.last_agent_thoughts, # Thoughts extracted before JSON
+            "llm_raw_response_text": self.last_llm_raw_response,
+            "parsed_action_json_str": self.last_parsed_action_json_str,
+            "chosen_tool_name": self.last_chosen_tool_name,
+            "tool_parameters_json": self.last_tool_parameters_json
+        }
 
 if __name__ == '__main__':
     # This is a placeholder for where you'd set your API key
@@ -337,7 +558,7 @@ if __name__ == '__main__':
             # print(prompt_s1) # Usually too long for console
             
             print("\n--- Simulating decide_action (Scenario 1) ---")
-            action_s1, params_s1 = agent.decide_action(dummy_game_state, available_actions_s1)
+            action_s1, params_s1 = agent.decide_action(dummy_game_state, available_actions_s1, 1, 1)
             print(f"Chosen action: {action_s1}, Params: {params_s1}")
             # print(f"Thought process:\n{agent.get_player_thought_process()}") # Also can be very long
 
@@ -355,7 +576,7 @@ if __name__ == '__main__':
             # print(prompt_s2)
 
             print("\n--- Simulating decide_action (Scenario 2) ---")
-            action_s2, params_s2 = agent.decide_action(dummy_game_state_s2, available_actions_s2)
+            action_s2, params_s2 = agent.decide_action(dummy_game_state_s2, available_actions_s2, 2, 1)
             print(f"Chosen action: {action_s2}, Params: {params_s2}")
             # print(f"Thought process:\n{agent.get_player_thought_process()}")
 

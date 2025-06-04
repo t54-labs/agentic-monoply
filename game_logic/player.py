@@ -9,7 +9,7 @@ INITIAL_MONEY = 1500
 INITIAL_POSITION = 0 # GO square
 
 class Player:
-    def __init__(self, player_id: int, name: str, is_ai: bool = False):
+    def __init__(self, player_id: int, name: str, is_ai: bool = False, db_id: Optional[int] = None):
         self.player_id: int = player_id
         self.name: str = name
         self.is_ai: bool = is_ai # To distinguish between human and AI agent
@@ -29,8 +29,10 @@ class Player:
         self.is_bankrupt: bool = False
         # New attribute to track mortgaged properties received from trades that need handling
         self.pending_mortgaged_properties_to_handle: List[Dict[str, Any]] = [] # List of {property_id: int, source_trade_id: int}
+        self.db_id: Optional[int] = db_id # Database primary key for this player instance
 
     def __str__(self) -> str:
+        db_id_str = f" (DB_ID:{self.db_id})" if self.db_id is not None else ""
         jail_status = ", In Jail" if self.in_jail else ""
         bankrupt_status = ", BANKRUPT" if self.is_bankrupt else ""
         gooj_status = []
@@ -39,7 +41,7 @@ class Player:
         gooj_str = f", GOOJ: {', '.join(gooj_status) if gooj_status else 'None'}"
         pending_mort_str = f", PendingMort: {len(self.pending_mortgaged_properties_to_handle)}" if self.pending_mortgaged_properties_to_handle else ""
 
-        return (f"Player {self.player_id}: {self.name} (${self.money}, Position: {self.position}{jail_status}, "
+        return (f"Player {self.player_id}{db_id_str}: {self.name} (${self.money}, Position: {self.position}{jail_status}, "
                 f"Properties: {len(self.properties_owned_ids)}{gooj_str}{pending_mort_str})"
                 f"{bankrupt_status}")
 

@@ -2,16 +2,26 @@ import random
 import time # For potential delays to make game watchable
 from typing import Optional, Dict, Any, List, Tuple # Added Dict, Any, List, Tuple
 import json # For pretty printing dicts
+import datetime
 
 from game_logic.game_controller import GameController
 from game_logic.property import PurchasableSquare, SquareType, PropertySquare # Ensure PropertySquare is imported if used explicitly
 from ai_agent.agent import OpenAIAgent # Assuming OpenAIAgent is the one we use
 from ai_agent import tools as agent_tools # Import the tools module
+from database import engine, agent_actions_table # Add agent_actions_table
+from sqlalchemy import insert
+from sqlalchemy.orm import Session # For DB operations if preferred
 
 # --- Game Configuration ---
 NUM_PLAYERS = 4 # As per requirement, 4 AI agents
-PLAYER_NAMES = ["Agent Alpha", "Agent Bravo", "Agent Charlie", "Agent Delta"]
-# INITIAL_GAME_PHASE is no longer needed here, GC handles its state.
+PLAYER_NAMES = ["Player A", "Player B", "Player C", "Player D"] # Optional, will use defaults if None or not enough
+MAX_TURNS = 200  # Max turns before game ends automatically
+ACTION_DELAY_SECONDS = 2.0 # Delay between agent actions - Increased from 0.5
+MAX_ACTIONS_PER_SEGMENT = 10 # Max actions an agent can take in a single turn segment before yielding/ending
+
+# Global Fore, Style for colorama - defined here for potential import by server.py
+class Fore: CYAN=YELLOW=GREEN=RED=MAGENTA=WHITE=BLACK=BLUE=""; LIGHTBLACK_EX=LIGHTBLUE_EX=LIGHTCYAN_EX=LIGHTGREEN_EX=LIGHTMAGENTA_EX=LIGHTRED_EX=LIGHTWHITE_EX=LIGHTYELLOW_EX=""
+class Style: RESET_ALL=BRIGHT=DIM=NORMAL="";
 
 # A simple registry to map tool names to functions
 # This will need to be populated with all tools from ai_agent.tools
@@ -41,17 +51,21 @@ TOOL_REGISTRY = {
     "tool_pass_auction_bid": getattr(agent_tools, 'tool_pass_auction_bid', lambda gc, pid, **k: {"status":"failure", "message":"auction_pass tool not implemented"}),
     "tool_withdraw_from_auction": getattr(agent_tools, 'tool_withdraw_from_auction', lambda gc, pid, **k: {"status":"failure", "message":"auction_withdraw tool not implemented"}),
     # Trade Tools
-    "tool_propose_trade": getattr(agent_tools, 'tool_propose_trade', lambda gc, pid, **k: {"status":"failure", "message":"propose_trade tool not implemented"}),
-    "tool_accept_trade": getattr(agent_tools, 'tool_accept_trade', lambda gc, pid, **k: {"status":"failure", "message":"accept_trade tool not implemented"}),
-    "tool_reject_trade": getattr(agent_tools, 'tool_reject_trade', lambda gc, pid, **k: {"status":"failure", "message":"reject_trade tool not implemented"}),
-    "tool_propose_counter_offer": getattr(agent_tools, 'tool_propose_counter_offer', lambda gc, pid, **k: {"status":"failure", "message":"propose_counter_offer tool not implemented"}),
+    "tool_propose_trade": getattr(agent_tools, 'tool_propose_trade'),
+    "tool_accept_trade": getattr(agent_tools, 'tool_accept_trade'),
+    "tool_reject_trade": getattr(agent_tools, 'tool_reject_trade'),
+    "tool_propose_counter_offer": getattr(agent_tools, 'tool_propose_counter_offer'),
+    "tool_end_trade_negotiation": getattr(agent_tools, 'tool_end_trade_negotiation', lambda gc, player_id, **k: {"status":"failure", "message":"tool_end_trade_negotiation not implemented"}),
     # Handling received mortgaged property tools
     "tool_pay_mortgage_interest_fee": getattr(agent_tools, 'tool_pay_mortgage_interest_fee', lambda gc, pid, **k: {"status":"failure", "message":"pay_mortgage_fee tool not implemented"}),
     "tool_unmortgage_property_immediately": getattr(agent_tools, 'tool_unmortgage_property_immediately', lambda gc, pid, **k: {"status":"failure", "message":"unmortgage_immediately tool not implemented"}),
 }
 
-def _setup_tool_placeholders():
+def _setup_tool_placeholders(gc_instance=None):
     """Ensures critical placeholder tools call GC methods if not fully defined in tools.py."""
+    # This function might need a GC instance if placeholders directly call GC methods during setup,
+    # but for now, assume they are generic enough or take GC as param during execution.
+
     if TOOL_REGISTRY["tool_resign_game"].__name__ == '<lambda>':
         def _resign_placeholder(gc: GameController, player_id: int) -> dict:
             player = gc.players[player_id]
@@ -66,7 +80,7 @@ def _setup_tool_placeholders():
             return {"status": "success", "message": "Asset liquidation confirm placeholder processed."}
         TOOL_REGISTRY["tool_confirm_asset_liquidation_actions_done"] = _confirm_liq_placeholder
 
-    def _create_placeholder_tool_if_missing(tool_name_key):
+    def _create_placeholder_tool_if_missing(tool_name_key, gc_for_placeholder_call: Optional[GameController] = None):
         is_lambda_placeholder = False
         try:
             if TOOL_REGISTRY.get(tool_name_key) and TOOL_REGISTRY[tool_name_key].__name__ == '<lambda>':
@@ -80,25 +94,54 @@ def _setup_tool_placeholders():
                 if tool_name_key == "tool_bid_on_auction": gc_inner._handle_auction_bid(gc_inner.players[player_id_inner], kwargs.get('bid_amount', 1))
                 elif tool_name_key == "tool_pass_auction_bid": gc_inner._handle_auction_pass(gc_inner.players[player_id_inner])
                 elif tool_name_key == "tool_withdraw_from_auction": gc_inner._handle_auction_withdraw(gc_inner.players[player_id_inner])
-                # Add specific GC calls for other placeholders like trade if critical for basic flow
                 elif tool_name_key == "tool_accept_trade": gc_inner._respond_to_trade_offer_action(player_id_inner, kwargs.get('trade_id'), "accept")
                 elif tool_name_key == "tool_reject_trade": gc_inner._respond_to_trade_offer_action(player_id_inner, kwargs.get('trade_id'), "reject")
-                # Counter offer is more complex, might need full args from agent
                 else: return {"status":"failure", "message":f"Tool '{tool_name_key}' default placeholder, no specific GC call."}
                 return {"status":"success", "message": f"Placeholder for '{tool_name_key}' executed calling GC method."}
             TOOL_REGISTRY[tool_name_key] = placeholder_tool_impl
 
     for tn in TOOL_REGISTRY.keys(): 
-        _create_placeholder_tool_if_missing(tn)
+        _create_placeholder_tool_if_missing(tn, gc_instance)
 
-# Call placeholder setup at module level after TOOL_REGISTRY is defined.
-_setup_tool_placeholders()
+_setup_tool_placeholders() # Call at module level to ensure TOOL_REGISTRY is patched before use.
 
 def execute_agent_action(gc: GameController, player_id: int, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """Executes the chosen tool for the agent."""
     if tool_name in TOOL_REGISTRY:
         tool_function = TOOL_REGISTRY[tool_name]
         try:
+            # Special handling for tool_propose_trade if params contain nested structure
+            if tool_name == "tool_propose_trade" and params and "proposed_trade" in params:
+                # Extract the nested parameters
+                nested_params = params["proposed_trade"]
+                return tool_function(gc, player_id, **nested_params)
+            
+            # Parameter name normalization for trade tools
+            if tool_name in ["tool_propose_trade", "tool_propose_counter_offer"] and params:
+                normalized_params = {}
+                for key, value in params.items():
+                    # Map various parameter name formats to the expected ones
+                    if key == "target_player_id":
+                        normalized_params["recipient_id"] = value
+                    elif key == "offer_property_ids":
+                        normalized_params["offered_property_ids"] = value
+                    elif key == "request_property_ids":
+                        normalized_params["requested_property_ids"] = value
+                    elif key == "offer_money":
+                        normalized_params["offered_money"] = value
+                    elif key == "request_money":
+                        normalized_params["requested_money"] = value
+                    elif key == "offered_gooj_cards":
+                        normalized_params["offered_get_out_of_jail_free_cards"] = value
+                    elif key == "requested_gooj_cards":
+                        normalized_params["requested_get_out_of_jail_free_cards"] = value
+                    elif key == "proposer_id":
+                        # Skip proposer_id since player_id already represents the proposer
+                        continue
+                    else:
+                        normalized_params[key] = value
+                return tool_function(gc, player_id, **normalized_params)
+            
             # Ensure params are passed correctly if they exist
             if params is not None and params:
                 return tool_function(gc, player_id, **params)
@@ -114,26 +157,30 @@ def execute_agent_action(gc: GameController, player_id: int, tool_name: str, par
         gc.log_event(f"[E] Unknown tool '{tool_name}' P{player_id}.")
         return {"status": "error", "message": f"Unknown tool: {tool_name}"}
 
-def print_game_summary(gc: GameController):
-    print("\n--- Game Summary ---")
+def print_game_summary(gc: GameController, return_string: bool = False) -> Optional[str]:
+    summary_lines = []
+    summary_lines.append("\n--- Game Summary ---")
     for player in gc.players:
-        print(f"Player {player.player_id} ({player.name}): Money ${player.money}, Bankrupt: {player.is_bankrupt}")
+        summary_lines.append(f"Player {player.player_id} ({player.name}): Money ${player.money}, Bankrupt: {player.is_bankrupt}")
         if not player.is_bankrupt:
-            print(f"  Properties ({len(player.properties_owned_ids)}):")
+            summary_lines.append(f"  Properties ({len(player.properties_owned_ids)}):")
             for prop_id in sorted(list(player.properties_owned_ids)):
                 square = gc.board.get_square(prop_id)
-                houses = f" ({square.num_houses}H)" if isinstance(square, PropertySquare) and square.num_houses > 0 and square.num_houses < 5 else " (H)" if isinstance(square, PropertySquare) and square.num_houses == 5 else ""
+                houses = f" ({square.num_houses}H)" if isinstance(square, PropertySquare) and square.num_houses > 0 and square.num_houses < 5 else " (HOTEL)" if isinstance(square, PropertySquare) and square.num_houses == 5 else ""
                 mortgaged = " [M]" if isinstance(square, PurchasableSquare) and square.is_mortgaged else ""
-                print(f"    - {square.name}{houses}{mortgaged}")
+                summary_lines.append(f"    - {square.name}{houses}{mortgaged}")
             gooj_cards = []
             if player.has_chance_gooj_card: gooj_cards.append("Chance")
             if player.has_community_gooj_card: gooj_cards.append("Community Chest")
-            if gooj_cards: print(f"  GOOJ Cards: {', '.join(gooj_cards)}")
-    print("--------------------")
-
-# Global Fore, Style for colorama
-class Fore: CYAN=YELLOW=GREEN=RED=MAGENTA=WHITE=BLACK=BLUE=""; LIGHTBLACK_EX=LIGHTBLUE_EX=LIGHTCYAN_EX=LIGHTGREEN_EX=LIGHTMAGENTA_EX=LIGHTRED_EX=LIGHTWHITE_EX=LIGHTYELLOW_EX=""
-class Style: RESET_ALL=BRIGHT=DIM=NORMAL="";
+            if gooj_cards: summary_lines.append(f"  GOOJ Cards: {', '.join(gooj_cards)}")
+    summary_lines.append("--------------------")
+    
+    output_str = "\n".join(summary_lines)
+    if return_string:
+        return output_str
+    else:
+        print(output_str)
+        return None
 
 def get_user_input_for_action(gc: GameController, player: Any, game_state: Dict[str, Any], available_actions: List[str]) -> Tuple[Optional[str], Dict[str, Any]]:
     print(f"\n{Fore.YELLOW}Player {player.name} (P{player.player_id}), it's your turn to act.{Style.RESET_ALL}")
@@ -186,13 +233,13 @@ def get_user_input_for_action(gc: GameController, player: Any, game_state: Dict[
 
     elif chosen_tool_name == "tool_propose_trade":
         try:
-            params["recipient_player_id"] = int(input("  Enter recipient player ID for trade: "))
+            params["recipient_id"] = int(input("  Enter recipient player ID for trade: "))
             params["offered_property_ids"] = [int(x) for x in input("  Enter YOUR property IDs to offer (comma-separated, e.g., 1,5 or leave blank): ").split(',') if x.strip().isdigit()]
             params["offered_money"] = int(input("  Enter YOUR money to offer (0 if none): ") or "0")
-            params["offered_gooj_cards"] = int(input("  Enter YOUR Get Out of Jail cards to offer (0-2): ") or "0")
+            params["offered_get_out_of_jail_free_cards"] = int(input("  Enter YOUR Get Out of Jail cards to offer (0-2): ") or "0")
             params["requested_property_ids"] = [int(x) for x in input(f"  Enter RECIPIENT's property IDs to request (comma-separated): ").split(',') if x.strip().isdigit()]
             params["requested_money"] = int(input(f"  Enter RECIPIENT's money to request (0 if none): ") or "0")
-            params["requested_gooj_cards"] = int(input(f"  Enter RECIPIENT's Get Out of Jail cards to request (0-2): ") or "0")
+            params["requested_get_out_of_jail_free_cards"] = int(input(f"  Enter RECIPIENT's Get Out of Jail cards to request (0-2): ") or "0")
         except ValueError: print("Invalid input for trade parameters.")
     
     elif chosen_tool_name in ["tool_accept_trade", "tool_reject_trade", "tool_propose_counter_offer"]:
@@ -203,10 +250,10 @@ def get_user_input_for_action(gc: GameController, player: Any, game_state: Dict[
             try:
                 params["offered_property_ids"] = [int(x) for x in input("    YOUR property IDs to offer now (comma-separated): ").split(',') if x.strip().isdigit()]
                 params["offered_money"] = int(input("    YOUR money to offer now (0 if none): ") or "0")
-                params["offered_gooj_cards"] = int(input("    YOUR GOOJ cards to offer now (0-2): ") or "0")
+                params["offered_get_out_of_jail_free_cards"] = int(input("    YOUR GOOJ cards to offer now (0-2): ") or "0")
                 params["requested_property_ids"] = [int(x) for x in input(f"    ORIGINAL PROPOSER's property IDs to request now: ").split(',') if x.strip().isdigit()]
                 params["requested_money"] = int(input(f"    ORIGINAL PROPOSER's money to request now (0 if none): ") or "0")
-                params["requested_gooj_cards"] = int(input(f"    ORIGINAL PROPOSER's GOOJ cards to request now (0-2): ") or "0")
+                params["requested_get_out_of_jail_free_cards"] = int(input(f"    ORIGINAL PROPOSER's GOOJ cards to request now (0-2): ") or "0")
             except ValueError: print("Invalid input for counter-offer parameters.")
 
     elif chosen_tool_name in ["tool_pay_mortgage_interest_fee", "tool_unmortgage_property_immediately"]:
@@ -215,34 +262,92 @@ def get_user_input_for_action(gc: GameController, player: Any, game_state: Dict[
 
     return chosen_tool_name, params
 
-def run_game_cli_simulation(interactive_mode=False):
-    # ... (GC and Agent initialization, colorama setup, TOOL_REGISTRY placeholder setup)
-    global Fore, Style
-    try: from colorama import init, Fore as ColoramaFore, Style as ColoramaStyle; init(); Fore=ColoramaFore; Style=ColoramaStyle
-    except ImportError: 
-        class ForeFallback: CYAN=YELLOW=GREEN=RED=MAGENTA=WHITE=BLACK=BLUE=""; LIGHTBLACK_EX=LIGHTBLUE_EX=LIGHTCYAN_EX=LIGHTGREEN_EX=LIGHTMAGENTA_EX=LIGHTRED_EX=LIGHTWHITE_EX=LIGHTYELLOW_EX=""
-        class StyleFallback: RESET_ALL=BRIGHT=DIM=NORMAL=""; Fore = ForeFallback; Style = StyleFallback
-    print("Starting Monopoly CLI Simulation...")
-    gc = GameController(num_players=NUM_PLAYERS, player_names=PLAYER_NAMES)
-    agents = [OpenAIAgent(player_id=i, name=gc.players[i].name) for i in range(NUM_PLAYERS)]
-    gc.log_event(f"Initialized {len(agents)} agents.")
-    gc.start_game()
-    turn_count = 0; MAX_TURNS = 350; ACTION_DELAY_SECONDS = 0.05 if not interactive_mode else 0.5
+# New function to log agent actions to DB
+def _log_agent_action_to_db(gc: GameController, player_id: int, agent: OpenAIAgent, action_result: Dict[str, Any], current_game_turn_db_id: Optional[int]):
+    if gc.game_db_id is None: # Cannot log if no game_db_id
+        return
+    
+    player_db_id = gc.players[player_id].db_id
+    if player_db_id is None:
+        gc.log_event(f"[DB Error] Player P{player_id} has no db_id. Cannot log agent action.")
+        return
 
-    while not gc.game_over and turn_count < MAX_TURNS:
-        turn_count += 1; gc.turn_count = turn_count
+    decision_details = agent.get_last_decision_details_for_db()
+
+    action_data_to_insert = {
+        "game_id": gc.game_db_id,
+        "game_turn_id": current_game_turn_db_id, # This needs to be the ID of the *current* game_turns entry
+        "player_db_id": player_db_id,
+        "player_game_index": player_id,
+        "gc_turn_number": decision_details.get("gc_turn_number"),
+        "action_sequence_in_gc_turn": decision_details.get("action_sequence_in_gc_turn"),
+        "pending_decision_type_before": decision_details.get("pending_decision_type_before"),
+        "pending_decision_context_json_before": decision_details.get("pending_decision_context_json_before"),
+        "available_actions_json_before": decision_details.get("available_actions_json_before"),
+        "agent_thoughts_text": decision_details.get("agent_thoughts_text"),
+        "llm_raw_response_text": decision_details.get("llm_raw_response_text"),
+        "parsed_action_json_str": decision_details.get("parsed_action_json_str"),
+        "chosen_tool_name": decision_details.get("chosen_tool_name"),
+        "tool_parameters_json": decision_details.get("tool_parameters_json"),
+        "action_result_status": action_result.get("status"),
+        "action_result_message": action_result.get("message"),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc) 
+    }
+    try:
+        with Session(engine) as session: # Or use engine.connect() for Core
+            stmt = insert(agent_actions_table).values(action_data_to_insert)
+            session.execute(stmt)
+            session.commit()
+            # gc.log_event(f"[DB] Logged agent action for P{player_id}, Tool: {action_data_to_insert['chosen_tool_name']}")
+    except Exception as e:
+        gc.log_event(f"[DB Error] Failed to log agent action for P{player_id}: {e}")
+
+def run_game_cli_simulation(interactive_mode=False, game_uid_for_server: Optional[str] = None, ws_manager_for_server: Optional[Any] = None):
+    # This function will now be callable from server.py, or run directly.
+    # If called from server, game_id_for_server and ws_manager_for_server will be provided.
+    
+    # Colorama setup should be at the very top of the script or handled by calling environment
+    # For simplicity if this file is run directly:
+    if __name__ == "__main__" or interactive_mode: # Only init colorama if running as main or explicitly interactive
+        try: from colorama import init, Fore as ColoramaFore, Style as ColoramaStyle; init(); Fore=ColoramaFore; Style=ColoramaStyle
+        except ImportError: print("Colorama not found, colors will be disabled.")
+
+    game_id_to_use = game_uid_for_server if game_uid_for_server else "cli_game"
+    
+    print(f"Starting Monopoly CLI Simulation (Game ID: {game_id_to_use})...")
+    gc = GameController(num_players=NUM_PLAYERS, player_names=PLAYER_NAMES, game_uid=game_id_to_use, ws_manager=ws_manager_for_server)
+    agents = [OpenAIAgent(player_id=i, name=gc.players[i].name) for i in range(NUM_PLAYERS)]
+    gc.log_event(f"Initialized {len(agents)} agents for game {game_id_to_use}.")
+    gc.start_game()
+    loop_turn_count = 0 
+    effective_action_delay = ACTION_DELAY_SECONDS if not interactive_mode else 0.5
+    current_game_turn_db_id: Optional[int] = None 
+
+    while not gc.game_over and loop_turn_count < MAX_TURNS:
+        loop_turn_count += 1; gc.turn_count = loop_turn_count
         active_player_id: Optional[int]; current_acting_player: Optional[Player]; log_turn_header_detail = ""
         roll_action_taken_this_main_turn_segment = False 
         current_main_turn_player_id = gc.current_player_index
         
-        # Reset roll action flag at the start of a new main turn player's active segment 
-        # or a bonus turn for the main player when no specific decision is pending.
-        if gc.current_player_index == getattr(run_game_cli_simulation, '_last_main_turn_player_id_for_roll_flag', -1):
-            if gc.pending_decision_type is None and gc.dice_roll_outcome_processed: # Bonus turn segment start
-                roll_action_taken_this_main_turn_segment = False
-        else: # New main player
-            roll_action_taken_this_main_turn_segment = False
-        run_game_cli_simulation._last_main_turn_player_id_for_roll_flag = gc.current_player_index
+        action_sequence_this_gc_turn = 0 # Reset for each new GameController turn_count
+        if gc.turn_count != getattr(run_game_cli_simulation, '_last_gc_turn_for_action_seq', -1):
+            run_game_cli_simulation._last_gc_turn_for_action_seq = gc.turn_count
+        else:
+            # This means it's still the same GC turn, but could be a different player acting (e.g. auction)
+            # or same player making multiple decisions. We need a robust way to increment sequence.
+            # For now, let's increment it inside the while player_turn_segment_active loop.
+            pass 
+
+        # Save game turn snapshot at the beginning of processing for this gc.turn_count if it's a new turn for the main player
+        # or if a significant event like auction start makes sense for a snapshot.
+        # This logic needs refinement: when is the best time to snapshot?
+        if gc.current_player_index == getattr(run_game_cli_simulation, '_last_player_for_snapshot', -2) and \
+           gc.turn_count == getattr(run_game_cli_simulation, '_last_turn_for_snapshot', -2):
+            pass # Avoid redundant snapshot for the same player in the same turn if loop re-enters for sub-decisions
+        else:
+            current_game_turn_db_id = gc._save_game_turn_snapshot(gc.current_player_index) # Save for main turn player
+            setattr(run_game_cli_simulation, '_last_player_for_snapshot', gc.current_player_index)
+            setattr(run_game_cli_simulation, '_last_turn_for_snapshot', gc.turn_count)
 
         # Determine who is acting
         if gc.auction_in_progress and gc.pending_decision_type == "auction_bid":
@@ -262,7 +367,7 @@ def run_game_cli_simulation(interactive_mode=False):
             log_turn_header_detail = f"(Player {current_acting_player.name} (${current_acting_player.money}) Pos: {current_acting_player.position} - {gc.board.get_square(current_acting_player.position).name})"
         
         agent_to_act = agents[active_player_id]
-        print(f"\n{ Fore.CYAN }--- Turn {turn_count} {log_turn_header_detail} | GC Pend: '{gc.pending_decision_type}', DiceDone: {gc.dice_roll_outcome_processed} ---{ Style.RESET_ALL }")
+        print(f"\n{ Fore.CYAN }--- Turn {loop_turn_count} {log_turn_header_detail} | GC Pend: '{gc.pending_decision_type}', DiceDone: {gc.dice_roll_outcome_processed} ---{ Style.RESET_ALL }")
         
         if current_acting_player.is_bankrupt: # ... (bankrupt handling) ...
              gc.log_event(f"P{active_player_id} ({current_acting_player.name}) is bankrupt.")
@@ -275,6 +380,8 @@ def run_game_cli_simulation(interactive_mode=False):
 
         while player_turn_segment_active and not current_acting_player.is_bankrupt and not gc.game_over and action_this_segment_count < MAX_ACTIONS_PER_SEGMENT:
             action_this_segment_count += 1
+            action_sequence_this_gc_turn += 1 # Increment sequence for each agent decision point
+            
             available_actions = gc.get_available_actions(active_player_id)
             if not available_actions: 
                 gc.log_event(f"[W] No available actions for P{active_player_id}({current_acting_player.name}). Pend:'{gc.pending_decision_type}',DD:{gc.dice_roll_outcome_processed}. EndSeg.")
@@ -285,10 +392,11 @@ def run_game_cli_simulation(interactive_mode=False):
             if gc.pending_decision_context: print(f"  Ctx: {json.dumps(gc.pending_decision_context, indent=1)}")
             print(f"  Actions: {available_actions[:7]}{ '...' if len(available_actions) > 7 else ''}")
             
-            chosen_tool_name, params = agent_to_act.decide_action(game_state_for_agent, available_actions)
+            chosen_tool_name, params = agent_to_act.decide_action(game_state_for_agent, available_actions, gc.turn_count, action_sequence_this_gc_turn)
             if hasattr(agent_to_act, 'get_player_thought_process'): thoughts = agent_to_act.get_player_thought_process(); print(f"{Fore.MAGENTA}  Thinks: {thoughts.split('LLM Valid Action Parsed:')[0].strip() if 'LLM Valid Action Parsed:' in thoughts else thoughts}{Style.RESET_ALL}")
             print(f"{Fore.GREEN}  Player '{current_acting_player.name}' chose: '{chosen_tool_name}' with params: {params}{Style.RESET_ALL}")
             action_result = execute_agent_action(gc, active_player_id, chosen_tool_name, params)
+            _log_agent_action_to_db(gc, active_player_id, agent_to_act, action_result, current_game_turn_db_id)
             print(f"  Tool Result: Status '{action_result.get('status', 'N/A' )}' - Msg: {action_result.get('message', 'No msg.')}")
 
             if action_result.get("status") == "error" or current_acting_player.is_bankrupt : player_turn_segment_active = False; break 
@@ -339,7 +447,7 @@ def run_game_cli_simulation(interactive_mode=False):
             if action_this_segment_count >= MAX_ACTIONS_PER_SEGMENT:
                 gc.log_event(f"[W] Max actions for P{active_player_id} ({current_acting_player.name}). End seg."); player_turn_segment_active = False
             
-            if player_turn_segment_active and not gc.game_over and ACTION_DELAY_SECONDS > 0: time.sleep(ACTION_DELAY_SECONDS)
+            if player_turn_segment_active and not gc.game_over and effective_action_delay > 0: time.sleep(effective_action_delay)
         
         # --- End of an active player's decision segment(s) --- 
         if gc.game_over: break
@@ -367,11 +475,26 @@ def run_game_cli_simulation(interactive_mode=False):
             gc.log_event(f"Auction for {gc.board.get_square(gc.auction_property_id).name if gc.auction_property_id is not None else 'prop'} continues...")
         
         if gc.game_over: break
-        if turn_count >= MAX_TURNS: gc.log_event(f"Max turns ({MAX_TURNS}) reached."); gc.game_over = True; break
+        if loop_turn_count >= MAX_TURNS: gc.log_event(f"Max turns ({MAX_TURNS}) reached."); gc.game_over = True; break
             
     print_game_summary(gc)
     gc.log_event("Monopoly CLI Simulation Finished.")
 
 if __name__ == "__main__":
-    # ... (colorama setup) ...
+    # Define Fore and Style globally for access within run_game_cli_simulation
+    # This ensures they exist even if colorama import fails later in the function call.
+    class Fore: CYAN=YELLOW=GREEN=RED=MAGENTA=WHITE=BLACK=BLUE=""; LIGHTBLACK_EX=LIGHTBLUE_EX=LIGHTCYAN_EX=LIGHTGREEN_EX=LIGHTMAGENTA_EX=LIGHTRED_EX=LIGHTWHITE_EX=LIGHTYELLOW_EX=""
+    class Style: RESET_ALL=BRIGHT=DIM=NORMAL="";
+    
+    # Try to initialize colorama and overwrite placeholders if successful
+    try: 
+        from colorama import init, Fore as ColoramaFore, Style as ColoramaStyle
+        init()
+        Fore = ColoramaFore 
+        Style = ColoramaStyle
+        print(f"{Fore.GREEN}Colorama initialized successfully for CLI output.{Style.RESET_ALL}")
+    except ImportError: 
+        print("Colorama not found, CLI output will not be colored.")
+        pass # Global placeholders will be used
+    
     run_game_cli_simulation(interactive_mode=False) 

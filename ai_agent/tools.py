@@ -143,44 +143,55 @@ def tool_unmortgage_property(gc: Any, player_id: int, property_id: int) -> Dict[
         return {"status": "error", "message": str(e)}
 
 # --- Jail Actions (Called when gc.pending_decision_type == "jail_options") ---
-def tool_pay_bail(gc: Any, player_id: int) -> Dict[str, Any]:
+def tool_pay_bail(gc: Any, player_id: int, params: Dict[str, Any] = None) -> Dict[str, Any]:
     player = gc.players[player_id]
+    if params is None: params = {} # Ensure params is a dict
     try:
         if not (player.in_jail and gc.pending_decision_type == "jail_options" and gc.pending_decision_context.get("player_id") == player_id):
              return {"status": "failure", "message": "Cannot pay bail: not in correct jail decision state."}
-        success = gc._pay_to_get_out_of_jail(player)
-        result = {"status": "success" if success else "failure", "message": f"Pay bail: {'OK' if success else 'Fail - Check funds/logs'}."}
-        _log_agent_action(gc, player_id, "tool_pay_bail", {}, result)
+        # Call GC method with player_id and params (even if empty for this specific tool)
+        action_outcome = gc._pay_to_get_out_of_jail(player_id, params) 
+        result = {"status": action_outcome.get("status"), "message": action_outcome.get("message", "Pay bail attempt processed.")}
+        _log_agent_action(gc, player_id, "tool_pay_bail", params, result)
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
 
-def tool_use_get_out_of_jail_card(gc: Any, player_id: int) -> Dict[str, Any]:
+def tool_use_get_out_of_jail_card(gc: Any, player_id: int, params: Dict[str, Any] = None) -> Dict[str, Any]:
     player = gc.players[player_id]
+    if params is None: params = {} # Ensure params is a dict
     try:
         if not (player.in_jail and gc.pending_decision_type == "jail_options" and gc.pending_decision_context.get("player_id") == player_id):
              return {"status": "failure", "message": "Cannot use GOOJ card: not in correct jail decision state."}
         if not (player.has_chance_gooj_card or player.has_community_gooj_card):
             return {"status": "failure", "message": "No GOOJ card to use."}
-        card_used = gc._use_card_to_get_out_of_jail(player) # GC method returns card type or None
-        success = card_used is not None
-        result = {"status": "success" if success else "failure", "message": f"Use GOOJ card: {'OK ('+card_used+')' if success else 'Fail'}."}
-        _log_agent_action(gc, player_id, "tool_use_get_out_of_jail_card", {}, result)
+        # Call GC method with player_id and params
+        action_outcome = gc._use_card_to_get_out_of_jail(player_id, params) 
+        result = {"status": action_outcome.get("status"), "message": action_outcome.get("message", "Use GOOJ card attempt processed.")}
+        _log_agent_action(gc, player_id, "tool_use_get_out_of_jail_card", params, result)
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
 
-def tool_roll_for_doubles_to_get_out_of_jail(gc: Any, player_id: int) -> Dict[str, Any]:
+def tool_roll_for_doubles_to_get_out_of_jail(gc: Any, player_id: int, params: Dict[str, Any] = None) -> Dict[str, Any]:
     player = gc.players[player_id]
+    if params is None: params = {} # Ensure params is a dict
     try:
         if not (player.in_jail and gc.pending_decision_type == "jail_options" and gc.pending_decision_context.get("player_id") == player_id):
              return {"status": "failure", "message": "Cannot roll for jail: not in correct jail decision state."}
-        if player.jail_turns_remaining >=3: return {"status": "failure", "message": "Max roll attempts for jail already used."}
+        # The check for player.jail_turns_remaining >=3 should ideally be handled by GC's _attempt_roll_out_of_jail or get_available_actions
+        # However, keeping a preliminary check here can be useful.
+        if player.jail_turns_remaining >=3 and not gc.pending_decision_context.get("max_rolls_attempted", False):
+             # This condition is a bit redundant if _attempt_roll_out_of_jail handles it robustly by returning error
+             # For safety, ensure agent doesn't try to roll if GC logic already determined max attempts.
+             pass # Let GC method handle max attempts error
         
-        got_out = gc._attempt_roll_out_of_jail(player)
-        dice_rolled = gc.dice # gc._attempt_roll_out_of_jail sets gc.dice with the roll for this attempt
-        message = f"Roll for doubles (in jail): Dice {dice_rolled}, Got out: {got_out}."
-        if player.jail_turns_remaining >=3 and not got_out: message += " This was the 3rd failed roll."
-        result = {"status": "success", "message": message, "dice_roll": dice_rolled, "got_out": got_out}
-        _log_agent_action(gc, player_id, "tool_roll_for_doubles_to_get_out_of_jail", {}, result)
+        # Call GC method with player_id and params
+        action_outcome = gc._attempt_roll_out_of_jail(player_id, params)
+        dice_rolled = action_outcome.get("dice_roll", gc.dice) 
+        got_out = action_outcome.get("got_out", False)
+        message = action_outcome.get("message", f"Roll for doubles (in jail): Dice {dice_rolled}, Got out: {got_out}.")
+        
+        result = {"status": action_outcome.get("status"), "message": message, "dice_roll": dice_rolled, "got_out": got_out}
+        _log_agent_action(gc, player_id, "tool_roll_for_doubles_to_get_out_of_jail", params, result)
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
 
@@ -294,26 +305,41 @@ def tool_withdraw_from_auction(gc: Any, player_id: int) -> Dict[str, Any]:
     except Exception as e: return {"status": "error", "message": str(e)}
 
 # --- Trade Tools ---
-def tool_propose_trade(gc: Any, player_id: int, recipient_player_id: int,
-                         offered_property_ids: Optional[List[int]] = None, offered_money: int = 0, offered_gooj_cards: int = 0,
-                         requested_property_ids: Optional[List[int]] = None, requested_money: int = 0, requested_gooj_cards: int = 0) -> Dict[str, Any]:
+def tool_propose_trade(gc: Any, player_id: int, recipient_id: int,
+                         offered_property_ids: Optional[List[int]] = None, offered_money: int = 0, offered_get_out_of_jail_free_cards: int = 0,
+                         requested_property_ids: Optional[List[int]] = None, requested_money: int = 0, requested_get_out_of_jail_free_cards: int = 0,
+                         message: Optional[str] = None) -> Dict[str, Any]:
     try:
-        if player_id == recipient_player_id: return {"status": "failure", "message": "Cannot propose trade to oneself."}
-        if not (0 <= recipient_player_id < len(gc.players)) or gc.players[recipient_player_id].is_bankrupt:
-             return {"status": "failure", "message": f"Invalid or bankrupt recipient P{recipient_player_id}."}
+        if player_id == recipient_id: return {"status": "failure", "message": "Cannot propose trade to oneself."}
+        if not (0 <= recipient_id < len(gc.players)) or gc.players[recipient_id].is_bankrupt:
+             return {"status": "failure", "message": f"Invalid or bankrupt recipient P{recipient_id}."}
 
-        trade_id = gc.propose_trade_action(player_id, recipient_player_id, 
-                                         offered_property_ids or [], offered_money or 0, offered_gooj_cards or 0,
-                                         requested_property_ids or [], requested_money or 0, requested_gooj_cards or 0)
+        trade_id = gc.propose_trade_action(player_id, recipient_id, 
+                                         offered_property_ids or [], offered_money or 0, offered_get_out_of_jail_free_cards or 0,
+                                         requested_property_ids or [], requested_money or 0, requested_get_out_of_jail_free_cards or 0,
+                                         message=message
+                                         )
         status = "success" if trade_id is not None else "failure"
-        message = f"Trade proposal to P{recipient_player_id} ({gc.players[recipient_player_id].name}): {status}."
-        if trade_id is not None: message += f" Trade ID: {trade_id}"
-        else: message += " (Proposal failed validation in GC - check logs)."
-        result = {"status": status, "message": message, "trade_id": trade_id}
-        params_log = {k:v for k,v in locals().items() if k not in ['gc', 'player_id', 'result', 'status', 'message', 'trade_id','params_log'] and v is not None and not (isinstance(v, list) and not v) and v !=0 }
+        log_message_str = f"Trade proposal to P{recipient_id} ({gc.players[recipient_id].name}): {status}."
+        if trade_id is not None: log_message_str += f" Trade ID: {trade_id}"
+        else: log_message_str += " (Proposal failed validation in GC - check logs)."
+        
+        params_log = {
+            "recipient_id": recipient_id,
+            "offered_property_ids": offered_property_ids or [],
+            "offered_money": offered_money or 0,
+            "offered_get_out_of_jail_free_cards": offered_get_out_of_jail_free_cards or 0,
+            "requested_property_ids": requested_property_ids or [],
+            "requested_money": requested_money or 0,
+            "requested_get_out_of_jail_free_cards": requested_get_out_of_jail_free_cards or 0,
+            "message": message
+        }
+        result = {"status": status, "message": log_message_str, "trade_id": trade_id}
         _log_agent_action(gc, player_id, "tool_propose_trade", params_log, result)
         return result
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e: 
+        gc.log_event(f"[Tool Exception] tool_propose_trade: {e}", "error_log")
+        return {"status": "error", "message": str(e)}
 
 def tool_accept_trade(gc: Any, player_id: int, trade_id: Optional[int] = None) -> Dict[str, Any]:
     try:
@@ -321,11 +347,10 @@ def tool_accept_trade(gc: Any, player_id: int, trade_id: Optional[int] = None) -
         if tid is None: return {"status": "failure", "message": "Trade ID missing for accept."}
         if not (gc.pending_decision_type == "respond_to_trade_offer" and gc.pending_decision_context.get("trade_id") == tid and gc.pending_decision_context.get("player_id") == player_id):
             return {"status": "failure", "message": f"Not in state to accept trade {tid}. Pend: '{gc.pending_decision_type}', CtxP: {gc.pending_decision_context.get('player_id')}"}
-
         success = gc._respond_to_trade_offer_action(player_id, tid, "accept")
-        message = f"Accepted trade {tid}: {'OK' if success else 'FAIL'}."
-        if not success: message += " (Conditions may have changed or transfer failed - see GC logs)"
-        result = {"status": "success" if success else "failure", "message": message}
+        log_message_str = f"Accepted trade {tid}: {'OK' if success else 'FAIL'}."
+        if not success: log_message_str += " (Conditions may have changed or transfer failed - see GC logs)"
+        result = {"status": "success" if success else "failure", "message": log_message_str}
         _log_agent_action(gc, player_id, "tool_accept_trade", {"trade_id": tid}, result)
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
@@ -336,7 +361,6 @@ def tool_reject_trade(gc: Any, player_id: int, trade_id: Optional[int] = None) -
         if tid is None: return {"status": "failure", "message": "Trade ID missing for reject."}
         if not (gc.pending_decision_type == "respond_to_trade_offer" and gc.pending_decision_context.get("trade_id") == tid and gc.pending_decision_context.get("player_id") == player_id):
             return {"status": "failure", "message": "Not in state to reject this trade."}
-
         success = gc._respond_to_trade_offer_action(player_id, tid, "reject")
         result = {"status": "success" if success else "failure", "message": f"Rejected trade {tid}: {'OK' if success else 'FAIL'}."}
         _log_agent_action(gc, player_id, "tool_reject_trade", {"trade_id": tid}, result)
@@ -344,25 +368,54 @@ def tool_reject_trade(gc: Any, player_id: int, trade_id: Optional[int] = None) -
     except Exception as e: return {"status": "error", "message": str(e)}
 
 def tool_propose_counter_offer(gc: Any, player_id: int, trade_id: Optional[int] = None, 
-                                 offered_property_ids: Optional[List[int]] = None, offered_money: int = 0, offered_gooj_cards: int = 0,
-                                 requested_property_ids: Optional[List[int]] = None, requested_money: int = 0, requested_gooj_cards: int = 0) -> Dict[str, Any]:
+                                 offered_property_ids: Optional[List[int]] = None, offered_money: int = 0, offered_get_out_of_jail_free_cards: int = 0,
+                                 requested_property_ids: Optional[List[int]] = None, requested_money: int = 0, requested_get_out_of_jail_free_cards: int = 0,
+                                 counter_message: Optional[str] = None) -> Dict[str, Any]:
     try:
         original_trade_id = trade_id if trade_id is not None else gc.pending_decision_context.get("trade_id")
         if original_trade_id is None: return {"status": "failure", "message": "Original Trade ID missing for counter."}
-        if not (gc.pending_decision_type == "respond_to_trade_offer" and gc.pending_decision_context.get("trade_id") == original_trade_id and gc.pending_decision_context.get("player_id") == player_id):
+        
+        if not (gc.pending_decision_type == "respond_to_trade_offer" and 
+                gc.pending_decision_context.get("trade_id") == original_trade_id and 
+                gc.pending_decision_context.get("player_id") == player_id):
             return {"status": "failure", "message": "Not in state to counter this trade."}
 
         success = gc._respond_to_trade_offer_action(player_id, original_trade_id, "counter_offer",
-                                                 counter_offered_prop_ids=offered_property_ids or [], counter_offered_money=offered_money or 0,
-                                                 counter_offered_gooj_cards=offered_gooj_cards or 0, requested_property_ids=requested_property_ids or [],
-                                                 requested_money=requested_money or 0, requested_gooj_cards=requested_gooj_cards or 0)
-        message = f"Counter-offer to trade {original_trade_id}: {'OK' if success else 'FAIL'}."
-        if not success: message += " (Counter proposal failed validation - see GC logs)"
-        result = {"status": "success" if success else "failure", "message": message}
-        params_log = {k:v for k,v in locals().items() if k not in ['gc', 'player_id', 'result', 'message', 'success', 'original_trade_id', 'trade_id', 'params_log'] and v is not None and not (isinstance(v, list) and not v) and v !=0 }
+                                                 counter_offered_prop_ids=offered_property_ids or [], 
+                                                 counter_offered_money=offered_money or 0,
+                                                 counter_offered_gooj_cards=offered_get_out_of_jail_free_cards or 0, 
+                                                 requested_property_ids=requested_property_ids or [],
+                                                 requested_money=requested_money or 0, 
+                                                 requested_gooj_cards=requested_get_out_of_jail_free_cards or 0,
+                                                 counter_message=counter_message
+                                                 )
+        log_message_str = f"Counter-offer to trade {original_trade_id}: {'OK' if success else 'FAIL'}."
+        if not success: log_message_str += " (Counter proposal failed validation - see GC logs)"
+        result = {"status": "success" if success else "failure", "message": log_message_str}
+        
+        params_log = {
+            "trade_id": original_trade_id,
+            "offered_property_ids": offered_property_ids or [], "offered_money": offered_money or 0, "offered_get_out_of_jail_free_cards": offered_get_out_of_jail_free_cards or 0,
+            "requested_property_ids": requested_property_ids or [], "requested_money": requested_money or 0, "requested_get_out_of_jail_free_cards": requested_get_out_of_jail_free_cards or 0,
+            "counter_message": counter_message
+        }
         _log_agent_action(gc, player_id, "tool_propose_counter_offer", params_log, result)
         return result
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e: 
+        gc.log_event(f"[Tool Exception] tool_propose_counter_offer: {e}", "error_log")
+        return {"status": "error", "message": str(e)}
+
+def tool_end_trade_negotiation(gc: Any, player_id: int, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Player (original proposer) decides to end the trade negotiation after their offer was rejected."""
+    if params is None: params = {}
+    try:
+        action_result = gc._end_trade_negotiation_action(player_id, params)
+        
+        _log_agent_action(gc, player_id, "tool_end_trade_negotiation", params, action_result)
+        return action_result
+    except Exception as e:
+        gc.log_event(f"[Tool Exception] tool_end_trade_negotiation: {e}", "error_log")
+        return {"status": "error", "message": str(e)}
 
 # --- Tools for Handling Received Mortgaged Property ---
 def tool_pay_mortgage_interest_fee(gc: Any, player_id: int, property_id: Optional[int] = None) -> Dict[str, Any]:

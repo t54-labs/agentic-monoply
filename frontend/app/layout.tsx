@@ -22,7 +22,7 @@ const quantico = Quantico({
 });
 
 export const metadata: Metadata = {
-  title: "Monopoly Game Viewer", // Updated title
+  title: "Agentic Monopoly v0.1", // Updated title
   description: "View live Monopoly game data and agent decisions.", // Updated description
 };
 

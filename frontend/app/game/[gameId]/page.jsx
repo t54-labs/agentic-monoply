@@ -32,6 +32,55 @@ export default function GamePage() {
     // Define player colors, consistent with MonopolyBoard.jsx
     const playerColors = ['#ff6347', '#4682b4', '#32cd32', '#ffd700', '#EE82EE', '#A52A2A']; // Tomato, SteelBlue, LimeGreen, Gold, Violet, Brown
 
+    // Function to get avatar for player (consistent with lobby)
+    const getPlayerAvatar = (playerId) => {
+        const avatarIndex = (playerId % 8) + 1; // 1 to 8
+        return `/avatar_${avatarIndex}.png`;
+    };
+
+    // Avatar error handling
+    const handleAvatarError = (event, playerId) => {
+        console.error(`Failed to load avatar for player ${playerId}`);
+        const currentSrc = event.currentTarget.src;
+        const currentAvatarMatch = currentSrc.match(/avatar_(\d+)\.png/);
+        
+        if (currentAvatarMatch) {
+            const currentAvatarNum = parseInt(currentAvatarMatch[1]);
+            const nextAvatarNum = currentAvatarNum >= 8 ? 1 : currentAvatarNum + 1;
+            const nextAvatarPath = `/avatar_${nextAvatarNum}.png`;
+            
+            if (event.currentTarget.dataset.retryCount) {
+                const retryCount = parseInt(event.currentTarget.dataset.retryCount);
+                if (retryCount >= 8) {
+                    // All avatars failed, show colored backup
+                    event.currentTarget.style.display = 'none';
+                    const parent = event.currentTarget.parentElement;
+                    if (parent) {
+                        parent.style.backgroundColor = playerColors[playerId % playerColors.length];
+                        parent.style.border = '2px solid white';
+                        parent.innerHTML = playerId.toString();
+                        parent.style.color = 'white';
+                        parent.style.fontSize = '14px';
+                        parent.style.fontWeight = 'bold';
+                        parent.style.display = 'flex';
+                        parent.style.alignItems = 'center';
+                        parent.style.justifyContent = 'center';
+                    }
+                    return;
+                } else {
+                    event.currentTarget.dataset.retryCount = (retryCount + 1).toString();
+                }
+            } else {
+                event.currentTarget.dataset.retryCount = '1';
+            }
+            
+            event.currentTarget.src = nextAvatarPath;
+        } else {
+            event.currentTarget.src = '/avatar_1.png';
+            event.currentTarget.dataset.retryCount = '1';
+        }
+    };
+
     const appendToLog = (logSetter, newEntry, maxEntries = MAX_LOG_ENTRIES) => {
         logSetter(prevLog => {
             const updatedLog = [...prevLog, newEntry];
@@ -200,12 +249,17 @@ export default function GamePage() {
         container: {
             fontFamily: "'Quantico', sans-serif",
             padding: '10px',
-            backgroundColor: '#000000',
-            color: '#00FF00',
+            backgroundImage: 'url(/lobby_bg.png)', // Use Studio Ghibli style background
+            backgroundSize: 'cover',
+            backgroundPosition: 'center',
+            backgroundRepeat: 'no-repeat',
+            backgroundAttachment: 'fixed',
+            color: '#FFFFFF', // Changed to white for better visibility on background
             minHeight: '100vh',
             display: 'flex',
             flexDirection: 'column',
             imageRendering: 'pixelated',
+            position: 'relative',
         },
         gamePageLayout: {
             display: 'flex',
@@ -213,6 +267,8 @@ export default function GamePage() {
             gap: '15px',
             width: '100%',
             flexGrow: 1,
+            position: 'relative',
+            zIndex: 2,
         },
         leftPanel: {
             flex: '4', 
@@ -222,13 +278,20 @@ export default function GamePage() {
             minWidth: '750px', 
         },
         boardSection: { 
-            backgroundColor: '#181818', 
-            border: '4px solid #00CC00',
-            boxShadow: '4px 4px 0px #008800',
+            // Professional nine-slice implementation (board uses slightly larger border)
+            borderImageSource: 'url(/bg_4.png)',
+            borderImageSlice: '200 fill',
+            borderImageRepeat: 'repeat',
+            borderStyle: 'solid',
+            borderWidth: '40px',
+            borderColor: 'transparent',
             flexGrow: 1, 
             overflow: 'hidden', 
             display: 'flex',
             flexDirection: 'column',
+            backgroundColor: 'transparent',
+            background: 'none',
+            borderRadius: '0',
         },
         rightPanel: {
             flex: '1',
@@ -242,26 +305,43 @@ export default function GamePage() {
             fontFamily: "'Quantico', sans-serif",
         },
         gameInfoSection: { 
-            backgroundColor: '#181818',
-            border: '2px solid #00CC00', 
-            padding: '5px 8px', 
-            boxShadow: '2px 2px 0px #008800', 
-            fontFamily: "'Quantico', sans-serif",
+            // Professional nine-slice implementation
+            borderImageSource: 'url(/bg_4.png)',
+            borderImageSlice: '200 fill',
+            borderImageRepeat: 'repeat',
+            borderStyle: 'solid',
+            borderWidth: '30px',
+            borderColor: 'transparent',
+            
+            padding: '8px 15px',
+            marginBottom: '0',
+            backgroundColor: 'transparent',
+            background: 'none',
+            borderRadius: '0',
         },
         gameInfoTextSmall: { 
-            fontSize: '10px',
+            fontSize: '14px', // Increased from 10px to 14px
             lineHeight: '1.4',
-            color: '#00FF00',
+            color: '#F5E6D3', // Light cream color for better visibility
             fontFamily: "'Quantico', sans-serif",
             marginBottom: '5px',
             marginTop: '5px',
+            fontWeight: 'bold', // Increased font weight for better readability
         },
         section: { 
-            backgroundColor: '#181818',
-            border: '4px solid #00CC00',
-            padding: '10px',
+            // Professional nine-slice implementation
+            borderImageSource: 'url(/bg_4.png)',
+            borderImageSlice: '200 fill',
+            borderImageRepeat: 'repeat',
+            borderStyle: 'solid',
+            borderWidth: '30px',
+            borderColor: 'transparent',
+            
+            padding: '15px',
             marginBottom: '0',
-            boxShadow: '4px 4px 0px #008800',
+            backgroundColor: 'transparent',
+            background: 'none',
+            borderRadius: '0',
         },
         header: {
             textAlign: 'center',
@@ -273,83 +353,119 @@ export default function GamePage() {
             textShadow: '2px 2px #FF00FF', // Magenta shadow for more pop
         },
         sectionTitle: {
-            fontSize: '16px', // Adjust for pixel font
-            color: '#FFFFFF', // White title for contrast
+            fontSize: '18px', // Increased from 16px to 18px
+            color: '#F5E6D3', // Light cream color for better visibility
             marginBottom: '8px',
-            borderBottom: '2px solid #00FF00',
+            borderBottom: '2px solid #D2B48C', // Changed to light tan border line
             paddingBottom: '4px',
             textTransform: 'uppercase',
+            textShadow: 'none', // Remove shadow
+            fontWeight: 'bold', // Increased font weight
         },
         infoText: {
-            fontSize: '12px', // Adjust for pixel font
+            fontSize: '14px', // Increased from 12px to 14px
             lineHeight: '1.6',
-            color: '#00FF00', // Green text
+            color: '#F5E6D3', // Light cream color for better visibility
+            fontWeight: 'bold', // Increased font weight
         },
         infoValue: {
-            color: '#FFFFFF',
-            backgroundColor: '#0A0A0A', // Adjusted for black background
+            color: '#FFB6C1', // Light pink to highlight important info
+            backgroundColor: 'rgba(255, 255, 255, 0.2)', // Light semi-transparent background
             padding: '2px 4px',
-            border: '2px solid #00FF00',
+            border: '1px solid #D2B48C', // Light tan border
+            borderRadius: '3px', // Small rounded corners
+            fontWeight: 'bold',
         },
         statusConnected: {
-            color: '#00FF00', // Bright green for connected
+            color: '#006400', // Dark green for connected
             fontWeight: 'bold',
+            textShadow: 'none',
         },
         statusDisconnected: {
-            color: '#FF0000', // Bright red for disconnected
+            color: '#FFB6C1', // Light pink for disconnected
             fontWeight: 'bold',
+            textShadow: 'none',
         },
         logPanelSection: { 
-            backgroundColor: '#181818',
-            border: '4px solid #00CC00',
-            padding: '10px',
+            borderImageSource: 'url(/bg_4.png)',
+            borderImageSlice: '200 fill',
+            borderImageRepeat: 'repeat',
+            borderStyle: 'solid',
+            borderWidth: '30px',
+            borderColor: 'transparent',
+            
+            padding: '15px',
             marginBottom: '0',
-            boxShadow: '4px 4px 0px #008800',
             display: 'flex', 
             flexDirection: 'column',
             overflow: 'hidden', 
             fontFamily: "'Quantico', sans-serif",
+            backgroundColor: 'transparent',
+            background: 'none',
+            borderRadius: '0',
         },
-        playerSection: { // Specific style for player section to control its height
-            backgroundColor: '#181818',
-            border: '4px solid #00CC00',
-            padding: '10px',
-            boxShadow: '4px 4px 0px #008800',
-            flexShrink: 0, // Prevent this section from shrinking
+        playerSection: { 
+            borderImageSource: 'url(/bg_4.png)',
+            borderImageSlice: '200 fill',
+            borderImageRepeat: 'repeat',
+            borderStyle: 'solid',
+            borderWidth: '30px',
+            borderColor: 'transparent',
+            
+            padding: '15px',
+            flexShrink: 0,
+            backgroundColor: 'transparent',
+            background: 'none',
+            borderRadius: '0',
         },
-        agentThoughtsSection: { // Specific style for agent thoughts to make it grow
-            backgroundColor: '#181818',
-            border: '4px solid #00CC00',
-            padding: '10px',
-            boxShadow: '4px 4px 0px #008800',
+        agentThoughtsSection: { 
+            borderImageSource: 'url(/bg_4.png)',
+            borderImageSlice: '200 fill',
+            borderImageRepeat: 'repeat',
+            borderStyle: 'solid',
+            borderWidth: '30px',
+            borderColor: 'transparent',
+            
+            padding: '15px',
             display: 'flex',
             flexDirection: 'column',
             overflow: 'hidden',
-            flexGrow: 3, // Make this section grow more
-            minHeight: '200px', // Ensure it has a decent minimum height
+            flexGrow: 5,
+            minHeight: '300px',
             fontFamily: "'Quantico', sans-serif",
+            backgroundColor: 'transparent',
+            background: 'none',
+            borderRadius: '0',
         },
-        gameLogSection: { // Specific style for game log, less growth
-            backgroundColor: '#181818',
-            border: '4px solid #00CC00',
-            padding: '10px',
-            boxShadow: '4px 4px 0px #008800',
+        gameLogSection: { 
+            borderImageSource: 'url(/bg_4.png)',
+            borderImageSlice: '200 fill',
+            borderImageRepeat: 'repeat',
+            borderStyle: 'solid',
+            borderWidth: '30px',
+            borderColor: 'transparent',
+            
+            padding: '15px',
             display: 'flex',
             flexDirection: 'column',
             overflow: 'hidden',
-            flexGrow: 1, // Make this section grow less
-            minHeight: '150px', // Ensure it has a decent minimum height
+            flexGrow: 1,
+            minHeight: '150px',
             fontFamily: "'Quantico', sans-serif",
+            backgroundColor: 'transparent',
+            background: 'none',
+            borderRadius: '0',
         },
         logDisplay: {
-            backgroundColor: '#0A0A0A',
-            border: '2px solid #00FF00',
+            backgroundColor: 'rgba(139, 69, 19, 0.1)', 
+            border: '2px solid #D2B48C', 
+            borderRadius: '6px', 
             padding: '8px',
             height: '200px', 
             overflowY: 'scroll',
-            fontSize: '12px', // Increased font size for Agent Thoughts, Game Log
-            lineHeight: '1.6', // Adjusted line height
-            color: '#00FF00',
+            fontSize: '14px',
+            lineHeight: '1.6',
+            color: '#F5E6D3', 
             fontFamily: "'Quantico', sans-serif",
             flexGrow: 1,
             minHeight: '100px',
@@ -360,13 +476,15 @@ export default function GamePage() {
             fontFamily: "'Quantico', sans-serif",
         },
         errorLog: {
-            color: '#FF6347', // Tomato red for errors
+            color: '#FFB6C1', 
+            fontWeight: 'bold',
         },
         infoLog: {
-             color: '#00FF00', // Green for info
+             color: '#F5E6D3',
         },
         actionResultLog: {
-            color: '#FFFF00', // Yellow for action results
+            color: '#DEB887', 
+            fontWeight: 'bold',
         },
         playerCardContainer: {
             display: 'flex',
@@ -376,9 +494,8 @@ export default function GamePage() {
         playerCard: {
             border: '3px solid #00FFFF',
             padding: '10px',
-            backgroundColor: '#1C1C1C', // Adjusted for black background
+            backgroundColor: 'rgba(28, 28, 28, 0.9)', 
             minWidth: '250px',
-            boxShadow: '3px 3px 0px #00AAAA',
         },
         playerCardTitle: {
             fontSize: '14px',
@@ -386,6 +503,7 @@ export default function GamePage() {
             borderBottom: '2px solid #FFFF00',
             paddingBottom: '3px',
             marginBottom: '6px',
+            textShadow: '1px 1px 2px rgba(0, 0, 0, 0.8)',
         },
         playerPropertiesList: {
             listStyleType: 'none',
@@ -404,80 +522,120 @@ export default function GamePage() {
         playerIcon: { 
             width: '52px',
             height: '52px',
-            border: '2px solid #00FFFF',
+            border: 'none', 
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            backgroundColor: '#282828', 
+            backgroundColor: 'transparent', 
             cursor: 'pointer',
-            boxShadow: '2px 2px 0px #00AAAA',
+            boxShadow: 'none', 
             fontFamily: "'Quantico', sans-serif",
             padding: '3px',
+            borderRadius: '50%', 
         },
         playerDetailTooltip: { 
             position: 'absolute', 
-            backgroundColor: '#1E1E1E',
-            border: '3px solid #FFFF00',
+            backgroundImage: 'url(/hover_bg.png)', 
+            backgroundSize: '100% 100%', 
+            backgroundPosition: 'center',
+            backgroundRepeat: 'no-repeat',
+            border: 'none', 
             padding: '15px',
             zIndex: 1000,
-            color: '#FFFFFF',
+            color: '#000000', 
             minWidth: '300px',
-            boxShadow: '4px 4px 0px #AAAA00',
+            boxShadow: 'none', 
             fontFamily: "'Quantico', sans-serif", 
-            fontSize: '12px',
-            maxHeight: 'none', // Explicitly allow full height
-            overflowY: 'visible',   // Explicitly allow full height
+            fontSize: '16px',
+            maxHeight: 'none',
+            overflowY: 'visible',
+            borderRadius: '8px',
         },
         playerPropertiesListSmall: { 
             listStyleType: 'none',
             paddingLeft: '0',
-            fontSize: '10px',
+            fontSize: '14px', // Increased from 10px to 14px
             maxHeight: 'none', // Explicitly allow full height
             overflowY: 'visible', // Explicitly allow full height
-            border: '1px dashed #00FF00',
+            border: '1px dashed #D2B48C', // Light tan border
             padding: '5px',
             marginTop: '5px',
-            backgroundColor: '#101010',
+            backgroundColor: 'rgba(255, 255, 255, 0.1)', // Light semi-transparent background
             fontFamily: "'Quantico', sans-serif",
+            color: '#F5E6D3', // Light cream color
         },
         squareDetailTooltip: { // Style for the square detail popup
             position: 'fixed', 
             bottom: '10px',
             left: '10px',
-            backgroundColor: '#1E1E1E',
-            border: '3px solid #FF8C00',
+            backgroundImage: 'url(/hover_bg.png)', // Use hover background image
+            backgroundSize: '100% 100%', // Force stretch to full size
+            backgroundPosition: 'center',
+            backgroundRepeat: 'no-repeat',
+            border: 'none', // Remove border
             padding: '10px', // Reduced padding
             zIndex: 1050, 
-            color: '#FFFFFF',
+            color: '#2D2D2D', // Dark gray for better visibility on hover background
             minWidth: '250px',
             maxWidth: '300px',
             maxHeight: '200px', // Added maxHeight
             overflowY: 'auto', // Added overflowY for scrolling
-            boxShadow: '4px 4px 0px #CC7000', 
+            boxShadow: 'none', // Remove shadow effect
             fontFamily: "'Quantico', sans-serif",
-            fontSize: '11px',
+            fontSize: '15px', // Increased from 11px to 15px
             lineHeight: '1.5',
+            borderRadius: '8px', // Add rounded corners for softer edges
         },
         tooltipTitle: {
-            fontSize: '14px',
-            color: '#FFFF00',
-            borderBottom: '1px solid #FFFF00',
+            fontSize: '18px', // Increased from 14px to 18px
+            color: '#0066CC', // Blue color for hover background visibility
+            borderBottom: '1px solid #0066CC',
             paddingBottom: '3px',
             marginBottom: '6px',
             fontFamily: "'Quantico', sans-serif",
+            fontWeight: 'bold',
         },
         tooltipSection: {
             marginTop: '5px',
             fontFamily: "'Quantico', sans-serif",
         },
         tooltipDetail: {
-            color: '#00FF00', // Green for detail labels
+            color: '#2D2D2D', // Dark gray for detail labels on hover background
             fontFamily: "'Quantico', sans-serif",
+            fontWeight: 'bold',
+            fontSize: '14px', // Explicit font size
         },
         tooltipValue: {
-            color: '#FFFFFF', // White for values
+            color: '#2D2D2D', // Dark gray for values on hover background
             marginLeft: '5px',
             fontFamily: "'Quantico', sans-serif",
+            fontSize: '14px', // Explicit font size
+        },
+        // Nine-slice component styles (more reliable implementation)
+        nineSliceContainer: {
+            position: 'relative',
+            display: 'grid',
+            gridTemplateColumns: '20px 1fr 20px',
+            gridTemplateRows: '20px 1fr 20px',
+            width: '100%',
+            height: '100%',
+            minHeight: '100px',
+        },
+        nineSliceCorner: {
+            backgroundImage: 'url(/bg_2.png)',
+            backgroundRepeat: 'no-repeat',
+        },
+        nineSliceEdge: {
+            backgroundImage: 'url(/bg_2.png)',
+        },
+        nineSliceCenter: {
+            backgroundImage: 'url(/bg_2.png)',
+            backgroundSize: 'cover',
+            gridColumn: '2',
+            gridRow: '2',
+            padding: '15px',
+            display: 'flex',
+            flexDirection: 'column',
         },
     };
 
@@ -697,10 +855,21 @@ export default function GamePage() {
                     {/* Right Panel */}
                     <div style={pixelStyles.rightPanel} ref={rightPanelRef}>
                         <section style={pixelStyles.gameInfoSection}> 
-                            <h2 style={{...pixelStyles.sectionTitle, fontSize: '12px', marginBottom: '3px', paddingBottom: '2px'}}>Game Info</h2> 
-                            <div style={pixelStyles.gameInfoTextSmall}>ID: <span style={pixelStyles.infoValue}>{gameId || 'N/A'}</span></div> 
-                            <div style={pixelStyles.gameInfoTextSmall}> 
-                                Status: <span style={connectionStatus === 'Connected' ? pixelStyles.statusConnected : pixelStyles.statusDisconnected}>{connectionStatus}</span>
+                            <h2 style={{...pixelStyles.sectionTitle, fontSize: '12px', marginBottom: '2px', paddingBottom: '1px'}}>Game Info</h2> 
+                            <div style={{...pixelStyles.gameInfoTextSmall, display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                                <span>ID: <span style={pixelStyles.infoValue}>{gameId || 'N/A'}</span></span>
+                                <span style={{display: 'flex', alignItems: 'center', gap: '5px'}}>
+                                    <span style={{
+                                        width: '8px', 
+                                        height: '8px', 
+                                        borderRadius: '50%', 
+                                        backgroundColor: connectionStatus === 'Connected' ? '#006400' : '#8B0000',
+                                        display: 'inline-block'
+                                    }}></span>
+                                    <span style={connectionStatus === 'Connected' ? pixelStyles.statusConnected : pixelStyles.statusDisconnected}>
+                                        {connectionStatus === 'Connected' ? 'Online' : 'Offline'}
+                                    </span>
+                                </span>
                             </div>
                     </section>
 
@@ -727,15 +896,23 @@ export default function GamePage() {
                                         onMouseEnter={(event) => handlePlayerIconMouseEnter(playerData, event)}
                                         onMouseLeave={handlePlayerAreaMouseLeave}
                                     >
-                                        <svg viewBox="0 0 16 16" width="40px" height="40px" fill={playerColors[playerData.my_player_id % playerColors.length]} xmlns="http://www.w3.org/2000/svg" style={{ display: 'block', margin: 'auto' }}>
-                                            <rect x="6" y="2" width="4" height="2" /> 
-                                            <rect x="5" y="4" width="6" height="2" /> 
-                                            <rect x="4" y="6" width="8" height="6" /> 
-                                            <rect x="2" y="12" width="12" height="2" /> 
-                                        </svg>
+                                        <img 
+                                            src={getPlayerAvatar(playerData.my_player_id)} 
+                                            alt={`Player ${playerData.my_player_id} avatar`} 
+                                            onError={(event) => handleAvatarError(event, playerData.my_player_id)} 
+                                            style={{ 
+                                                width: '40px', 
+                                                height: '40px', 
+                                                                                borderRadius: '50%', // Circular display
+                                objectFit: 'cover', // Maintain image aspect ratio
+                                                display: 'block', 
+                                                margin: 'auto',
+                                                border: '2px solid #00FFFF' // Maintain consistent border
+                                            }} 
+                                        />
                                 </div>
                             ))}
-                                {Object.keys(playerCards).length === 0 && <p style={{...pixelStyles.infoText, fontSize: '10px'}}>Waiting...</p>}
+                                {Object.keys(playerCards).length === 0 && <p style={{...pixelStyles.infoText, fontSize: '14px', color: '#F5E6D3'}}>Waiting...</p>}
                         </div>
                     </section>
 
@@ -749,12 +926,12 @@ export default function GamePage() {
                                 }}
                                 onMouseLeave={handlePlayerAreaMouseLeave}
                             >
-                                <h3 style={{...pixelStyles.playerCardTitle, fontSize: '14px'}}>{hoveredPlayer.my_name} (P{hoveredPlayer.my_player_id}) {hoveredPlayer.is_bankrupt ? <span style={{color:'#FF0000'}}>[KO]</span>: ''}</h3>
-                                <p style={{...pixelStyles.infoText, fontSize: '11px'}}>Money: <span style={pixelStyles.infoValue}>${hoveredPlayer.my_money}</span></p>
-                                <p style={{...pixelStyles.infoText, fontSize: '11px'}}>Position: <span style={pixelStyles.infoValue}>{hoveredPlayer.my_position_name} ({hoveredPlayer.my_position})</span></p>
-                                <p style={{...pixelStyles.infoText, fontSize: '11px'}}>In Jail: <span style={pixelStyles.infoValue}>{String(hoveredPlayer.my_in_jail)} {hoveredPlayer.my_in_jail ? `(${hoveredPlayer.my_jail_turns_remaining} turns)` : ''}</span></p>
-                                <p style={{...pixelStyles.infoText, fontSize: '11px'}}>GOOJ: C:<span style={pixelStyles.infoValue}>{hoveredPlayer.my_get_out_of_jail_cards?.chance || 0}</span>,CC:<span style={pixelStyles.infoValue}>{hoveredPlayer.my_get_out_of_jail_cards?.community_chest || 0}</span></p>
-                                <p style={{...pixelStyles.infoText, fontSize: '11px'}}>Props ({(hoveredPlayer.my_properties_owned_ids || []).length}):</p>
+                                <h3 style={{...pixelStyles.playerCardTitle, fontSize: '18px', color: '#2D2D2D'}}>{hoveredPlayer.my_name} (P{hoveredPlayer.my_player_id}) {hoveredPlayer.is_bankrupt ? <span style={{color:'#FF6666'}}>[KO]</span>: ''}</h3>
+                                <p style={{...pixelStyles.infoText, fontSize: '15px', color: '#2D2D2D'}}>Money: <span style={{...pixelStyles.infoValue, color: '#2D2D2D', backgroundColor: 'rgba(255, 255, 255, 0.3)'}}>${hoveredPlayer.my_money}</span></p>
+                                <p style={{...pixelStyles.infoText, fontSize: '15px', color: '#2D2D2D'}}>Position: <span style={{...pixelStyles.infoValue, color: '#2D2D2D', backgroundColor: 'rgba(255, 255, 255, 0.3)'}}>{hoveredPlayer.my_position_name} ({hoveredPlayer.my_position})</span></p>
+                                <p style={{...pixelStyles.infoText, fontSize: '15px', color: '#2D2D2D'}}>In Jail: <span style={{...pixelStyles.infoValue, color: '#2D2D2D', backgroundColor: 'rgba(255, 255, 255, 0.3)'}}>{String(hoveredPlayer.my_in_jail)} {hoveredPlayer.my_in_jail ? `(${hoveredPlayer.my_jail_turns_remaining} turns)` : ''}</span></p>
+                                <p style={{...pixelStyles.infoText, fontSize: '15px', color: '#2D2D2D'}}>GOOJ: C:<span style={{...pixelStyles.infoValue, color: '#2D2D2D', backgroundColor: 'rgba(255, 255, 255, 0.3)'}}>{hoveredPlayer.my_get_out_of_jail_cards?.chance || 0}</span>,CC:<span style={{...pixelStyles.infoValue, color: '#2D2D2D', backgroundColor: 'rgba(255, 255, 255, 0.3)'}}>{hoveredPlayer.my_get_out_of_jail_cards?.community_chest || 0}</span></p>
+                                <p style={{...pixelStyles.infoText, fontSize: '15px', color: '#2D2D2D'}}>Props ({(hoveredPlayer.my_properties_owned_ids || []).length}):</p>
                                 <ul style={pixelStyles.playerPropertiesListSmall}>
                                     {(hoveredPlayer.my_properties_owned_ids || []).map(propId => {
                                         const prop = (hoveredPlayer.board_squares || []).find(sq => sq.id === propId);
@@ -764,9 +941,9 @@ export default function GamePage() {
                                             if (prop.num_houses === 5) details += ' (H)';
                                             else if (prop.num_houses > 0) details += ` (${prop.num_houses}h)`;
                                         }
-                                        return <li key={propId} style={{...pixelStyles.propertyItem, fontSize: '9px'}}>{details}</li>;
+                                        return <li key={propId} style={{...pixelStyles.propertyItem, fontSize: '13px', color: '#2D2D2D'}}>{details}</li>;
                                     })}
-                                    {(hoveredPlayer.my_properties_owned_ids || []).length === 0 && <li style={{...pixelStyles.propertyItem, fontSize: '9px'}}>None</li>}
+                                    {(hoveredPlayer.my_properties_owned_ids || []).length === 0 && <li style={{...pixelStyles.propertyItem, fontSize: '13px', color: '#2D2D2D'}}>None</li>}
                                 </ul>
                             </div>
                         )}
@@ -787,7 +964,7 @@ export default function GamePage() {
                                     [{entry.timestamp}] {entry.message}
                                 </div>
                             ))}
-                            {agentThoughts.length === 0 && <p style={pixelStyles.infoText}>Waiting for agent actions...</p>}
+                            {agentThoughts.length === 0 && <p style={{...pixelStyles.infoText, fontSize: '14px', color: '#F5E6D3'}}>Waiting for agent actions...</p>}
                         </div>
                     </section>
 
@@ -803,7 +980,7 @@ export default function GamePage() {
                                     [{entry.timestamp}] {entry.message}
                                 </div>
                             ))}
-                            {gameLog.length === 0 && <p style={pixelStyles.infoText}>Waiting for game events...</p>}
+                            {gameLog.length === 0 && <p style={{...pixelStyles.infoText, fontSize: '14px', color: '#F5E6D3'}}>Waiting for game events...</p>}
                         </div>
                     </section>
                 </div>

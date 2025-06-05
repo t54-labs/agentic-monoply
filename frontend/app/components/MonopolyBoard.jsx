@@ -194,7 +194,7 @@ const MonopolyBoard = ({ boardSquares = [], playerStates = {}, activePlayerId = 
                     justify-content: center;
                     align-items: center;
                     padding: 10px; 
-                    background-color: #cde6d0; 
+                    background-color: transparent;
                     flex-grow: 1; 
                     overflow: hidden; 
                     font-family: 'Quantico', sans-serif; 
@@ -207,7 +207,7 @@ const MonopolyBoard = ({ boardSquares = [], playerStates = {}, activePlayerId = 
                     grid-template-rows: repeat(11, 1fr);    
                     border: 2px solid black;
                     box-shadow: 5px 5px 15px rgba(0,0,0,0.3);
-                    background-color: #f0f0f0; 
+                    background-color: rgba(240, 240, 240, 0.8);
                     word-break: break-word;
                     position: relative; 
                     font-family: inherit; 

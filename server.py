@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random  # Added for random turn delays
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Any, Optional
@@ -9,6 +10,12 @@ import uuid
 from contextlib import asynccontextmanager
 
 from game_logic.player import Player
+
+# Game simulation configuration
+CONCURRENT_GAMES_COUNT = 2  # Number of games to run simultaneously
+AUTO_RESTART_GAMES = True  # Whether to start new games when current ones finish
+GAME_COUNTER = 0  # Global counter for unique game numbering
+MAINTENANCE_INTERVAL = 30  # Seconds between game count maintenance checks
 
 # 1. Colorama setup & Global placeholders
 class Fore: CYAN=YELLOW=GREEN=RED=MAGENTA=WHITE=BLACK=BLUE=""; LIGHTBLACK_EX=LIGHTBLUE_EX=LIGHTCYAN_EX=LIGHTGREEN_EX=LIGHTMAGENTA_EX=LIGHTRED_EX=LIGHTWHITE_EX=LIGHTYELLOW_EX=""
@@ -75,7 +82,106 @@ class ConnectionManager:
 # 4. Create instance of ConnectionManager
 manager = ConnectionManager()
 
-# 5. Helper function definitions (_log_agent_action_to_db, start_monopoly_game_instance)
+# 5. Game management functions
+async def create_new_game_instance(app_instance: FastAPI) -> str:
+    """Create and start a new game instance"""
+    global GAME_COUNTER
+    GAME_COUNTER += 1
+    
+    game_uid = f"monopoly_game_{GAME_COUNTER}_{uuid.uuid4().hex[:6]}"
+    print(f"{Fore.GREEN}[Game Manager] Creating new game instance: {game_uid}{Style.RESET_ALL}")
+    
+    game_task = asyncio.create_task(start_monopoly_game_instance_with_restart(game_uid, manager, app_instance))
+    app_instance.state.game_tasks[game_uid] = game_task
+    
+    print(f"{Fore.GREEN}[Game Manager] Game {game_uid} task created and started{Style.RESET_ALL}")
+    return game_uid
+
+async def maintain_game_count(app_instance: FastAPI):
+    """Ensure we maintain the desired number of concurrent games"""
+    if not hasattr(app_instance.state, 'game_tasks'):
+        return
+        
+    # Count active (not done) game tasks
+    active_games = {uid: task for uid, task in app_instance.state.game_tasks.items() 
+                   if not task.done()}
+    
+    # Remove completed tasks from the registry
+    completed_games = [uid for uid, task in app_instance.state.game_tasks.items() if task.done()]
+    for completed_uid in completed_games:
+        print(f"{Fore.YELLOW}[Game Manager] Removing completed game {completed_uid} from registry{Style.RESET_ALL}")
+        del app_instance.state.game_tasks[completed_uid]
+    
+    # Start new games if needed
+    games_needed = CONCURRENT_GAMES_COUNT - len(active_games)
+    if games_needed > 0 and AUTO_RESTART_GAMES:
+        print(f"{Fore.CYAN}[Game Manager] Need to start {games_needed} new games (active: {len(active_games)}/{CONCURRENT_GAMES_COUNT}){Style.RESET_ALL}")
+        for _ in range(games_needed):
+            await create_new_game_instance(app_instance)
+
+async def start_monopoly_game_instance_with_restart(game_uid: str, connection_manager_param: ConnectionManager, app_instance: FastAPI):
+    """Wrapper for game instance that handles auto-restart"""
+    try:
+        await start_monopoly_game_instance(game_uid, connection_manager_param, app_instance)
+    except Exception as e:
+        print(f"{Fore.RED}[Game Manager] Game {game_uid} ended with error: {e}{Style.RESET_ALL}")
+    finally:
+        print(f"{Fore.CYAN}[Game Manager] Game {game_uid} has finished. Checking if new game should be started...{Style.RESET_ALL}")
+        # Schedule a new game to maintain the count (will be handled by periodic maintenance)
+        if AUTO_RESTART_GAMES:
+            # Use asyncio.create_task to avoid blocking this cleanup
+            asyncio.create_task(maintain_game_count(app_instance))
+
+async def periodic_game_maintenance(app_instance: FastAPI):
+    """Periodically check and maintain the desired number of games"""
+    while True:
+        try:
+            await asyncio.sleep(MAINTENANCE_INTERVAL)
+            await maintain_game_count(app_instance)
+        except asyncio.CancelledError:
+            print(f"{Fore.YELLOW}[Game Manager] Periodic maintenance task cancelled{Style.RESET_ALL}")
+            break
+        except Exception as e:
+            print(f"{Fore.RED}[Game Manager] Error in periodic maintenance: {e}{Style.RESET_ALL}")
+
+def get_game_status(app_instance: FastAPI) -> Dict[str, Any]:
+    """Get current status of all games"""
+    if not hasattr(app_instance.state, 'game_tasks'):
+        return {"active_games": 0, "total_games": 0, "games": []}
+    
+    active_games = []
+    completed_count = 0
+    
+    for uid, task in app_instance.state.game_tasks.items():
+        if task.done():
+            completed_count += 1
+        else:
+            game_info = {
+                "game_uid": uid,
+                "status": "running",
+                "task_done": False
+            }
+            # Try to get more details from active_games if available
+            if hasattr(app_instance.state, 'active_games') and uid in app_instance.state.active_games:
+                gc = app_instance.state.active_games[uid]
+                game_info.update({
+                    "turn_count": getattr(gc, 'turn_count', 0),
+                    "game_over": getattr(gc, 'game_over', False),
+                    "current_player": getattr(gc, 'current_player_index', 0),
+                    "player_count": len(getattr(gc, 'players', []))
+                })
+            active_games.append(game_info)
+    
+    return {
+        "active_games": len(active_games),
+        "completed_games": completed_count,
+        "total_games": len(app_instance.state.game_tasks),
+        "concurrent_games_target": CONCURRENT_GAMES_COUNT,
+        "auto_restart_enabled": AUTO_RESTART_GAMES,
+        "games": active_games
+    }
+
+# 6. Helper function definitions (_log_agent_action_to_db, start_monopoly_game_instance)
 def _log_agent_action_to_db(gc_ref: Any, player_id: int, agent_ref: Any, action_result: Dict[str, Any]):
     if gc_ref.game_db_id is None: print("[DB Log] No game_db_id for agent action log."); return
     player_db_id = gc_ref.players[player_id].db_id
@@ -443,6 +549,11 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
             if gc.game_over: 
                 print(f"{Fore.RED}G_UID:{game_uid} - Game over flag is true post next_turn/auction logic. Exiting main loop.{Style.RESET_ALL}")
                 break 
+            
+            # Add random delay between turns (5-10 seconds)
+            turn_delay = random.uniform(5.0, 10.0)
+            print(f"{Fore.CYAN}[Turn Delay] Waiting {turn_delay:.1f} seconds before next turn for G_UID:{game_uid}...{Style.RESET_ALL}")
+            await asyncio.sleep(turn_delay)
         
         # --- End of main while loop ---
         print(f"{Fore.CYAN}Main game loop for G_UID: {game_uid} has ended. Game Over: {gc.game_over if gc else 'N/A'}, Loop Turns: {loop_turn_count}{Style.RESET_ALL}")
@@ -502,7 +613,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
         
     print(f"start_monopoly_game_instance for {game_uid} fully concluded (or terminated due to error/cancellation).")
 
-# 6. Define lifespan function
+# 7. Define lifespan function
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
     print("FastAPI server starting up (via lifespan)...")
@@ -512,16 +623,36 @@ async def lifespan(app_instance: FastAPI):
     app_instance.state.active_games = {} 
     app_instance.state.game_tasks = {}   
     
-    print("Initializing a new game instance (via lifespan)...")
-    new_game_uid = f"monopoly_game_{uuid.uuid4().hex[:8]}" 
+    print(f"Initializing {CONCURRENT_GAMES_COUNT} game instance(s) simultaneously (via lifespan)...")
     
-    game_task = asyncio.create_task(start_monopoly_game_instance(new_game_uid, manager, app_instance))
-    app_instance.state.game_tasks[new_game_uid] = game_task 
-    print(f"Game instance task for G_UID:{new_game_uid} created and stored.")
+    # Start the configured number of games
+    for i in range(CONCURRENT_GAMES_COUNT):
+        await create_new_game_instance(app_instance)
+    
+    print(f"{CONCURRENT_GAMES_COUNT} game instances are now running concurrently.")
+    print(f"Auto-restart games: {'Enabled' if AUTO_RESTART_GAMES else 'Disabled'}")
+    
+    # Start periodic maintenance task
+    maintenance_task = None
+    if AUTO_RESTART_GAMES:
+        maintenance_task = asyncio.create_task(periodic_game_maintenance(app_instance))
+        print(f"Periodic game maintenance started (interval: {MAINTENANCE_INTERVAL}s)")
     
     yield # Server is running
     
     print("FastAPI server shutting down (via lifespan)...")
+    
+    # Cancel maintenance task first
+    if maintenance_task and not maintenance_task.done():
+        print("Cancelling periodic maintenance task...")
+        maintenance_task.cancel()
+        try:
+            await maintenance_task
+        except asyncio.CancelledError:
+            print("Maintenance task cancelled successfully.")
+        except Exception as e:
+            print(f"Error during maintenance task cancellation: {e}")
+    
     if hasattr(app_instance.state, 'game_tasks') and app_instance.state.game_tasks:
         tasks_to_cancel = list(app_instance.state.game_tasks.items()) # Iterate over a copy
         print(f"Found {len(tasks_to_cancel)} game tasks to potentially cancel.")
@@ -558,7 +689,7 @@ async def lifespan(app_instance: FastAPI):
 
     print("Server shutdown complete.")
 
-# 7. Instantiate FastAPI app
+# 8. Instantiate FastAPI app
 app = FastAPI(lifespan=lifespan)
 
 # Add CORS middleware
@@ -570,7 +701,7 @@ app.add_middleware(
     allow_headers=["*"], # Allow all headers
 )
 
-# 8. Define routes
+# 9. Define routes
 @app.get("/api/lobby/games")
 async def get_lobby_games_api(request: Request):
     active_games_info = []
@@ -671,7 +802,91 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
     except Exception as e: print(f"Error in WS connection for G:{game_id}: {e}")
     finally: manager.disconnect(websocket, game_id)
 
-# 9. Main execution block
+@app.get("/api/admin/games/status")
+async def get_games_status_api(request: Request):
+    """Get detailed status of all games"""
+    try:
+        status = get_game_status(request.app)
+        return status
+    except Exception as e:
+        print(f"{Fore.RED}[API E] Error getting games status: {e}{Style.RESET_ALL}")
+        raise HTTPException(status_code=500, detail="Failed to get games status")
+
+@app.post("/api/admin/games/create")
+async def create_game_api(request: Request):
+    """Manually create a new game instance"""
+    try:
+        game_uid = await create_new_game_instance(request.app)
+        return {"success": True, "game_uid": game_uid, "message": f"Game {game_uid} created successfully"}
+    except Exception as e:
+        print(f"{Fore.RED}[API E] Error creating new game: {e}{Style.RESET_ALL}")
+        raise HTTPException(status_code=500, detail="Failed to create new game")
+
+@app.post("/api/admin/games/maintain")
+async def trigger_maintenance_api(request: Request):
+    """Manually trigger game count maintenance"""
+    try:
+        await maintain_game_count(request.app)
+        status = get_game_status(request.app)
+        return {"success": True, "message": "Maintenance completed", "status": status}
+    except Exception as e:
+        print(f"{Fore.RED}[API E] Error during manual maintenance: {e}{Style.RESET_ALL}")
+        raise HTTPException(status_code=500, detail="Failed to perform maintenance")
+
+@app.get("/api/admin/config")
+async def get_config_api():
+    """Get current configuration"""
+    return {
+        "concurrent_games_count": CONCURRENT_GAMES_COUNT,
+        "auto_restart_games": AUTO_RESTART_GAMES,
+        "maintenance_interval": MAINTENANCE_INTERVAL,
+        "game_counter": GAME_COUNTER
+    }
+
+@app.post("/api/admin/config")
+async def update_config_api(request: Request):
+    """Update configuration (supports concurrent_games_count and auto_restart_games)"""
+    global CONCURRENT_GAMES_COUNT, AUTO_RESTART_GAMES
+    
+    try:
+        data = await request.json()
+        
+        if "concurrent_games_count" in data:
+            new_count = int(data["concurrent_games_count"])
+            if new_count < 0 or new_count > 10:  # Reasonable limits
+                raise HTTPException(status_code=400, detail="concurrent_games_count must be between 0 and 10")
+            
+            old_count = CONCURRENT_GAMES_COUNT
+            CONCURRENT_GAMES_COUNT = new_count
+            print(f"{Fore.GREEN}[Config] Updated concurrent_games_count from {old_count} to {new_count}{Style.RESET_ALL}")
+            
+            # Trigger maintenance to adjust game count immediately
+            await maintain_game_count(request.app)
+        
+        if "auto_restart_games" in data:
+            AUTO_RESTART_GAMES = bool(data["auto_restart_games"])
+            print(f"{Fore.GREEN}[Config] Updated auto_restart_games to {AUTO_RESTART_GAMES}{Style.RESET_ALL}")
+        
+        return {
+            "success": True, 
+            "message": "Configuration updated successfully",
+            "new_config": {
+                "concurrent_games_count": CONCURRENT_GAMES_COUNT,
+                "auto_restart_games": AUTO_RESTART_GAMES,
+                "maintenance_interval": MAINTENANCE_INTERVAL,
+                "game_counter": GAME_COUNTER
+            }
+        }
+    
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid value: {e}")
+    except Exception as e:
+        print(f"{Fore.RED}[API E] Error updating config: {e}{Style.RESET_ALL}")
+        raise HTTPException(status_code=500, detail="Failed to update configuration")
+
+# 10. Main execution block
 if __name__ == "__main__":
     import uvicorn
     print("Starting Uvicorn server for Monopoly...")

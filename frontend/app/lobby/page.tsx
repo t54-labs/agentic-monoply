@@ -21,8 +21,9 @@ interface GameData {
 }
 
 const MIN_ROWS = 10;
-const TABLES_PER_ROW = 4;
-const TOTAL_TABLE_SLOTS = MIN_ROWS * TABLES_PER_ROW;
+const MIN_TABLES_PER_ROW = 2; 
+const MAX_TABLES_PER_ROW = 6; 
+const ESTIMATED_TOTAL_SLOTS = 40; 
 
 // Function to generate fallback game data
 const generateFallbackGames = (count: number): GameData[] => {
@@ -155,7 +156,10 @@ const LobbyPage: React.FC = () => {
   }
 
   const tablesToRender = [];
-  for (let i = 0; i < TOTAL_TABLE_SLOTS; i++) {
+  const totalGames = games.length;
+  const displaySlots = Math.max(totalGames, ESTIMATED_TOTAL_SLOTS);
+  
+  for (let i = 0; i < displaySlots; i++) {
     if (i < games.length) {
       tablesToRender.push(<GameTableCard key={games[i].game_uid} game={games[i]} />);
     } else {
@@ -178,6 +182,8 @@ const LobbyPage: React.FC = () => {
 
   return (
     <div style={styles.lobbyContainer}>
+      {/* 半透明遮罩层 */}
+      <div style={styles.backgroundOverlay}></div>
       <div style={styles.tablesGrid}>
         {tablesToRender}
       </div>
@@ -187,22 +193,43 @@ const LobbyPage: React.FC = () => {
 
 const styles: { [key: string]: React.CSSProperties } = {
   lobbyContainer: {
-    padding: '20px',
-    backgroundColor: '#000000', // Black background
+    padding: '10px', // 减少padding以适应手机屏幕
+    backgroundImage: 'url(/lobby_bg.png)', // 使用背景图片
+    backgroundSize: 'cover', // 覆盖整个容器
+    backgroundPosition: 'center', // 居中显示
+    backgroundRepeat: 'no-repeat', // 不重复
+    backgroundAttachment: 'fixed', // 固定背景
     minHeight: '100vh',
     fontFamily: "'Quantico', sans-serif",
     color: '#00FF00', // Default green text for lobby
     display: 'flex', // Added
     flexDirection: 'column', // Added
+    position: 'relative', // 为了添加半透明遮罩层
+  },
+  backgroundOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.3)', // 半透明黑色遮罩
+    pointerEvents: 'none', // 不阻止鼠标事件
+    zIndex: 1,
   },
   tablesGrid: {
     display: 'grid',
-    gridTemplateColumns: `repeat(${TABLES_PER_ROW}, 1fr)`,
+    gridTemplateColumns: 'repeat(auto-fit, minmax(460px, 1fr))', // 最小宽度460px，自适应变大
     gap: '20px',
     justifyItems: 'center',
-    paddingTop: '20px', // Add padding if title was removed and error isn't always there
-    flexGrow: 1, // Added to make grid take available space
-    alignContent: 'flex-start', // Start grid items from top if grid itself is taller than content
+    paddingTop: '10px',
+    flexGrow: 1, 
+    alignContent: 'flex-start', 
+    width: '100%',
+    maxWidth: '2380px', // 限制最大宽度：5*460px + 4*20px(gap) = 2380px，确保最多5列
+    margin: '0 auto', // 居中显示
+    boxSizing: 'border-box',
+    position: 'relative',
+    zIndex: 2,
   },
   centeredMessage: { // For loading message
     display: 'flex',

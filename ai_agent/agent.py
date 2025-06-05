@@ -58,7 +58,7 @@ class BaseAgent(ABC):
         return {}
 
 class OpenAIAgent(BaseAgent):
-    def __init__(self, player_id: int, name: str, model_name: str = "gpt-4.1-mini", api_key: str = None):
+    def __init__(self, player_id: int, name: str, model_name: str = "gpt-4o-mini", api_key: str = None):
         super().__init__(player_id, name)
 
         load_dotenv()

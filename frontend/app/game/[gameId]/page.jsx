@@ -827,6 +827,36 @@ export default function GamePage() {
         setSquareTooltipPosition({visible: false});
     };
 
+    // Function to parse and format agent thoughts with highlighted "Thoughts:" content
+    const formatAgentMessage = (message) => {
+        const thoughtsMatch = message.match(/Thoughts:\s*(.*?)(?:\s*\|\s*|$)/);
+        
+        if (thoughtsMatch) {
+            const beforeThoughts = message.substring(0, message.indexOf('Thoughts:'));
+            const thoughtsContent = thoughtsMatch[1].trim();
+            const afterThoughts = message.substring(message.indexOf('Thoughts:') + 'Thoughts:'.length + thoughtsContent.length);
+            
+            return (
+                <span>
+                    {beforeThoughts}
+                    <span style={{ fontWeight: 'normal' }}>Thoughts: </span>
+                    <span style={{ 
+                        fontWeight: 'bold', 
+                        backgroundColor: 'rgba(255, 215, 0, 0.2)', 
+                        padding: '2px 4px',
+                        borderRadius: '3px',
+                        color: '#FFF8DC'
+                    }}>
+                        {thoughtsContent}
+                    </span>
+                    {afterThoughts}
+                </span>
+            );
+        }
+        
+        return message;
+    };
+
     return (
         <>
             <Head>
@@ -961,7 +991,7 @@ export default function GamePage() {
                                     ...(entry.type === 'error' ? pixelStyles.errorLog :
                                        entry.type === 'action-result' ? pixelStyles.actionResultLog : pixelStyles.infoLog)
                                 }}>
-                                    [{entry.timestamp}] {entry.message}
+                                    [{entry.timestamp}] {formatAgentMessage(entry.message)}
                                 </div>
                             ))}
                             {agentThoughts.length === 0 && <p style={{...pixelStyles.infoText, fontSize: '14px', color: '#F5E6D3'}}>Waiting for agent actions...</p>}

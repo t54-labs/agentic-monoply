@@ -182,7 +182,6 @@ const LobbyPage: React.FC = () => {
 
   return (
     <div style={styles.lobbyContainer}>
-      {/* 半透明遮罩层 */}
       <div style={styles.backgroundOverlay}></div>
       <div style={styles.tablesGrid}>
         {tablesToRender}

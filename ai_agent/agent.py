@@ -5,6 +5,8 @@ import json # Ensure json is imported
 import re   # For potential cleanup of JSON string if needed
 import time # Added for time measurement
 
+from tpay.tools import taudit_verifier
+
 from dotenv import load_dotenv
 
 # Conditional import for openai, handle if not installed
@@ -58,6 +60,7 @@ class BaseAgent(ABC):
         return {}
 
 class OpenAIAgent(BaseAgent):
+    @taudit_verifier
     def __init__(self, player_id: int, name: str, model_name: str = "gpt-4o-mini", api_key: str = None):
         super().__init__(player_id, name)
 
@@ -88,6 +91,7 @@ class OpenAIAgent(BaseAgent):
         self.last_llm_raw_response: str = ""
         self.last_tool_parameters_json: str = "{}"
 
+    @taudit_verifier
     def _build_prompt(self, game_state: Dict[str, Any], available_actions: List[str]) -> Tuple[str, List[Dict[str, str]]]:
         # Prompt for the AI agent in a Monopoly game
         
@@ -349,6 +353,7 @@ class OpenAIAgent(BaseAgent):
         cleaned_str = cleaned_str.strip()
         return cleaned_str
 
+    @taudit_verifier
     def _extract_json_from_response(self, llm_response_content: str) -> Optional[Dict[str, Any]]:
         agent_name_logging = f"Agent {self.name} (P{self.player_id})"
         # print(f"{agent_name_logging}: Attempting to extract JSON. Raw LLM response content (len: {len(llm_response_content)}):\n--BEGIN LLM RAW--\n{llm_response_content}\n--END LLM RAW--")
@@ -414,6 +419,7 @@ class OpenAIAgent(BaseAgent):
         # print(f"{agent_name_logging}: Final agent thoughts for DB: '{self.last_agent_thoughts[:500]}...'") # Log truncated thoughts
         return json_action_obj
 
+    @taudit_verifier
     def decide_action(self, game_state: Dict[str, Any], available_actions: List[str], current_gc_turn: int, action_sequence_num: int) -> Tuple[str, Dict[str, Any]]:
         self.last_gc_turn_number = current_gc_turn
         self.last_action_sequence_in_gc_turn = action_sequence_num

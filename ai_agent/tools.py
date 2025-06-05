@@ -1,5 +1,7 @@
 from typing import Dict, Any, List, Optional
 
+from tpay.tools import tradar_verifier
+
 # It's better to import GameController directly if possible to get type hinting,
 # but this can cause circular dependencies if GameController also needs to know about tools.
 # Using 'Any' for game_controller for now, and casting internally or relying on duck typing.
@@ -11,7 +13,7 @@ def _log_agent_action(gc: Any, player_id: int, tool_name: str, params: Dict[str,
     gc.log_event(f"Agent {player.name} (P{player_id}) used Tool '{tool_name}' with {params}. Result: {result.get('status')} - {result.get('message', '')}")
 
 # --- Basic Turn Actions ---
-
+@tradar_verifier
 def tool_roll_dice(gc: Any, player_id: int) -> Dict[str, Any]:
     """Player rolls the dice to take their main turn action (move, etc.)."""
     player = gc.players[player_id]
@@ -31,6 +33,7 @@ def tool_roll_dice(gc: Any, player_id: int) -> Dict[str, Any]:
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_end_turn(gc: Any, player_id: int) -> Dict[str, Any]:
     """Player explicitly ends their turn or current segment of complex actions."""
     player = gc.players[player_id]
@@ -44,6 +47,7 @@ def tool_end_turn(gc: Any, player_id: int) -> Dict[str, Any]:
     except Exception as e: return {"status": "error", "message": str(e)}
 
 # --- Property Actions ---
+@tradar_verifier
 def tool_buy_property(gc: Any, player_id: int, property_id: Optional[int] = None) -> Dict[str, Any]:
     """Player attempts to buy an unowned property. If property_id is None, it tries to buy the one set in pending_decision_context."""
     player = gc.players[player_id]
@@ -73,6 +77,7 @@ def tool_buy_property(gc: Any, player_id: int, property_id: Optional[int] = None
         gc.log_event(f"[Exception] tool_buy_property: {e}")
         return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_pass_on_buying_property(gc: Any, player_id: int, property_id: Optional[int] = None) -> Dict[str, Any]:
     """Player landed on an unowned property and chooses NOT to buy it, which should trigger an auction."""
     player = gc.players[player_id]
@@ -91,6 +96,7 @@ def tool_pass_on_buying_property(gc: Any, player_id: int, property_id: Optional[
     except Exception as e: return {"status": "error", "message": str(e)}
 
 # --- Asset Management (These tools might be called when pending_decision_type is None or "asset_management") ---
+@tradar_verifier
 def tool_build_house(gc: Any, player_id: int, property_id: int) -> Dict[str, Any]:
     """Player attempts to build a house/hotel on one of their properties."""
     try:
@@ -106,6 +112,7 @@ def tool_build_house(gc: Any, player_id: int, property_id: int) -> Dict[str, Any
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_sell_house(gc: Any, player_id: int, property_id: int) -> Dict[str, Any]:
     """Player attempts to sell a house/hotel from one of their properties."""
     try:
@@ -118,6 +125,7 @@ def tool_sell_house(gc: Any, player_id: int, property_id: int) -> Dict[str, Any]
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_mortgage_property(gc: Any, player_id: int, property_id: int) -> Dict[str, Any]:
     """Player attempts to mortgage one of their properties."""
     try:
@@ -130,6 +138,7 @@ def tool_mortgage_property(gc: Any, player_id: int, property_id: int) -> Dict[st
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_unmortgage_property(gc: Any, player_id: int, property_id: int) -> Dict[str, Any]:
     """Player attempts to unmortgage one of their properties."""
     try:
@@ -143,6 +152,7 @@ def tool_unmortgage_property(gc: Any, player_id: int, property_id: int) -> Dict[
         return {"status": "error", "message": str(e)}
 
 # --- Jail Actions (Called when gc.pending_decision_type == "jail_options") ---
+@tradar_verifier
 def tool_pay_bail(gc: Any, player_id: int, params: Dict[str, Any] = None) -> Dict[str, Any]:
     player = gc.players[player_id]
     if params is None: params = {} # Ensure params is a dict
@@ -156,6 +166,7 @@ def tool_pay_bail(gc: Any, player_id: int, params: Dict[str, Any] = None) -> Dic
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_use_get_out_of_jail_card(gc: Any, player_id: int, params: Dict[str, Any] = None) -> Dict[str, Any]:
     player = gc.players[player_id]
     if params is None: params = {} # Ensure params is a dict
@@ -171,6 +182,7 @@ def tool_use_get_out_of_jail_card(gc: Any, player_id: int, params: Dict[str, Any
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_roll_for_doubles_to_get_out_of_jail(gc: Any, player_id: int, params: Dict[str, Any] = None) -> Dict[str, Any]:
     player = gc.players[player_id]
     if params is None: params = {} # Ensure params is a dict
@@ -196,6 +208,7 @@ def tool_roll_for_doubles_to_get_out_of_jail(gc: Any, player_id: int, params: Di
     except Exception as e: return {"status": "error", "message": str(e)}
 
 # --- Bankruptcy Flow Tool ---
+@tradar_verifier
 def tool_confirm_asset_liquidation_actions_done(gc: Any, player_id: int) -> Dict[str, Any]:
     """Agent signals they have finished (or cannot do more) selling/mortgaging to cover debt."""
     player = gc.players[player_id]
@@ -218,6 +231,7 @@ def tool_confirm_asset_liquidation_actions_done(gc: Any, player_id: int) -> Dict
         return {"status": "error", "message": str(e)}
 
 # --- Placeholder/Fallback Actions ---
+@tradar_verifier
 def tool_do_nothing(gc: Any, player_id: int, reason: str = "No specific action chosen") -> Dict[str, Any]:
     player = gc.players[player_id]
     try:
@@ -242,6 +256,7 @@ def tool_do_nothing(gc: Any, player_id: int, reason: str = "No specific action c
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_wait(gc: Any, player_id: int) -> Dict[str, Any]: # Typically used if not agent's turn but somehow asked
     try:
         result = {"status": "success", "message": "Player is waiting (e.g., not their active turn segment)."}
@@ -250,6 +265,7 @@ def tool_wait(gc: Any, player_id: int) -> Dict[str, Any]: # Typically used if no
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_resign_game(gc: Any, player_id: int) -> Dict[str, Any]:
     """Player chooses to resign from the game, leading to bankruptcy to the bank."""
     player = gc.players[player_id]
@@ -265,6 +281,7 @@ def tool_resign_game(gc: Any, player_id: int) -> Dict[str, Any]:
     except Exception as e: return {"status": "error", "message": str(e)}
 
 # --- Auction Tools ---
+@tradar_verifier
 def tool_bid_on_auction(gc: Any, player_id: int, bid_amount: int) -> Dict[str, Any]:
     """Player places a bid in an ongoing auction."""
     player = gc.players[player_id]
@@ -278,6 +295,7 @@ def tool_bid_on_auction(gc: Any, player_id: int, bid_amount: int) -> Dict[str, A
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_pass_auction_bid(gc: Any, player_id: int) -> Dict[str, Any]:
     """Player passes their turn to bid in an ongoing auction."""
     player = gc.players[player_id]
@@ -290,6 +308,7 @@ def tool_pass_auction_bid(gc: Any, player_id: int) -> Dict[str, Any]:
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_withdraw_from_auction(gc: Any, player_id: int) -> Dict[str, Any]:
     """Player withdraws from the current auction entirely."""
     player = gc.players[player_id]
@@ -305,6 +324,7 @@ def tool_withdraw_from_auction(gc: Any, player_id: int) -> Dict[str, Any]:
     except Exception as e: return {"status": "error", "message": str(e)}
 
 # --- Trade Tools ---
+@tradar_verifier
 def tool_propose_trade(gc: Any, player_id: int, recipient_id: int,
                          offered_property_ids: Optional[List[int]] = None, offered_money: int = 0, offered_get_out_of_jail_free_cards: int = 0,
                          requested_property_ids: Optional[List[int]] = None, requested_money: int = 0, requested_get_out_of_jail_free_cards: int = 0,
@@ -341,6 +361,7 @@ def tool_propose_trade(gc: Any, player_id: int, recipient_id: int,
         gc.log_event(f"[Tool Exception] tool_propose_trade: {e}", "error_log")
         return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_accept_trade(gc: Any, player_id: int, trade_id: Optional[int] = None) -> Dict[str, Any]:
     try:
         tid = trade_id if trade_id is not None else gc.pending_decision_context.get("trade_id")
@@ -355,6 +376,7 @@ def tool_accept_trade(gc: Any, player_id: int, trade_id: Optional[int] = None) -
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_reject_trade(gc: Any, player_id: int, trade_id: Optional[int] = None) -> Dict[str, Any]:
     try:
         tid = trade_id if trade_id is not None else gc.pending_decision_context.get("trade_id")
@@ -367,6 +389,7 @@ def tool_reject_trade(gc: Any, player_id: int, trade_id: Optional[int] = None) -
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_propose_counter_offer(gc: Any, player_id: int, trade_id: Optional[int] = None, 
                                  offered_property_ids: Optional[List[int]] = None, offered_money: int = 0, offered_get_out_of_jail_free_cards: int = 0,
                                  requested_property_ids: Optional[List[int]] = None, requested_money: int = 0, requested_get_out_of_jail_free_cards: int = 0,
@@ -405,6 +428,7 @@ def tool_propose_counter_offer(gc: Any, player_id: int, trade_id: Optional[int] 
         gc.log_event(f"[Tool Exception] tool_propose_counter_offer: {e}", "error_log")
         return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_end_trade_negotiation(gc: Any, player_id: int, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Player (original proposer) decides to end the trade negotiation after their offer was rejected."""
     if params is None: params = {}
@@ -418,6 +442,7 @@ def tool_end_trade_negotiation(gc: Any, player_id: int, params: Optional[Dict[st
         return {"status": "error", "message": str(e)}
 
 # --- Tools for Handling Received Mortgaged Property ---
+@tradar_verifier
 def tool_pay_mortgage_interest_fee(gc: Any, player_id: int, property_id: Optional[int] = None) -> Dict[str, Any]:
     """Player pays the 10% fee on a mortgaged property they received via trade."""
     try:
@@ -435,6 +460,7 @@ def tool_pay_mortgage_interest_fee(gc: Any, player_id: int, property_id: Optiona
         return result
     except Exception as e: return {"status": "error", "message": str(e)}
 
+@tradar_verifier
 def tool_unmortgage_property_immediately(gc: Any, player_id: int, property_id: Optional[int] = None) -> Dict[str, Any]:
     """Player chooses to immediately unmortgage a property they received via trade (pays 1.1x mortgage value)."""
     try:

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import random  # Added for random turn delays
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Any, Optional
@@ -9,7 +10,19 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 
+from tpay import *
+from tpay.tools import taudit_verifier
+
 from game_logic.player import Player
+from game_logic.game_controller import GameController 
+from ai_agent.agent import OpenAIAgent
+from main import TOOL_REGISTRY, NUM_PLAYERS, PLAYER_NAMES, MAX_TURNS, ACTION_DELAY_SECONDS, MAX_ACTIONS_PER_SEGMENT, execute_agent_action, print_game_summary, _setup_tool_placeholders
+from colorama import init, Fore as ColoramaFore, Style as ColoramaStyle
+
+# 2. Database and SQLAlchemy imports
+from database import create_db_and_tables, engine, games_table, players_table, game_turns_table, agent_actions_table
+from sqlalchemy import insert, update, select
+from sqlalchemy.orm import Session 
 
 # Game simulation configuration
 CONCURRENT_GAMES_COUNT = 2  # Number of games to run simultaneously
@@ -22,7 +35,6 @@ class Fore: CYAN=YELLOW=GREEN=RED=MAGENTA=WHITE=BLACK=BLUE=""; LIGHTBLACK_EX=LIG
 class Style: RESET_ALL=BRIGHT=DIM=NORMAL="";
 COLORAMA_OK = False
 try: 
-    from colorama import init, Fore as ColoramaFore, Style as ColoramaStyle
     init()
     Fore = ColoramaFore; Style = ColoramaStyle; COLORAMA_OK = True
     if os.getenv("RUN_CONTEXT") != "test" and __name__ == "__main__": print(f"{Fore.GREEN}Colorama initialized.{Style.RESET_ALL}")
@@ -30,10 +42,12 @@ except ImportError:
     if os.getenv("RUN_CONTEXT") != "test" and __name__ == "__main__": print("Colorama not found.")
     pass 
 
-# 2. Database and SQLAlchemy imports
-from database import create_db_and_tables, engine, games_table, players_table, game_turns_table, agent_actions_table
-from sqlalchemy import insert, update, select
-from sqlalchemy.orm import Session 
+load_dotenv()
+
+TLEDGER_API_KEY = os.getenv("TLEDGER_API_KEY")
+TLEDGER_API_SECRET = os.getenv("TLEDGER_API_SECRET")
+TLEDGER_PROJECT_ID = os.getenv("TLEDGER_PROJECT_ID")
+TLEDGER_BASE_URL = os.getenv("TLEDGER_BASE_URL")
 
 # 3. ConnectionManager class definition
 class ConnectionManager:
@@ -214,10 +228,6 @@ def _log_agent_action_to_db(gc_ref: Any, player_id: int, agent_ref: Any, action_
     except Exception as e: print(f"[DB Error] Log agent action P{player_id} G_DB_ID {gc_ref.game_db_id}: {e}")
 
 async def start_monopoly_game_instance(game_uid: str, connection_manager_param: ConnectionManager, app_instance: FastAPI):
-    from game_logic.game_controller import GameController 
-    from ai_agent.agent import OpenAIAgent
-    from main import TOOL_REGISTRY, NUM_PLAYERS, PLAYER_NAMES, MAX_TURNS, ACTION_DELAY_SECONDS, MAX_ACTIONS_PER_SEGMENT, execute_agent_action, print_game_summary, _setup_tool_placeholders
-    
     print(f"Attempting to start G_UID: {game_uid}")
     game_db_id: Optional[int] = None; player_db_id_map: Dict[int, int] = {}
     gc: Optional[GameController] = None 
@@ -279,20 +289,21 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
         print(f"{Fore.CYAN}[Lobby Broadcast] Sent game_added event for G_UID: {game_uid}{Style.RESET_ALL}")
         # ----- Broadcast New Game to Lobby ----- END
 
-        trade_details_for_test = {
-            "proposer_id": 0,
-            "recipient_id": 1,
-            "offered_property_ids": [1],  # Mediterranean Avenue
-            "offered_money": 50,
-            "offered_gooj_cards": 0,
-            "requested_property_ids": [3], # Baltic Avenue
-            "requested_money": 0,
-            "requested_gooj_cards": 0,
-            "message": "Hey Player B, let's make a deal for Baltic Avenue!" # Example message
-        }
-        property_id_for_auction_test = 11 # St. Charles Place (ensure it's a valid, unowned purchasable property ID from your board setup)
-        gc.start_game(test_mode_trade_details=trade_details_for_test)
-        # gc.start_game() # This sets turn_count to 1 and determines starting player
+        # trade_details_for_test = {
+        #     "proposer_id": 0,
+        #     "recipient_id": 1,
+        #     "offered_property_ids": [1],  # Mediterranean Avenue
+        #     "offered_money": 50,
+        #     "offered_gooj_cards": 0,
+        #     "requested_property_ids": [3], # Baltic Avenue
+        #     "requested_money": 0,
+        #     "requested_gooj_cards": 0,
+        #     "message": "Hey Player B, let's make a deal for Baltic Avenue!" # Example message
+        # }
+        # property_id_for_auction_test = 11 # St. Charles Place (ensure it's a valid, unowned purchasable property ID from your board setup)
+        # gc.start_game(test_mode_trade_details=trade_details_for_test)
+
+        gc.start_game() # This sets turn_count to 1 and determines starting player
         
         # Update lobby again after gc.start_game() to reflect "in_progress" and correct turn 1 info if needed
         # Or rely on the first player_state_update from the game loop to trigger a more general game_update to lobby
@@ -623,8 +634,11 @@ async def lifespan(app_instance: FastAPI):
     app_instance.state.active_games = {} 
     app_instance.state.game_tasks = {}   
     
+    # Initialize tpay sdk
+    print(f"Initializing tpay sdk with api_key: {TLEDGER_API_KEY}, api_secret: {TLEDGER_API_SECRET}, project_id: {TLEDGER_PROJECT_ID}, base_url: {TLEDGER_BASE_URL}, timeout: 1000")
+    tpay_initialize(api_key=TLEDGER_API_KEY, api_secret=TLEDGER_API_SECRET, project_id=TLEDGER_PROJECT_ID, base_url=TLEDGER_BASE_URL, timeout=1000)
+
     print(f"Initializing {CONCURRENT_GAMES_COUNT} game instance(s) simultaneously (via lifespan)...")
-    
     # Start the configured number of games
     for i in range(CONCURRENT_GAMES_COUNT):
         await create_new_game_instance(app_instance)

@@ -14,6 +14,10 @@ from database import engine, games_table, players_table, game_turns_table # agen
 import json # For serializing game_state
 import datetime # For timestamps
 
+# Import tpay for payment processing
+import tpay
+import utils
+
 MAX_TRADE_REJECTIONS = 5 # Define at module level or as a class attribute
 
 @dataclass
@@ -38,13 +42,25 @@ class TradeOffer:
 
 class GameController:
     def __init__(self, game_uid: str = "default_game", ws_manager: Optional[Any] = None,
-                 game_db_id: Optional[int] = None, participants: Optional[List[Dict[str, Any]]] = None
+                 game_db_id: Optional[int] = None, participants: Optional[List[Dict[str, Any]]] = None,
+                 treasury_agent_id: Optional[str] = None
                  ):
         
         self.game_uid = game_uid 
         self.ws_manager = ws_manager 
         self.game_db_id = game_db_id 
         self.current_game_turn_db_id: Optional[int] = None 
+        self.treasury_agent_id = treasury_agent_id  # System/bank agent ID for payments
+        
+        # Initialize TPayAgent for payment processing
+        self.tpay_agent: Optional[tpay.agent.TPayAgent] = None
+        if treasury_agent_id:
+            try:
+                self.tpay_agent = tpay.agent.TPayAgent(agent_id=treasury_agent_id)
+                self.log_event(f"[TPay] TPayAgent initialized with treasury ID: {treasury_agent_id}")
+            except Exception as e:
+                self.log_event(f"[TPay Error] Failed to initialize TPayAgent: {e}")
+                self.tpay_agent = None
         
         try:
             self.loop = asyncio.get_running_loop()
@@ -292,8 +308,24 @@ class GameController:
         return self.dice[0] == self.dice[1]
 
     def _handle_go_passed(self, player: Player) -> None:
-        player.add_money(200) # Standard GO salary
-        self.log_event(f"{player.name} passed GO and collected $200.")
+        go_salary = 200.0
+        
+        # Use tpay for GO salary payment from system to player
+        payment_success = self._create_tpay_payment_system_to_player(
+            recipient=player,
+            amount=go_salary,
+            reason="GO salary",
+            event_description=f"{player.name} passed GO and collected salary"
+        )
+        
+        if payment_success:
+            # Update local cache (tpay balance is already updated)
+            player.add_money(int(go_salary))
+            self.log_event(f"{player.name} passed GO and collected ${go_salary}.")
+        else:
+            # Fallback: still update local cache even if tpay failed for game continuity
+            player.add_money(int(go_salary))
+            self.log_event(f"{player.name} passed GO and collected ${go_salary} (tpay payment failed, using fallback).")
 
     def _move_player(self, player: Player, steps: int) -> None:
         if player.is_bankrupt:
@@ -414,6 +446,19 @@ class GameController:
     def _handle_tax_square_landing(self, player: Player, tax_sq: TaxSquare) -> None:
         amount_due = tax_sq.tax_amount
         self.log_event(f"{player.name} has to pay ${amount_due} for {tax_sq.name}.")
+        
+        # Use tpay for tax payment to system
+        payment_success = self._create_tpay_payment_player_to_system(
+            payer=player,
+            amount=float(amount_due),
+            reason=f"tax - {tax_sq.name}",
+            event_description=f"{player.name} paid ${amount_due} tax on {tax_sq.name}"
+        )
+        
+        if not payment_success:
+            self.log_event(f"[TPay] Tax payment failed, using fallback payment processing")
+        
+        # Use existing payment processing logic that handles bankruptcy
         self._player_pays_amount(player, amount_due, f"tax for {tax_sq.name}")
         # If _player_pays_amount resulted in successful payment without triggering bankruptcy flow (which sets its own pending decision):
         if player.money >= 0 and self.pending_decision_type is None:
@@ -447,8 +492,22 @@ class GameController:
 
         # --- Simple Effects (resolve immediately) ---
         if action_type == "receive_money":
+            # Use tpay for bank reward payment to player
+            payment_success = self._create_tpay_payment_system_to_player(
+                recipient=player,
+                amount=float(value),
+                reason="card reward",
+                event_description=f"{player.name} received ${value} from card: {description}"
+            )
+            
+            # Update local cache
             player.add_money(value)
-            self.log_event(f"{player.name} received ${value}.")
+            
+            if payment_success:
+                self.log_event(f"{player.name} received ${value}.")
+            else:
+                self.log_event(f"{player.name} received ${value} (tpay payment failed, using fallback).")
+                
             self._resolve_current_action_segment()
         elif action_type == "get_out_of_jail_card":
             card_type_str = value if isinstance(value, str) else "unknown" 
@@ -756,6 +815,240 @@ class GameController:
             self._check_and_handle_bankruptcy(player, debt_to_creditor=(amount_to_pay_from_cash - amount_player_had), creditor=recipient)
             # _check_and_handle_bankruptcy will set pending_decision_type = "asset_liquidation_for_debt"
             # and dice_roll_outcome_processed = True (because a new, non-dice action is now pending).
+    
+    # ======= TPay Payment Integration Methods =======
+    
+    def _create_tpay_payment_player_to_player(self, payer: Player, recipient: Player, amount: float, reason: str, 
+                                             agent_decision_context: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Create a tpay payment between two players with rich trace context including agent decision process
+        
+        Args:
+            payer: Player making the payment
+            recipient: Player receiving the payment  
+            amount: Payment amount
+            reason: Reason for payment (e.g., "rent for Boardwalk")
+            agent_decision_context: Agent's decision context including reasoning, tool calls, etc.
+            
+        Returns:
+            True if payment successful, False otherwise
+        """
+        if not payer.agent_tpay_id or not recipient.agent_tpay_id or not self.tpay_agent:
+            self.log_event(f"[TPay Error] Missing tpay IDs or agent: Payer {payer.name}={payer.agent_tpay_id}, Recipient {recipient.name}={recipient.agent_tpay_id}, TPayAgent={self.tpay_agent is not None}")
+            return False
+            
+        try:
+            # Construct rich trace context for player-to-player payments
+            trace_context = {
+                "payment_type": "player_to_player",
+                "game_context": {
+                    "game_uid": self.game_uid,
+                    "turn_count": self.turn_count,
+                    "current_player": payer.player_id,
+                    "game_phase": self.pending_decision_type or "normal_play",
+                    "dice_roll": list(self.dice) if self.dice != (0, 0) else None
+                },
+                "players": {
+                    "payer": {
+                        "id": payer.player_id,
+                        "name": payer.name,
+                        "position": payer.position,
+                        "balance_before": float(payer.money),
+                        "properties_count": len(payer.properties_owned_ids),
+                        "is_in_jail": payer.in_jail
+                    },
+                    "recipient": {
+                        "id": recipient.player_id, 
+                        "name": recipient.name,
+                        "position": recipient.position,
+                        "balance_before": float(recipient.money),
+                        "properties_count": len(recipient.properties_owned_ids),
+                        "is_in_jail": recipient.in_jail
+                    }
+                },
+                "transaction": {
+                    "reason": reason,
+                    "amount": float(amount),
+                    "timestamp": datetime.datetime.now().isoformat()
+                }
+            }
+            
+            # Add agent decision context if provided
+            if agent_decision_context:
+                trace_context["agent_decision"] = agent_decision_context
+                
+            # Get function stack hashes
+            func_stack_hashes = tpay.tools.get_current_stack_function_hashes()
+            
+            # Create tpay payment using agent instance
+            payment_result = self.tpay_agent.create_payment(
+                from_agent_id=payer.agent_tpay_id,
+                to_agent_id=recipient.agent_tpay_id,
+                amount=float(amount),
+                currency=utils.GAME_TOKEN_SYMBOL,
+                network="solana",
+                func_stack_hashes=func_stack_hashes,
+                debug_mode=True,
+                trace_context=trace_context
+            )
+            
+            if payment_result and payment_result.get('success'):
+                self.log_event(f"[TPay] ✅ Payment successful: {payer.name} → {recipient.name} ${amount} for {reason}")
+                return True
+            else:
+                error_msg = payment_result.get('error', 'Unknown error') if payment_result else 'No response'
+                self.log_event(f"[TPay] ❌ Payment failed: {payer.name} → {recipient.name} ${amount} - Error: {error_msg}")
+                return False
+                
+        except Exception as e:
+            self.log_event(f"[TPay] 💥 Payment exception: {payer.name} → {recipient.name} ${amount} - {str(e)}")
+            return False
+    
+    def _create_tpay_payment_player_to_system(self, payer: Player, amount: float, reason: str, 
+                                             event_description: Optional[str] = None) -> bool:
+        """
+        Create a tpay payment from player to system/bank with simplified trace context
+        
+        Args:
+            payer: Player making the payment
+            amount: Payment amount  
+            reason: Reason for payment (e.g., "tax", "property purchase", "jail bail")
+            event_description: Additional description of the game event
+            
+        Returns:
+            True if payment successful, False otherwise
+        """
+        if not payer.agent_tpay_id or not self.treasury_agent_id or not self.tpay_agent:
+            self.log_event(f"[TPay Error] Missing tpay IDs or agent: Payer {payer.name}={payer.agent_tpay_id}, Treasury={self.treasury_agent_id}, TPayAgent={self.tpay_agent is not None}")
+            return False
+            
+        try:
+            # Construct simplified trace context for system payments
+            trace_context = {
+                "payment_type": "player_to_system",
+                "game_context": {
+                    "game_uid": self.game_uid,
+                    "turn_count": self.turn_count,
+                    "current_player": payer.player_id,
+                    "game_phase": self.pending_decision_type or "normal_play"
+                },
+                "player": {
+                    "id": payer.player_id,
+                    "name": payer.name,
+                    "position": payer.position,
+                    "balance_before": float(payer.money)
+                },
+                "transaction": {
+                    "reason": reason,
+                    "amount": float(amount),
+                    "timestamp": datetime.datetime.now().isoformat()
+                },
+                "event": {
+                    "description": event_description or reason,
+                    "square_name": self.board.get_square(payer.position).name if 0 <= payer.position < len(self.board.squares) else "Unknown"
+                }
+            }
+            
+            # Get function stack hashes
+            func_stack_hashes = tpay.tools.get_current_stack_function_hashes()
+            
+            # Create tpay payment to treasury using agent instance
+            payment_result = self.tpay_agent.create_payment(
+                from_agent_id=payer.agent_tpay_id,
+                to_agent_id=self.treasury_agent_id,
+                amount=float(amount),
+                currency=utils.GAME_TOKEN_SYMBOL,
+                network="solana",
+                func_stack_hashes=func_stack_hashes,
+                debug_mode=True,
+                trace_context=trace_context
+            )
+            
+            if payment_result and payment_result.get('success'):
+                self.log_event(f"[TPay] ✅ System payment successful: {payer.name} → Bank ${amount} for {reason}")
+                return True
+            else:
+                error_msg = payment_result.get('error', 'Unknown error') if payment_result else 'No response'
+                self.log_event(f"[TPay] ❌ System payment failed: {payer.name} → Bank ${amount} - Error: {error_msg}")
+                return False
+                
+        except Exception as e:
+            self.log_event(f"[TPay] 💥 System payment exception: {payer.name} → Bank ${amount} - {str(e)}")
+            return False
+    
+    def _create_tpay_payment_system_to_player(self, recipient: Player, amount: float, reason: str,
+                                             event_description: Optional[str] = None) -> bool:
+        """
+        Create a tpay payment from system/bank to player (e.g., GO salary, card rewards)
+        
+        Args:
+            recipient: Player receiving the payment
+            amount: Payment amount
+            reason: Reason for payment (e.g., "GO salary", "card reward") 
+            event_description: Additional description of the game event
+            
+        Returns:
+            True if payment successful, False otherwise
+        """
+        if not recipient.agent_tpay_id or not self.treasury_agent_id or not self.tpay_agent:
+            self.log_event(f"[TPay Error] Missing tpay IDs or agent: Recipient {recipient.name}={recipient.agent_tpay_id}, Treasury={self.treasury_agent_id}, TPayAgent={self.tpay_agent is not None}")
+            return False
+            
+        try:
+            # Construct simplified trace context for system payments
+            trace_context = {
+                "payment_type": "system_to_player", 
+                "game_context": {
+                    "game_uid": self.game_uid,
+                    "turn_count": self.turn_count,
+                    "current_player": recipient.player_id,
+                    "game_phase": self.pending_decision_type or "normal_play"
+                },
+                "player": {
+                    "id": recipient.player_id,
+                    "name": recipient.name,
+                    "position": recipient.position,
+                    "balance_before": float(recipient.money)
+                },
+                "transaction": {
+                    "reason": reason,
+                    "amount": float(amount),
+                    "timestamp": datetime.datetime.now().isoformat()
+                },
+                "event": {
+                    "description": event_description or reason,
+                    "square_name": self.board.get_square(recipient.position).name if 0 <= recipient.position < len(self.board.squares) else "Unknown"
+                }
+            }
+            
+            # Get function stack hashes
+            func_stack_hashes = tpay.tools.get_current_stack_function_hashes()
+            
+            # Create tpay payment from treasury using agent instance
+            payment_result = self.tpay_agent.create_payment(
+                from_agent_id=self.treasury_agent_id,
+                to_agent_id=recipient.agent_tpay_id,
+                amount=float(amount),
+                currency=utils.GAME_TOKEN_SYMBOL,
+                network="solana",
+                func_stack_hashes=func_stack_hashes,
+                debug_mode=True,
+                trace_context=trace_context
+            )
+            
+            if payment_result and payment_result.get('success'):
+                self.log_event(f"[TPay] ✅ System reward successful: Bank → {recipient.name} ${amount} for {reason}")
+                return True
+            else:
+                error_msg = payment_result.get('error', 'Unknown error') if payment_result else 'No response'
+                self.log_event(f"[TPay] ❌ System reward failed: Bank → {recipient.name} ${amount} - Error: {error_msg}")
+                return False
+                
+        except Exception as e:
+            self.log_event(f"[TPay] 💥 System reward exception: Bank → {recipient.name} ${amount} - {str(e)}")
+            return False
+
+    # ======= End TPay Payment Integration Methods =======
 
     def _move_player_directly_to_square(self, player: Player, target_pos: int, collect_go_salary_if_passed: bool = False) -> None:
         """Moves player directly to a square, handles GO if applicable, and then triggers landing effects."""
@@ -941,12 +1234,30 @@ class GameController:
             self._resolve_current_action_segment() 
             return False
         if player.money >= square.price:
+            # Use tpay for property purchase payment to system
+            payment_success = self._create_tpay_payment_player_to_system(
+                payer=player,
+                amount=float(square.price),
+                reason=f"property purchase - {square.name}",
+                event_description=f"{player.name} bought {square.name} for ${square.price}"
+            )
+            
+            # Update local cache
             player.subtract_money(square.price)
-            square.owner_id = player.player_id
-            player.add_property_id(square.square_id)
-            self.log_event(f"{player.name} bought {square.name} for ${square.price}.")
-            self._resolve_current_action_segment() 
-            return True
+            
+            if payment_success:
+                square.owner_id = player.player_id
+                player.add_property_id(square.square_id)
+                self.log_event(f"{player.name} bought {square.name} for ${square.price}.")
+                self._resolve_current_action_segment() 
+                return True
+            else:
+                # TPay payment failed - still complete transaction but log warning
+                square.owner_id = player.player_id
+                player.add_property_id(square.square_id)
+                self.log_event(f"{player.name} bought {square.name} for ${square.price} (tpay payment failed, using fallback).")
+                self._resolve_current_action_segment() 
+                return True
         else:
             self.log_event(f"{player.name} attempted to buy {square.name} but has insufficient funds (${player.money} < ${square.price}). Decision to buy/pass remains pending.")
             return False
@@ -1043,10 +1354,24 @@ class GameController:
                 self._resolve_current_action_segment() 
             return {"status": "error", "message": msg}
         if player.money >= bail_amount:
+            # Use tpay for bail payment to system
+            payment_success = self._create_tpay_payment_player_to_system(
+                payer=player,
+                amount=float(bail_amount),
+                reason="jail bail",
+                event_description=f"{player.name} paid ${bail_amount} bail to get out of jail"
+            )
+            
+            # Update local cache
             player.subtract_money(bail_amount)
             player.leave_jail() 
             self.doubles_streak = 0 
-            msg = f"{player.name} paid ${bail_amount} bail and is now out of jail."
+            
+            if payment_success:
+                msg = f"{player.name} paid ${bail_amount} bail and is now out of jail."
+            else:
+                msg = f"{player.name} paid ${bail_amount} bail and is now out of jail (tpay payment failed, using fallback)."
+                
             self.log_event(msg)
             self._resolve_current_action_segment() 
             return {"status": "success", "message": msg, "paid_bail": True}

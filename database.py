@@ -1,7 +1,7 @@
 # database.py
 import os
 import datetime
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Text, ForeignKey, DateTime, JSON
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Text, ForeignKey, DateTime, JSON, Boolean
 from sqlalchemy.sql import func
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
@@ -19,6 +19,24 @@ DATABASE_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_POR
 
 engine = create_engine(DATABASE_URL)
 metadata = MetaData()
+
+# Persistent agents table - stores agent information across games
+agents_table = Table(
+    "agents",
+    metadata,
+    Column("id", Integer, primary_key=True, index=True, autoincrement=True),
+    Column("agent_uid", String, unique=True, index=True),  # Unique identifier for agent
+    Column("name", String, nullable=False),
+    Column("personality_prompt", Text, nullable=True),  # Custom personality for prompts
+    Column("memory_data", JSON, nullable=True),  # Historical memory and experiences
+    Column("preferences", JSON, nullable=True),  # Trading preferences, risk tolerance, etc.
+    Column("total_games_played", Integer, default=0),
+    Column("total_wins", Integer, default=0),
+    Column("tpay_account_id", String, nullable=True),  # tpay account for payment service
+    Column("status", String, default="active"),  # active/inactive/in_game
+    Column("created_at", DateTime, default=func.now()),
+    Column("last_active", DateTime, default=func.now())
+)
 
 games_table = Table(
     "games",
@@ -38,9 +56,13 @@ players_table = Table(
     metadata,
     Column("id", Integer, primary_key=True, index=True, autoincrement=True), 
     Column("game_id", Integer, ForeignKey("games.id", name="fk_players_game_id"), nullable=False),
+    Column("agent_id", Integer, ForeignKey("agents.id", name="fk_players_agent_id"), nullable=False),  # Reference to persistent agent
     Column("player_index_in_game", Integer, nullable=False), # 0, 1, 2, 3 for a game
-    Column("agent_name", String),
-    Column("agent_type", String, nullable=True) 
+    Column("agent_name", String),  # Cache of agent name for this game
+    Column("agent_type", String, nullable=True),
+    Column("game_starting_balance", Integer, default=1500),  # Starting balance for this specific game
+    Column("final_balance", Integer, nullable=True),  # Final balance when game ends
+    Column("final_ranking", Integer, nullable=True)  # 1st, 2nd, 3rd, 4th place in this game
 )
 
 game_turns_table = Table(

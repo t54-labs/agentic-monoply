@@ -5,16 +5,21 @@ from typing import List, Set, Optional, Dict, Any
 # For now, let's assume we will import it properly once board.py and property.py are stable.
 # from .property import PurchasableSquare # This will be the eventual import
 
-INITIAL_MONEY = 1500
+# Import tpay for real-time balance checking
+import tpay
+
+import utils
+
+INITIAL_MONEY = 1500.0
 INITIAL_POSITION = 0 # GO square
 
 class Player:
-    def __init__(self, player_id: int, name: str, is_ai: bool = False, db_id: Optional[int] = None):
+    def __init__(self, player_id: int, name: str, is_ai: bool = False, db_id: Optional[int] = None, agent_uid: Optional[str] = None, agent_tpay_id: Optional[str] = None):
         self.player_id: int = player_id
         self.name: str = name
         self.is_ai: bool = is_ai # To distinguish between human and AI agent
 
-        self.money: int = INITIAL_MONEY
+        self._money: float = INITIAL_MONEY  # Private field for fallback
         self.position: int = INITIAL_POSITION # square_id from 0-39
         
         # Store IDs of properties owned. The actual PropertySquare objects will be managed by the Board or GameController.
@@ -30,9 +35,35 @@ class Player:
         # New attribute to track mortgaged properties received from trades that need handling
         self.pending_mortgaged_properties_to_handle: List[Dict[str, Any]] = [] # List of {property_id: int, source_trade_id: int}
         self.db_id: Optional[int] = db_id # Database primary key for this player instance
+        self.agent_uid: Optional[str] = agent_uid # Agent UID for this player instance
+        self.agent_tpay_id: Optional[str] = agent_tpay_id # TPay account ID for real-time balance
+
+    @property
+    def money(self) -> int:
+        """Get current money balance from tpay in real-time, fallback to local cache"""
+        if self.agent_tpay_id:
+            try:
+                # Use tpay SDK to get real-time balance
+                balance = tpay.get_agent_asset_balance(agent_id=self.agent_tpay_id, network="solana", asset=utils.GAME_TOKEN_SYMBOL)
+                if balance is not None:
+                    return float(balance)
+                else:
+                    print(f"[Player] Warning: Could not get tpay balance for agent {self.agent_tpay_id}, using cached value ${self._money}")
+            except Exception as e:
+                print(f"[Player] Error getting tpay balance for agent {self.agent_tpay_id}: {e}, using cached value ${self._money}")
+        
+        # Fallback to local cached value
+        return self._money
+    
+    @money.setter
+    def money(self, value: float) -> None:
+        """Set money value (updates local cache only)"""
+        self._money = value
 
     def __str__(self) -> str:
         db_id_str = f" (DB_ID:{self.db_id})" if self.db_id is not None else ""
+        agent_uid_str = f" (AGENT_UID:{self.agent_uid})" if self.agent_uid is not None else ""
+        agent_tpay_str = f" (TPAY_ID:{self.agent_tpay_id})" if self.agent_tpay_id is not None else ""
         jail_status = ", In Jail" if self.in_jail else ""
         bankrupt_status = ", BANKRUPT" if self.is_bankrupt else ""
         gooj_status = []
@@ -41,15 +72,18 @@ class Player:
         gooj_str = f", GOOJ: {', '.join(gooj_status) if gooj_status else 'None'}"
         pending_mort_str = f", PendingMort: {len(self.pending_mortgaged_properties_to_handle)}" if self.pending_mortgaged_properties_to_handle else ""
 
-        return (f"Player {self.player_id}{db_id_str}: {self.name} (${self.money}, Position: {self.position}{jail_status}, "
+        return (f"Player {self.player_id}{db_id_str}{agent_uid_str}{agent_tpay_str}: {self.name} (${self.money}, Position: {self.position}{jail_status}, "
                 f"Properties: {len(self.properties_owned_ids)}{gooj_str}{pending_mort_str})"
-                f"{bankrupt_status}")
+                f"{bankrupt_status}")   
 
     def add_money(self, amount: int) -> None:
         if amount < 0:
             raise ValueError("Amount to add must be non-negative.")
         if not self.is_bankrupt:
-            self.money += amount
+            # Update local cache
+            self._money += amount
+            # Note: Real tpay balance updates should be handled by tpay transfer operations
+            # This method is for game logic tracking only
 
     def subtract_money(self, amount: int) -> bool:
         """
@@ -62,8 +96,11 @@ class Player:
         if self.is_bankrupt: # Bankrupt players can't pay
             return False 
             
-        self.money -= amount # Allow money to go negative, GC handles bankruptcy check
-        return self.money >= 0 # Returns true if still solvent after this subtraction
+        # Update local cache
+        self._money -= amount # Allow money to go negative, GC handles bankruptcy check
+        # Note: Real tpay balance updates should be handled by tpay transfer operations
+        # This method is for game logic tracking only
+        return self._money >= 0 # Returns true if still solvent after this subtraction
 
     def move_to(self, new_position: int, passed_go: bool, go_salary: int = 200) -> None:
         if not (0 <= new_position < 40): # Assuming 40 squares

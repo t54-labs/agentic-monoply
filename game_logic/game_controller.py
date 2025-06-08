@@ -37,16 +37,13 @@ class TradeOffer:
     rejection_count: int = 0       # New: Tracks rejections for this specific offer iteration
 
 class GameController:
-    def __init__(self, num_players: int = 4, player_names: Optional[List[str]] = None, 
-                 game_uid: str = "default_game", ws_manager: Optional[Any] = None,
-                 game_db_id: Optional[int] = None, 
-                 player_db_id_map: Optional[Dict[int, int]] = None
+    def __init__(self, game_uid: str = "default_game", ws_manager: Optional[Any] = None,
+                 game_db_id: Optional[int] = None, participants: Optional[List[Dict[str, Any]]] = None
                  ):
         
         self.game_uid = game_uid 
         self.ws_manager = ws_manager 
         self.game_db_id = game_db_id 
-        self.player_db_id_map = player_db_id_map if player_db_id_map is not None else {}
         self.current_game_turn_db_id: Optional[int] = None 
         
         try:
@@ -58,13 +55,9 @@ class GameController:
         self.game_log: List[str] = [] 
         self.turn_count: int = 0
 
-        if not (2 <= num_players <= 8):
-            print(f"[Warning G:{game_uid}] Player count {num_players} out of range. Defaulting to 4.")
-            num_players = 4
-
         self.board: Board = Board()
         self.players: List[Player] = [] 
-        self._initialize_players(num_players, player_names) 
+        self._initialize_players(participants) 
 
         self.current_player_index: int = 0
         self.dice: Tuple[int, int] = (0, 0)
@@ -105,22 +98,18 @@ class GameController:
             else:
                 print(f"[WS Send Critical G:{self.game_uid}] No running event loop available in GC.log_event for threadsafe call. WS message for '{event_message}' will NOT be sent.")
     
-    def _initialize_players(self, num_players: int, player_names: Optional[List[str]] = None) -> None:
-        default_ai_names = ["Agent Smith", "Agent Brown", "Agent Jones", "Agent White"]
-        for i in range(num_players):
-            name = ""
-            if player_names and i < len(player_names):
-                name = player_names[i]
-            else:
-                name = default_ai_names[i % len(default_ai_names)] + (f" {i // len(default_ai_names) + 1}" if num_players > len(default_ai_names) else "")
-            
-            player_db_id = self.player_db_id_map.get(i)
+    def _initialize_players(self, participants: Optional[List[Dict[str, Any]]] = None) -> None:
+        for i in range(len(participants)):
+            name = participants[i]['name']
+            agent_uid = participants[i]['agent_uid']
+            agent_tpay_id = participants[i]['agent_tpay_id']
+            player_db_id = participants[i].get('db_id')
             if player_db_id is None and self.game_db_id is not None: 
                 self.log_event(f"[CRITICAL DB Error] DB ID for P_idx {i} not found. Player not DB-linked.", "error_log")
             
-            new_player = Player(player_id=i, name=name, is_ai=True, db_id=player_db_id)
+            new_player = Player(player_id=i, name=name, is_ai=True, db_id=player_db_id, agent_uid=agent_uid, agent_tpay_id=agent_tpay_id)
             self.players.append(new_player)
-        self.log_event(f"Initialized {num_players} AI players: {[p.name + (f'(DBID:{p.db_id})' if p.db_id else '(No DBID)') for p in self.players]}")
+        self.log_event(f"Initialized {len(self.players)} AI players: {[p.name + (f'(DBID:{p.db_id})' if p.db_id else '(No DBID)') for p in self.players]}")
         self.pending_decision_type = None 
         self.dice_roll_outcome_processed = True 
         self._clear_pending_decision() 
@@ -1596,15 +1585,3 @@ class GameController:
         self.auction_player_has_bid_this_round = {}
         self.auction_current_bidder_turn_index = 0
         self._resolve_current_action_segment()
-
-if __name__ == '__main__':
-    controller = GameController(num_players=4)
-    controller.start_game()
-    print(f"Current player: {controller.get_current_player().name}")
-    d1, d2 = controller.roll_dice()
-    print(f"Dice: {d1}, {d2}")
-    gs = controller.get_game_state_for_agent(controller.get_current_player().player_id)
-    print(f"Generated game state for {gs['my_name']}")
-    print(f"Money: {gs['my_money']}")
-    print(f"First square name: {gs['board_squares'][1]['name']}")
-    print(f"Log: {gs['game_log_tail']}") 

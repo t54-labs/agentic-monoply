@@ -10,7 +10,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 
-from tpay import *
+import tpay
 from tpay.tools import taudit_verifier
 
 from game_logic.player import Player
@@ -19,9 +19,12 @@ from ai_agent.agent import OpenAIAgent
 from main import TOOL_REGISTRY, NUM_PLAYERS, PLAYER_NAMES, MAX_TURNS, ACTION_DELAY_SECONDS, MAX_ACTIONS_PER_SEGMENT, execute_agent_action, print_game_summary, _setup_tool_placeholders
 from colorama import init, Fore as ColoramaFore, Style as ColoramaStyle
 
+# Import utils for tpay operations
+import utils
+
 # 2. Database and SQLAlchemy imports
-from database import create_db_and_tables, engine, games_table, players_table, game_turns_table, agent_actions_table
-from sqlalchemy import insert, update, select
+from database import create_db_and_tables, engine, games_table, players_table, game_turns_table, agent_actions_table, agents_table
+from sqlalchemy import insert, update, select, func
 from sqlalchemy.orm import Session 
 
 # Game simulation configuration
@@ -29,6 +32,10 @@ CONCURRENT_GAMES_COUNT = 2  # Number of games to run simultaneously
 AUTO_RESTART_GAMES = True  # Whether to start new games when current ones finish
 GAME_COUNTER = 0  # Global counter for unique game numbering
 MAINTENANCE_INTERVAL = 30  # Seconds between game count maintenance checks
+
+# Agent management configuration
+AGENTS_PER_GAME = NUM_PLAYERS     # Number of agents per game (should match NUM_PLAYERS)
+AGENT_INITIAL_BALANCE = 1500  # Starting balance for each game
 
 # 1. Colorama setup & Global placeholders
 class Fore: CYAN=YELLOW=GREEN=RED=MAGENTA=WHITE=BLACK=BLUE=""; LIGHTBLACK_EX=LIGHTBLUE_EX=LIGHTCYAN_EX=LIGHTGREEN_EX=LIGHTMAGENTA_EX=LIGHTRED_EX=LIGHTWHITE_EX=LIGHTYELLOW_EX=""
@@ -96,16 +103,237 @@ class ConnectionManager:
 # 4. Create instance of ConnectionManager
 manager = ConnectionManager()
 
+# 4.5. Agent Management System
+class AgentManager:
+    def __init__(self):
+        self.available_agents: List[Dict[str, Any]] = []  # Available agents for matchmaking
+        self.agents_in_game: Dict[str, str] = {}  # agent_uid -> game_uid mapping
+        self.agent_instances: Dict[str, OpenAIAgent] = {}  # agent_uid -> OpenAIAgent instance
+        
+    async def initialize_agents_from_database(self):
+        """Load all active agents from database and create their instances"""
+        try:
+            with Session(engine) as session:
+                # Get all active agents from database
+                stmt = select(agents_table).where(agents_table.c.status == 'active')
+                result = session.execute(stmt)
+                agents_data = result.fetchall()
+                
+                print(f"{Fore.GREEN}[Agent Manager] Found {len(agents_data)} active agents in database{Style.RESET_ALL}")
+                
+                for agent_row in agents_data:
+                    agent_dict = {
+                        'id': agent_row.id,
+                        'agent_uid': agent_row.agent_uid,
+                        'name': agent_row.name,
+                        'personality_prompt': agent_row.personality_prompt,
+                        'memory_data': agent_row.memory_data or {},
+                        'preferences': agent_row.preferences or {},
+                        'total_games_played': agent_row.total_games_played,
+                        'total_wins': agent_row.total_wins,
+                        'tpay_account_id': agent_row.tpay_account_id,
+                        'status': agent_row.status
+                    }
+                    
+                    # Create OpenAI agent instance
+                    agent_instance = OpenAIAgent(
+                        player_id=-1,  # Will be set when joining a game
+                        name=agent_dict['name']
+                    )
+                    
+                    # Store agent instance
+                    self.agent_instances[agent_dict['agent_uid']] = agent_instance
+                    
+                    # Add to available agents if not in game
+                    if agent_dict['status'] == 'active':
+                        self.available_agents.append(agent_dict)
+                
+                print(f"{Fore.GREEN}[Agent Manager] Initialized {len(self.available_agents)} available agents{Style.RESET_ALL}")
+                
+        except Exception as e:
+            print(f"{Fore.RED}[Agent Manager] Error initializing agents: {e}{Style.RESET_ALL}")
+    
+    def get_available_agents_for_game(self, num_needed: int) -> List[Dict[str, Any]]:
+        """Get available agents for a new game"""
+        if len(self.available_agents) < num_needed:
+            print(f"{Fore.YELLOW}[Agent Manager] Not enough available agents. Need {num_needed}, have {len(self.available_agents)}{Style.RESET_ALL}")
+            return []
+        
+        # Select agents (for now, just take first N available)
+        selected_agents = self.available_agents[:num_needed]
+        
+        # Remove selected agents from available pool
+        for agent in selected_agents:
+            self.available_agents.remove(agent)
+            # Mark as in_game in memory (will update DB when game starts)
+            
+        return selected_agents
+    
+    def assign_agents_to_game(self, agents: List[Dict[str, Any]], game_uid: str):
+        """Assign agents to a specific game"""
+        for agent in agents:
+            self.agents_in_game[agent['agent_uid']] = game_uid
+            # Update status in database
+            self._update_agent_status(agent['agent_uid'], 'in_game')
+    
+    def release_agents_from_game(self, game_uid: str):
+        """Release agents back to available pool when game ends"""
+        agents_to_release = [agent_uid for agent_uid, g_uid in self.agents_in_game.items() if g_uid == game_uid]
+        
+        for agent_uid in agents_to_release:
+            # Remove from in_game mapping
+            del self.agents_in_game[agent_uid]
+            
+            # Find agent data and add back to available pool
+            try:
+                with Session(engine) as session:
+                    stmt = select(agents_table).where(agents_table.c.agent_uid == agent_uid)
+                    result = session.execute(stmt)
+                    agent_row = result.fetchone()
+                    
+                    if agent_row:
+                        agent_dict = {
+                            'id': agent_row.id,
+                            'agent_uid': agent_row.agent_uid,
+                            'name': agent_row.name,
+                            'personality_prompt': agent_row.personality_prompt,
+                            'memory_data': agent_row.memory_data or {},
+                            'preferences': agent_row.preferences or {},
+                            'total_games_played': agent_row.total_games_played,
+                            'total_wins': agent_row.total_wins,
+                            'tpay_account_id': agent_row.tpay_account_id,
+                            'status': 'active'
+                        }
+                        self.available_agents.append(agent_dict)
+                        
+                        # Update status in database
+                        self._update_agent_status(agent_uid, 'active')
+                        
+                        print(f"{Fore.GREEN}[Agent Manager] Released agent {agent_dict['name']} back to available pool{Style.RESET_ALL}")
+                        
+            except Exception as e:
+                print(f"{Fore.RED}[Agent Manager] Error releasing agent {agent_uid}: {e}{Style.RESET_ALL}")
+    
+    def _update_agent_status(self, agent_uid: str, status: str):
+        """Update agent status in database"""
+        try:
+            with Session(engine) as session:
+                stmt = update(agents_table).where(
+                    agents_table.c.agent_uid == agent_uid
+                ).values(
+                    status=status,
+                    last_active=func.now()
+                )
+                session.execute(stmt)
+                session.commit()
+        except Exception as e:
+            print(f"{Fore.RED}[Agent Manager] Error updating agent status: {e}{Style.RESET_ALL}")
+    
+    def get_agent_instance(self, agent_uid: str) -> Optional[OpenAIAgent]:
+        """Get the OpenAI agent instance for a given agent_uid"""
+        return self.agent_instances.get(agent_uid)
+
+# Global agent manager instance
+agent_manager = AgentManager()
+
+async def initialize_agent_tpay_balances(available_agents: List[Dict[str, Any]], game_uid: str):
+    """Initialize game token accounts for agents at game start"""
+    # Extract tpay account IDs from available agents
+    agent_tpay_ids = []
+    agent_names = []
+    
+    for agent_data in available_agents:
+        tpay_account_id = agent_data.get('tpay_account_id')
+        if not tpay_account_id:
+            print(f"{Fore.YELLOW}[TPay] Agent {agent_data['name']} has no tpay account, skipping game token setup{Style.RESET_ALL}")
+            continue
+        
+        agent_tpay_ids.append(tpay_account_id)
+        agent_names.append(agent_data['name'])
+    
+    print(f"{Fore.CYAN}[TPay] Resetting {utils.GAME_TOKEN_SYMBOL} accounts for {len(agent_tpay_ids)} agents in game {game_uid}{Style.RESET_ALL}")
+    
+    try:
+        # reset game token accounts for all agents
+        for agent_id in agent_tpay_ids:
+            result = utils.reset_agent_game_balance(
+                agent_id=agent_id,
+            )
+            if result:
+                print(f"{Fore.GREEN}[TPay] Successfully reset {utils.GAME_TOKEN_SYMBOL} balance for agent {agent_id}{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}[TPay] Failed to reset {utils.GAME_TOKEN_SYMBOL} balance for agent {agent_id}{Style.RESET_ALL}")        
+    except Exception as e:
+        print(f"{Fore.RED}[TPay] Error initializing game token accounts for {game_uid}: {e}{Style.RESET_ALL}")
+
+async def update_agent_game_statistics(available_agents: List[Dict[str, Any]], gc: GameController, 
+                                      game_db_id: int):
+    """Update agent statistics after a game ends"""
+    try:
+        # Determine winner and rankings
+        active_players = [p for p in gc.players if not p.is_bankrupt]
+        winner_agent_id = None
+        
+        if len(active_players) == 1:
+            # Single winner
+            winner_player_idx = active_players[0].player_id
+            winner_agent_id = available_agents[winner_player_idx]['id']
+        
+        # Update each agent's statistics
+        with Session(engine) as session:
+            for i, agent_data in enumerate(available_agents):
+                player = gc.players[i]
+                is_winner = (agent_data['id'] == winner_agent_id)
+                
+                # Calculate final ranking (1st = winner, others based on money/assets)
+                final_ranking = 1 if is_winner else (len(available_agents) if player.is_bankrupt else 2)
+                
+                # Update agents table
+                agent_update = update(agents_table).where(
+                    agents_table.c.id == agent_data['id']
+                ).values(
+                    total_games_played=agents_table.c.total_games_played + 1,
+                    total_wins=agents_table.c.total_wins + (1 if is_winner else 0),
+                    last_active=func.now()
+                )
+                session.execute(agent_update)
+                
+                # Update players table with final game data
+                player_update = update(players_table).where(
+                    players_table.c.id == available_agents[i]['db_id']
+                ).values(
+                    final_balance=player.money,
+                    final_ranking=final_ranking
+                )
+                session.execute(player_update)
+                
+                print(f"{Fore.CYAN}[Stats] Agent {agent_data['name']}: Ranking {final_ranking}, Final Balance: ${player.money}{Style.RESET_ALL}")
+            
+            session.commit()
+            
+    except Exception as e:
+        print(f"{Fore.RED}[Agent Stats] Error updating agent statistics: {e}{Style.RESET_ALL}")
+        raise
+
 # 5. Game management functions
 async def create_new_game_instance(app_instance: FastAPI) -> str:
     """Create and start a new game instance"""
     global GAME_COUNTER
+    
+    # Check if we have enough available agents
+    available_agents = agent_manager.get_available_agents_for_game(AGENTS_PER_GAME)
+    if not available_agents:
+        print(f"{Fore.YELLOW}[Game Manager] Cannot create new game - not enough available agents (need {AGENTS_PER_GAME}){Style.RESET_ALL}")
+        return None
+    
     GAME_COUNTER += 1
-    
     game_uid = f"monopoly_game_{GAME_COUNTER}_{uuid.uuid4().hex[:6]}"
-    print(f"{Fore.GREEN}[Game Manager] Creating new game instance: {game_uid}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}[Game Manager] Creating new game instance: {game_uid} with agents: {[a['name'] for a in available_agents]}{Style.RESET_ALL}")
     
-    game_task = asyncio.create_task(start_monopoly_game_instance_with_restart(game_uid, manager, app_instance))
+    # Assign agents to this game
+    agent_manager.assign_agents_to_game(available_agents, game_uid)
+    
+    game_task = asyncio.create_task(start_monopoly_game_instance_with_restart(game_uid, manager, app_instance, available_agents))
     app_instance.state.game_tasks[game_uid] = game_task
     
     print(f"{Fore.GREEN}[Game Manager] Game {game_uid} task created and started{Style.RESET_ALL}")
@@ -130,17 +358,37 @@ async def maintain_game_count(app_instance: FastAPI):
     games_needed = CONCURRENT_GAMES_COUNT - len(active_games)
     if games_needed > 0 and AUTO_RESTART_GAMES:
         print(f"{Fore.CYAN}[Game Manager] Need to start {games_needed} new games (active: {len(active_games)}/{CONCURRENT_GAMES_COUNT}){Style.RESET_ALL}")
+        
+        # Check if we have enough available agents
+        available_agent_count = len(agent_manager.available_agents)
+        max_possible_games = available_agent_count // AGENTS_PER_GAME
+        
+        if max_possible_games < games_needed:
+            print(f"{Fore.YELLOW}[Game Manager] Not enough agents for all requested games. Available agents: {available_agent_count}, can start {max_possible_games} games{Style.RESET_ALL}")
+            games_needed = max_possible_games
+        
         for _ in range(games_needed):
-            await create_new_game_instance(app_instance)
+            created_game_uid = await create_new_game_instance(app_instance)
+            if created_game_uid is None:
+                print(f"{Fore.YELLOW}[Game Manager] Could not create more games - no available agents{Style.RESET_ALL}")
+                break
 
-async def start_monopoly_game_instance_with_restart(game_uid: str, connection_manager_param: ConnectionManager, app_instance: FastAPI):
+async def start_monopoly_game_instance_with_restart(game_uid: str, connection_manager_param: ConnectionManager, app_instance: FastAPI, available_agents: List[Dict[str, Any]]):
     """Wrapper for game instance that handles auto-restart"""
     try:
-        await start_monopoly_game_instance(game_uid, connection_manager_param, app_instance)
+        await start_monopoly_game_instance(game_uid, connection_manager_param, app_instance, available_agents)
     except Exception as e:
         print(f"{Fore.RED}[Game Manager] Game {game_uid} ended with error: {e}{Style.RESET_ALL}")
     finally:
         print(f"{Fore.CYAN}[Game Manager] Game {game_uid} has finished. Checking if new game should be started...{Style.RESET_ALL}")
+        
+        # Always release agents back to available pool
+        try:
+            agent_manager.release_agents_from_game(game_uid)
+            print(f"{Fore.GREEN}[Game Manager] Released agents from {game_uid} back to available pool{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}[Game Manager] Error releasing agents from {game_uid}: {e}{Style.RESET_ALL}")
+        
         # Schedule a new game to maintain the count (will be handled by periodic maintenance)
         if AUTO_RESTART_GAMES:
             # Use asyncio.create_task to avoid blocking this cleanup
@@ -227,24 +475,33 @@ def _log_agent_action_to_db(gc_ref: Any, player_id: int, agent_ref: Any, action_
             stmt = insert(agent_actions_table).values(action_data); session.execute(stmt); session.commit()
     except Exception as e: print(f"[DB Error] Log agent action P{player_id} G_DB_ID {gc_ref.game_db_id}: {e}")
 
-async def start_monopoly_game_instance(game_uid: str, connection_manager_param: ConnectionManager, app_instance: FastAPI):
+async def start_monopoly_game_instance(game_uid: str, connection_manager_param: ConnectionManager, app_instance: FastAPI, available_agents: List[Dict[str, Any]]):
     print(f"Attempting to start G_UID: {game_uid}")
-    game_db_id: Optional[int] = None; player_db_id_map: Dict[int, int] = {}
+    game_db_id: Optional[int] = None; 
     gc: Optional[GameController] = None 
 
     try:
         with Session(engine) as session:
-            game_values = {"game_uid": game_uid, "status": "initializing", "num_players": NUM_PLAYERS, "max_turns": MAX_TURNS}
+            game_values = {"game_uid": game_uid, "status": "initializing", "num_players": len(available_agents), "max_turns": MAX_TURNS}
             game_db_id = session.execute(insert(games_table).values(game_values).returning(games_table.c.id)).scalar_one_or_none()
             if game_db_id is None: raise Exception("Failed to get game_db_id.")
-            for i in range(NUM_PLAYERS):
-                p_name = PLAYER_NAMES[i] if i < len(PLAYER_NAMES) else f"P{i+1}"
-                p_values = {"game_id": game_db_id, "player_index_in_game": i, "agent_name": p_name, "agent_type": "OpenAIAgent_gpt-4"}
+            
+            # Create player records linked to persistent agents
+            for i, agent_data in enumerate(available_agents):
+                p_values = {
+                    "game_id": game_db_id, 
+                    "agent_id": agent_data['id'],  # Link to persistent agent
+                    "player_index_in_game": i, 
+                    "agent_name": agent_data['name'], 
+                    "agent_type": "OpenAIAgent_gpt-4",
+                    "game_starting_balance": AGENT_INITIAL_BALANCE
+                }
                 p_db_id = session.execute(insert(players_table).values(p_values).returning(players_table.c.id)).scalar_one_or_none()
                 if p_db_id is None: raise Exception(f"Failed to get player_db_id for P_idx {i}.")
-                player_db_id_map[i] = p_db_id
+                available_agents[i]['db_id'] = p_db_id
+        
             session.commit()
-            print(f"{Fore.GREEN}DB init G_UID:{game_uid} (DBID:{game_db_id}). PlayerDBIDs: {player_db_id_map}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}DB init G_UID:{game_uid} (DBID:{game_db_id}) with persistent agents. {Style.RESET_ALL}")
     except Exception as db_init_e: 
         print(f"{Fore.RED}[FATAL DB ERROR] for {game_uid}: {db_init_e}{Style.RESET_ALL}")
         # Optionally broadcast a lobby update about failed game creation if desired
@@ -252,17 +509,35 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
         return 
 
     try:
-        gc = GameController(num_players=NUM_PLAYERS, player_names=PLAYER_NAMES, 
-                            game_uid=game_uid, ws_manager=connection_manager_param, 
-                            game_db_id=game_db_id, player_db_id_map=player_db_id_map)
+        gc = GameController(game_uid=game_uid, ws_manager=connection_manager_param, 
+                            game_db_id=game_db_id, participants=available_agents)
         
         if hasattr(app_instance.state, 'active_games'):
             app_instance.state.active_games[game_uid] = gc
             print(f"{Fore.GREEN}GameController for G_UID:{game_uid} stored in app.state.active_games.{Style.RESET_ALL}")
         
         _setup_tool_placeholders(gc)
-        agents = [OpenAIAgent(player_id=i, name=gc.players[i].name) for i in range(NUM_PLAYERS)]
-        await gc.send_event_to_frontend({"type": "init_log", "message": f"Initialized {len(agents)} agents for G:{game_uid}."})
+        
+        # Use persistent agent instances instead of creating new ones
+        agents = []
+        for i, agent_data in enumerate(available_agents):
+            agent_instance = agent_manager.get_agent_instance(agent_data['agent_uid'])
+            if agent_instance:
+                # Update the agent's player_id for this game
+                agent_instance.player_id = i
+                agents.append(agent_instance)
+                print(f"{Fore.CYAN}[Agent] Using persistent agent {agent_data['name']} (UID: {agent_data['agent_uid']}) as Player {i}{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}[Agent Error] Could not find agent instance for {agent_data['agent_uid']}{Style.RESET_ALL}")
+                # Fallback: create new agent instance
+                agent_instance = OpenAIAgent(player_id=i, name=agent_data['name'])
+                agents.append(agent_instance)
+        
+        await gc.send_event_to_frontend({"type": "init_log", "message": f"Initialized {len(agents)} persistent agents for G:{game_uid}."})
+        
+        # Initialize game token accounts for all agents before game starts
+        print(f"{Fore.CYAN}[TPay] Creating {utils.GAME_TOKEN_SYMBOL} token accounts for game {game_uid}...{Style.RESET_ALL}")
+        await initialize_agent_tpay_balances(available_agents, game_uid)
         
         # ----- Broadcast New Game to Lobby ----- START
         initial_players_info_for_lobby = []
@@ -321,11 +596,11 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
         print(f"{Fore.CYAN}[Lobby Broadcast] Sent game_status_update (in_progress) for G_UID: {game_uid}{Style.RESET_ALL}")
 
         # Send initial state for all players after game starts (will reflect jail status)
-        for p_idx in range(NUM_PLAYERS):
+        for p_idx in range(len(available_agents)):
             if not gc.players[p_idx].is_bankrupt: # Should not be bankrupt at start
                 player_state_data = gc.get_game_state_for_agent(p_idx)
                 await gc.send_event_to_frontend({"type": "player_state_update", "data": player_state_data})
-        print(f"Sent initial player states for G_UID: {game_uid} (All in jail test mode activated)")
+        print(f"Sent initial player states for G_UID: {game_uid}")
                 
         loop_turn_count = 0 
         action_sequence_this_gc_turn = 0 
@@ -552,7 +827,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
             # After potential turn change or auction continuation, send updates for all players
             if not gc.game_over: 
                 print(f"{Fore.MAGENTA}End of loop iter {loop_turn_count} for G_UID:{game_uid}. Sending all player state updates.{Style.RESET_ALL}")
-                for p_idx_update in range(NUM_PLAYERS):
+                for p_idx_update in range(len(available_agents)):
                     if not gc.players[p_idx_update].is_bankrupt:
                         player_state_data_periodic = gc.get_game_state_for_agent(p_idx_update) 
                         await gc.send_event_to_frontend({"type": "player_state_update", "data": player_state_data_periodic})
@@ -573,6 +848,15 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
             await gc.send_event_to_frontend({"type": "game_summary_data", "summary": final_summary_str})
             await gc.send_event_to_frontend({"type": "game_end_log", "message":f"Monopoly Game Instance {game_uid} Finished."})
             print(f"Game instance {game_uid} final summary sent.")
+            
+            # Update agent statistics and release them back to available pool
+            try:
+                await update_agent_game_statistics(available_agents, gc, game_db_id)
+                agent_manager.release_agents_from_game(game_uid)
+                print(f"{Fore.GREEN}[Agent Manager] Released {len(available_agents)} agents back to available pool{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[Agent Manager] Error updating agent statistics: {e}{Style.RESET_ALL}")
+            
             if game_db_id:
                 try:
                     with Session(engine) as session:
@@ -581,7 +865,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                         if current_status_res != "crashed_logic_error": 
                             winner_player_db_id = None
                             active_p_list = [p for p in gc.players if not p.is_bankrupt]
-                            if len(active_p_list) == 1: winner_player_db_id = player_db_id_map.get(active_p_list[0].player_id)
+                            if len(active_p_list) == 1: winner_player_db_id = available_agents[active_p_list[0].player_id]['db_id']
                             final_status = "completed"
                             if loop_turn_count >= MAX_TURNS: final_status = "max_turns_reached"
                             elif not active_p_list and len(active_p_list) !=1 : final_status = "aborted_no_winner" 
@@ -636,7 +920,16 @@ async def lifespan(app_instance: FastAPI):
     
     # Initialize tpay sdk
     print(f"Initializing tpay sdk with api_key: {TLEDGER_API_KEY}, api_secret: {TLEDGER_API_SECRET}, project_id: {TLEDGER_PROJECT_ID}, base_url: {TLEDGER_BASE_URL}, timeout: 1000")
-    tpay_initialize(api_key=TLEDGER_API_KEY, api_secret=TLEDGER_API_SECRET, project_id=TLEDGER_PROJECT_ID, base_url=TLEDGER_BASE_URL, timeout=1000)
+    tpay.tpay_initialize(api_key=TLEDGER_API_KEY, api_secret=TLEDGER_API_SECRET, project_id=TLEDGER_PROJECT_ID, base_url=TLEDGER_BASE_URL, timeout=1000)
+
+    # Initialize agent manager and load agents from database
+    print("Initializing Agent Manager...")
+    await agent_manager.initialize_agents_from_database()
+    
+    # Check if we have enough agents to start games
+    if len(agent_manager.available_agents) < AGENTS_PER_GAME:
+        print(f"{Fore.YELLOW}[Warning] Not enough agents in database to start games. Need at least {AGENTS_PER_GAME}, have {len(agent_manager.available_agents)}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}[Warning] Consider creating agents in the database or reducing AGENTS_PER_GAME{Style.RESET_ALL}")
 
     print(f"Initializing {CONCURRENT_GAMES_COUNT} game instance(s) simultaneously (via lifespan)...")
     # Start the configured number of games
@@ -899,6 +1192,213 @@ async def update_config_api(request: Request):
     except Exception as e:
         print(f"{Fore.RED}[API E] Error updating config: {e}{Style.RESET_ALL}")
         raise HTTPException(status_code=500, detail="Failed to update configuration")
+
+@app.post("/api/admin/agents/create_defaults")
+async def create_default_agents_api():
+    """Create default agents for testing"""
+    try:
+        default_agents = [
+            {"name": "Wall Street Wolf", "personality": "Aggressive trader focused on quick profits and hostile takeovers"},
+            {"name": "Warren Wisdom", "personality": "Conservative long-term strategist who thinks decades ahead"},
+            {"name": "Smooth Talker Sally", "personality": "Charismatic negotiator who can convince anyone of anything"},
+            {"name": "Casino Charlie", "personality": "High-risk high-reward gambler who lives for the thrill"},
+            # {"name": "Professor Numbers", "personality": "Data-driven analytical genius who calculates every probability"},
+            # {"name": "Vulture Victor", "personality": "Opportunistic scavenger who swoops in on distressed assets"},
+            # {"name": "Friendship Frank", "personality": "Collaborative deal-maker who believes everyone can win"},
+            # {"name": "Zen Master Min", "personality": "Minimalist philosopher focused only on essential moves"}
+        ]
+        
+        created_agents = []
+        with Session(engine) as session:
+            for agent_data in default_agents:
+                agent_uid = f"agent_{agent_data['name'].lower().replace(' ', '_')}_{uuid.uuid4().hex[:6]}"
+                
+                # Create tpay account for this agent
+                tpay_account_id = None
+                try:
+                    print(f"{Fore.CYAN}[TPay] Creating account for agent: {agent_data['name']}{Style.RESET_ALL}")
+                    
+                    tpay_agent_data = tpay.create_agent(
+                        name=agent_data['name'],
+                        description=f"Monopoly AI agent: {agent_data['personality']}",
+                        agent_daily_limit=10000.0,  # High limit for monopoly transactions
+                        agent_type="autonomous_agent"
+                    )
+                    
+                    if tpay_agent_data and 'id' in tpay_agent_data:
+                        tpay_account_id = tpay_agent_data['id']
+                        print(f"{Fore.GREEN}[TPay] Successfully created account for {agent_data['name']} with ID: {tpay_account_id}{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}[TPay] Failed to create account for {agent_data['name']} - no ID returned{Style.RESET_ALL}")
+                        
+                except Exception as tpay_error:
+                    print(f"{Fore.RED}[TPay] Error creating account for {agent_data['name']}: {tpay_error}{Style.RESET_ALL}")
+                
+                # Create agent record in database (even if tpay failed)
+                agent_values = {
+                    "agent_uid": agent_uid,
+                    "name": agent_data['name'],
+                    "personality_prompt": agent_data['personality'],
+                    "memory_data": {},
+                    "preferences": {},
+                    "total_games_played": 0,
+                    "total_wins": 0,
+                    "tpay_account_id": tpay_account_id,  # Will be None if tpay creation failed
+                    "status": "active"
+                }
+                
+                stmt = insert(agents_table).values(agent_values).returning(agents_table.c.id)
+                result = session.execute(stmt)
+                agent_id = result.scalar_one_or_none()
+                
+                if agent_id:
+                    created_agents.append({
+                        "id": agent_id,
+                        "agent_uid": agent_uid,
+                        "name": agent_data['name'],
+                        "personality": agent_data['personality'],
+                        "tpay_account_id": tpay_account_id,
+                        "tpay_status": "created" if tpay_account_id else "failed"
+                    })
+            
+            session.commit()
+        
+        # Reload agents in agent manager
+        await agent_manager.initialize_agents_from_database()
+        
+        successful_tpay = len([a for a in created_agents if a['tpay_account_id']])
+        
+        return {
+            "success": True,
+            "message": f"Created {len(created_agents)} agents ({successful_tpay} with tpay accounts)",
+            "agents": created_agents,
+            "tpay_success_count": successful_tpay,
+            "tpay_total_count": len(created_agents)
+        }
+    
+    except Exception as e:
+        print(f"{Fore.RED}[API E] Error creating default agents: {e}{Style.RESET_ALL}")
+        raise HTTPException(status_code=500, detail="Failed to create default agents")
+
+@app.get("/api/admin/agents")
+async def get_agents_api():
+    """Get all agents and their status"""
+    try:
+        # Get detailed info from database
+        with Session(engine) as session:
+            stmt = select(agents_table)
+            result = session.execute(stmt)
+            all_agents = result.fetchall()
+            
+            agents_with_tpay = len([a for a in all_agents if a.tpay_account_id])
+            agents_without_tpay = len(all_agents) - agents_with_tpay
+        
+        agents_info = {
+            "available_agents": len(agent_manager.available_agents),
+            "agents_in_game": len(agent_manager.agents_in_game),
+            "total_agent_instances": len(agent_manager.agent_instances),
+            "total_agents_in_db": len(all_agents),
+            "agents_with_tpay": agents_with_tpay,
+            "agents_without_tpay": agents_without_tpay,
+            "available_agents_list": agent_manager.available_agents,
+            "agents_in_game_mapping": agent_manager.agents_in_game
+        }
+        return agents_info
+    except Exception as e:
+        print(f"{Fore.RED}[API E] Error getting agents info: {e}{Style.RESET_ALL}")
+        raise HTTPException(status_code=500, detail="Failed to get agents information")
+
+@app.post("/api/admin/agents/create_game_tokens")
+async def create_game_token_accounts_api(request: Request):
+    """Create game token accounts for all agents"""
+    try:
+        data = await request.json() if hasattr(request, 'json') else {}
+        game_token = data.get('game_token', utils.GAME_TOKEN_SYMBOL)
+        initial_balance = data.get('initial_balance', utils.GAME_INITIAL_BALANCE)
+        
+        # Get all agents with tpay accounts
+        with Session(engine) as session:
+            stmt = select(agents_table).where(agents_table.c.tpay_account_id.is_not(None))
+            result = session.execute(stmt)
+            agents_with_tpay = result.fetchall()
+        
+        if not agents_with_tpay:
+            raise HTTPException(status_code=400, detail="No agents with tpay accounts found")
+        
+        agent_tpay_ids = [agent.tpay_account_id for agent in agents_with_tpay]
+        agent_names = [agent.name for agent in agents_with_tpay]
+        
+        print(f"{Fore.CYAN}[API] Creating {game_token} accounts for {len(agent_tpay_ids)} agents{Style.RESET_ALL}")
+        
+        # Create game token accounts
+        results = utils.create_game_token_accounts_for_agents(
+            agent_tpay_ids=agent_tpay_ids,
+            game_token=game_token,
+            initial_balance=initial_balance,
+            network="solana"
+        )
+        
+        return {
+            "success": True,
+            "message": f"Created {game_token} accounts for agents",
+            "game_token": game_token,
+            "initial_balance": initial_balance,
+            "results": results,
+            "successful_accounts": len(results['success']),
+            "failed_accounts": len(results['failed']),
+            "total_processed": results['total_processed']
+        }
+    
+    except Exception as e:
+        print(f"{Fore.RED}[API E] Error creating game token accounts: {e}{Style.RESET_ALL}")
+        raise HTTPException(status_code=500, detail="Failed to create game token accounts")
+
+@app.post("/api/admin/agents/{agent_id}/reset_game_balance")
+async def reset_agent_game_balance_api(agent_id: int, request: Request):
+    """Reset a specific agent's game token balance"""
+    try:
+        data = await request.json() if hasattr(request, 'json') else {}
+        game_token = data.get('game_token', utils.GAME_TOKEN_SYMBOL)
+        new_balance = data.get('new_balance', utils.GAME_INITIAL_BALANCE)
+        
+        # Get agent's tpay account ID
+        with Session(engine) as session:
+            stmt = select(agents_table).where(agents_table.c.id == agent_id)
+            result = session.execute(stmt)
+            agent_row = result.fetchone()
+        
+        if not agent_row:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        if not agent_row.tpay_account_id:
+            raise HTTPException(status_code=400, detail="Agent has no tpay account")
+        
+        print(f"{Fore.CYAN}[API] Resetting {game_token} balance for agent {agent_row.name} to ${new_balance}{Style.RESET_ALL}")
+        
+        success = utils.reset_agent_game_balance(
+            agent_id=agent_row.tpay_account_id,
+            game_token=game_token,
+            new_balance=new_balance
+        )
+        
+        if success:
+            return {
+                "success": True,
+                "message": f"Successfully reset {game_token} balance for {agent_row.name}",
+                "agent_name": agent_row.name,
+                "agent_id": agent_id,
+                "tpay_account_id": agent_row.tpay_account_id,
+                "game_token": game_token,
+                "new_balance": new_balance
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to reset agent balance")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"{Fore.RED}[API E] Error resetting agent balance: {e}{Style.RESET_ALL}")
+        raise HTTPException(status_code=500, detail="Failed to reset agent balance")
 
 # 10. Main execution block
 if __name__ == "__main__":

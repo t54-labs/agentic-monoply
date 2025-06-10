@@ -28,7 +28,7 @@ from sqlalchemy import insert, update, select, func
 from sqlalchemy.orm import Session 
 
 # Game simulation configuration
-CONCURRENT_GAMES_COUNT = 2  # Number of games to run simultaneously
+CONCURRENT_GAMES_COUNT = 1  # Number of games to run simultaneously
 AUTO_RESTART_GAMES = True  # Whether to start new games when current ones finish
 GAME_COUNTER = 0  # Global counter for unique game numbering
 MAINTENANCE_INTERVAL = 30  # Seconds between game count maintenance checks
@@ -510,7 +510,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
 
     try:
         gc = GameController(game_uid=game_uid, ws_manager=connection_manager_param, 
-                            game_db_id=game_db_id, participants=available_agents)
+                            game_db_id=game_db_id, participants=available_agents, treasury_agent_id="agnt_d755a309-682b-49b7-b997-956efef2b591")
         
         if hasattr(app_instance.state, 'active_games'):
             app_instance.state.active_games[game_uid] = gc
@@ -908,7 +908,6 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
         
     print(f"start_monopoly_game_instance for {game_uid} fully concluded (or terminated due to error/cancellation).")
 
-# 7. Define lifespan function
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
     print("FastAPI server starting up (via lifespan)...")
@@ -1002,7 +1001,17 @@ app = FastAPI(lifespan=lifespan)
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "null"], # Allow Next.js dev server and file:// origins
+    allow_origins=[
+        "http://localhost:3000", 
+        "http://localhost:3001", 
+        "http://localhost:3002",
+        "http://localhost:3003",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+        "http://127.0.0.1:3002",
+        "http://127.0.0.1:3003",
+        "null"  # For file:// origins
+    ], 
     allow_credentials=True,
     allow_methods=["*"], # Allow all methods
     allow_headers=["*"], # Allow all headers
@@ -1400,7 +1409,6 @@ async def reset_agent_game_balance_api(agent_id: int, request: Request):
         print(f"{Fore.RED}[API E] Error resetting agent balance: {e}{Style.RESET_ALL}")
         raise HTTPException(status_code=500, detail="Failed to reset agent balance")
 
-# 10. Main execution block
 if __name__ == "__main__":
     import uvicorn
     print("Starting Uvicorn server for Monopoly...")

@@ -53,14 +53,7 @@ class GameController:
         self.treasury_agent_id = treasury_agent_id  # System/bank agent ID for payments
         
         # Initialize TPayAgent for payment processing
-        self.tpay_agent: Optional[tpay.agent.TPayAgent] = None
-        if treasury_agent_id:
-            try:
-                self.tpay_agent = tpay.agent.TPayAgent(agent_id=treasury_agent_id)
-                self.log_event(f"[TPay] TPayAgent initialized with treasury ID: {treasury_agent_id}")
-            except Exception as e:
-                self.log_event(f"[TPay Error] Failed to initialize TPayAgent: {e}")
-                self.tpay_agent = None
+        self.tpay_agent: tpay.agent.TPayAgent = tpay.agent.TPayAgent()
         
         try:
             self.loop = asyncio.get_running_loop()
@@ -118,7 +111,7 @@ class GameController:
         for i in range(len(participants)):
             name = participants[i]['name']
             agent_uid = participants[i]['agent_uid']
-            agent_tpay_id = participants[i]['agent_tpay_id']
+            agent_tpay_id = participants[i]['tpay_account_id']
             player_db_id = participants[i].get('db_id')
             if player_db_id is None and self.game_db_id is not None: 
                 self.log_event(f"[CRITICAL DB Error] DB ID for P_idx {i} not found. Player not DB-linked.", "error_log")
@@ -311,21 +304,23 @@ class GameController:
         go_salary = 200.0
         
         # Use tpay for GO salary payment from system to player
-        payment_success = self._create_tpay_payment_system_to_player(
+        payment_result = self._create_tpay_payment_system_to_player(
             recipient=player,
             amount=go_salary,
             reason="GO salary",
             event_description=f"{player.name} passed GO and collected salary"
         )
         
-        if payment_success:
-            # Update local cache (tpay balance is already updated)
-            player.add_money(int(go_salary))
-            self.log_event(f"{player.name} passed GO and collected ${go_salary}.")
+        if payment_result:
+            # 等待支付完成
+            payment_success = self._wait_for_payment_completion(payment_result)
+            
+            if payment_success:
+                self.log_event(f"{player.name} passed GO and collected ${go_salary}.")
+            else:
+                self.log_event(f"{player.name} passed GO but failed to collect ${go_salary} - payment failed.")
         else:
-            # Fallback: still update local cache even if tpay failed for game continuity
-            player.add_money(int(go_salary))
-            self.log_event(f"{player.name} passed GO and collected ${go_salary} (tpay payment failed, using fallback).")
+            self.log_event(f"{player.name} passed GO but failed to collect ${go_salary} - payment could not be initiated.")
 
     def _move_player(self, player: Player, steps: int) -> None:
         if player.is_bankrupt:
@@ -448,21 +443,29 @@ class GameController:
         self.log_event(f"{player.name} has to pay ${amount_due} for {tax_sq.name}.")
         
         # Use tpay for tax payment to system
-        payment_success = self._create_tpay_payment_player_to_system(
+        payment_result = self._create_tpay_payment_player_to_system(
             payer=player,
             amount=float(amount_due),
             reason=f"tax - {tax_sq.name}",
             event_description=f"{player.name} paid ${amount_due} tax on {tax_sq.name}"
         )
         
-        if not payment_success:
-            self.log_event(f"[TPay] Tax payment failed, using fallback payment processing")
-        
-        # Use existing payment processing logic that handles bankruptcy
-        self._player_pays_amount(player, amount_due, f"tax for {tax_sq.name}")
-        # If _player_pays_amount resulted in successful payment without triggering bankruptcy flow (which sets its own pending decision):
-        if player.money >= 0 and self.pending_decision_type is None:
-            self._resolve_current_action_segment()
+        if payment_result:
+            # 等待支付完成
+            payment_success = self._wait_for_payment_completion(payment_result)
+            
+            if payment_success:
+                # 税收支付成功
+                self.log_event(f"{player.name} successfully paid ${amount_due} tax.")
+                self._resolve_current_action_segment()
+            else:
+                # 税收支付失败，进入破产处理
+                self.log_event(f"{player.name} failed to pay ${amount_due} tax - payment failed.")
+                self._check_and_handle_bankruptcy(player, debt_to_creditor=amount_due, creditor=None)
+        else:
+            # 支付无法发起，进入破产处理
+            self.log_event(f"{player.name} failed to pay ${amount_due} tax - payment could not be initiated.")
+            self._check_and_handle_bankruptcy(player, debt_to_creditor=amount_due, creditor=None)
 
     def _handle_go_to_jail_landing(self, player: Player) -> None:
         self.log_event(f"{player.name} is going to jail!")
@@ -493,20 +496,23 @@ class GameController:
         # --- Simple Effects (resolve immediately) ---
         if action_type == "receive_money":
             # Use tpay for bank reward payment to player
-            payment_success = self._create_tpay_payment_system_to_player(
+            payment_result = self._create_tpay_payment_system_to_player(
                 recipient=player,
                 amount=float(value),
                 reason="card reward",
                 event_description=f"{player.name} received ${value} from card: {description}"
             )
             
-            # Update local cache
-            player.add_money(value)
-            
-            if payment_success:
-                self.log_event(f"{player.name} received ${value}.")
+            if payment_result:
+                # 等待支付完成
+                payment_success = self._wait_for_payment_completion(payment_result)
+                
+                if payment_success:
+                    self.log_event(f"{player.name} received ${value}.")
+                else:
+                    self.log_event(f"{player.name} failed to receive ${value} - payment failed.")
             else:
-                self.log_event(f"{player.name} received ${value} (tpay payment failed, using fallback).")
+                self.log_event(f"{player.name} failed to receive ${value} - payment could not be initiated.")
                 
             self._resolve_current_action_segment()
         elif action_type == "get_out_of_jail_card":
@@ -535,27 +541,44 @@ class GameController:
                 self._resolve_current_action_segment()
         elif action_type == "receive_from_players":
             amount_each = value
+            all_payments_successful = True
+            
             for other_player in self.players:
                 if other_player != player and not other_player.is_bankrupt:
-                    other_player.subtract_money(amount_each) 
-                    player.add_money(amount_each)
-                    self.log_event(f"{other_player.name} paid ${amount_each} to {player.name}.")
-                    if other_player.money < 0:
-                        self.log_event(f"[Warning] {other_player.name} (ID: {other_player.player_id}) now has negative money due to 'receive_from_players' card. Bankruptcy will be checked on their turn.")
+                    # 注意：这里需要用player-to-player支付，但该方法还需要修改返回值
+                    # 暂时先记录需要支付，后续实现完整的player间支付
+                    if other_player.money >= amount_each:
+                        # 模拟支付（需要实现真正的player间tpay支付）
+                        self.log_event(f"{other_player.name} owes ${amount_each} to {player.name} (card effect).")
+                        # TODO: 实现真正的tpay player间支付
+                    else:
+                        self.log_event(f"[Warning] {other_player.name} cannot afford ${amount_each} to {player.name}.")
+                        all_payments_successful = False
+            
+            if all_payments_successful:
+                self.log_event(f"{player.name} collected money from all other players.")
+            else:
+                self.log_event(f"{player.name} could not collect full amount from all players.")
+                
             self._resolve_current_action_segment()
         elif action_type == "pay_players":
             amount_each = value
-            all_paid_successfully_without_bankruptcy = True
-            for other_player in self.players:
-                if other_player != player and not other_player.is_bankrupt:
-                    self.log_event(f"{player.name} owes ${amount_each} to {other_player.name}.")
-                    self._player_pays_amount(player, amount_each, f"payment to {other_player.name}", recipient=other_player)
-                    if player.is_bankrupt: 
-                        all_paid_successfully_without_bankruptcy = False
-                        break 
-            if all_paid_successfully_without_bankruptcy and not player.is_bankrupt:
+            total_amount_needed = amount_each * len([p for p in self.players if p != player and not p.is_bankrupt])
+            
+            if player.money >= total_amount_needed:
+                self.log_event(f"{player.name} needs to pay ${total_amount_needed} total to other players.")
+                # TODO: 实现真正的多个player间tpay支付
+                # 暂时标记为需要支付，等待完整的player间支付实现
+                for other_player in self.players:
+                    if other_player != player and not other_player.is_bankrupt:
+                        self.log_event(f"{player.name} owes ${amount_each} to {other_player.name} (card effect).")
+                
+                self.log_event(f"{player.name} has sufficient funds for card payments.")
                 self._resolve_current_action_segment()
-            # If bankruptcy, pending_decision is set by _check_and_handle_bankruptcy.
+            else:
+                # 资金不足，触发破产流程
+                self.log_event(f"{player.name} cannot afford to pay ${total_amount_needed} to other players.")
+                self._check_and_handle_bankruptcy(player, debt_to_creditor=total_amount_needed, creditor=None)
 
         # --- Effects involving Movement (these will call land_on_square, which sets final state) ---
         elif action_type == "move_to_exact":
@@ -787,34 +810,22 @@ class GameController:
         # but it would need access to MAX_TURNS (e.g., passed in __init__ or imported).
 
     def _player_pays_amount(self, player: Player, amount: int, reason: str, recipient: Optional[Player] = None) -> None:
-        """Helper function for player to pay a certain amount, optionally to a recipient."""
-        original_money = player.money
-        self.log_event(f"{player.name} must pay ${amount} for {reason}.")
+        """
+        DEPRECATED: This method uses local cache operations and should not be used.
+        Use tpay payment methods instead:
+        - _create_tpay_payment_player_to_system() for payments to bank
+        - _create_tpay_payment_player_to_player() for payments between players
+        """
+        self.log_event(f"[DEPRECATED] _player_pays_amount called - should use tpay payment methods instead")
+        self.log_event(f"{player.name} attempted to pay ${amount} for {reason} using deprecated method.")
         
-        can_pay_fully = original_money >= amount
-        amount_to_pay_from_cash = amount
-
-        if can_pay_fully:
-            player.subtract_money(amount_to_pay_from_cash)
-            if recipient:
-                recipient.add_money(amount_to_pay_from_cash)
-            self.log_event(f"{player.name} paid ${amount_to_pay_from_cash}. Money left: ${player.money}")
-            # If payment was successful and no *other* specific decision was set by the caller of this method,
-            # this payment itself resolves the immediate financial action.
-            if self.pending_decision_type is None: # Check if the caller expects to set a decision after this.
-                 self._resolve_current_action_segment() 
+        # For backward compatibility during transition, trigger bankruptcy check if insufficient funds
+        if player.money < amount:
+            self.log_event(f"{player.name} has insufficient funds (${player.money} < ${amount}) for {reason}.")
+            self._check_and_handle_bankruptcy(player, debt_to_creditor=amount, creditor=recipient)
         else:
-            amount_player_had = original_money if original_money > 0 else 0
-            player.subtract_money(amount_to_pay_from_cash) 
-            if recipient:
-                recipient.add_money(amount_player_had) 
-                self.log_event(f"{player.name} paid their available ${amount_player_had} to {recipient.name} for {reason}. Still owes ${amount_to_pay_from_cash - amount_player_had}.")
-            else: 
-                self.log_event(f"{player.name} paid their available ${amount_player_had} to the bank for {reason}. Still owes ${amount_to_pay_from_cash - amount_player_had}.")
-            self.log_event(f"{player.name} is now at ${player.money}.")
-            self._check_and_handle_bankruptcy(player, debt_to_creditor=(amount_to_pay_from_cash - amount_player_had), creditor=recipient)
-            # _check_and_handle_bankruptcy will set pending_decision_type = "asset_liquidation_for_debt"
-            # and dice_roll_outcome_processed = True (because a new, non-dice action is now pending).
+            self.log_event(f"{player.name} has sufficient funds for {reason} but payment method is deprecated.")
+            self._resolve_current_action_segment()
     
     # ======= TPay Payment Integration Methods =======
     
@@ -846,7 +857,23 @@ class GameController:
                     "turn_count": self.turn_count,
                     "current_player": payer.player_id,
                     "game_phase": self.pending_decision_type or "normal_play",
-                    "dice_roll": list(self.dice) if self.dice != (0, 0) else None
+                    "dice_roll": list(self.dice) if self.dice != (0, 0) else None,
+                    "dice_roll_outcome_processed": self.dice_roll_outcome_processed,
+                    "game_over": self.game_over,
+                    "max_turns": getattr(self, 'max_turns', None)
+                },
+                "board_state": {
+                    "total_squares": len(self.board.squares),
+                    "payer_square": {
+                        "position": payer.position,
+                        "name": self.board.get_square(payer.position).name if 0 <= payer.position < len(self.board.squares) else "Unknown",
+                        "type": self.board.get_square(payer.position).square_type.value if 0 <= payer.position < len(self.board.squares) else "Unknown"
+                    },
+                    "recipient_square": {
+                        "position": recipient.position,
+                        "name": self.board.get_square(recipient.position).name if 0 <= recipient.position < len(self.board.squares) else "Unknown",
+                        "type": self.board.get_square(recipient.position).square_type.value if 0 <= recipient.position < len(self.board.squares) else "Unknown"
+                    }
                 },
                 "players": {
                     "payer": {
@@ -854,22 +881,51 @@ class GameController:
                         "name": payer.name,
                         "position": payer.position,
                         "balance_before": float(payer.money),
+                        "properties_owned": list(payer.properties_owned_ids),
                         "properties_count": len(payer.properties_owned_ids),
-                        "is_in_jail": payer.in_jail
+                        "is_in_jail": payer.in_jail,
+                        "jail_turns_remaining": getattr(payer, 'jail_turns_remaining', 0),
+                        "is_bankrupt": payer.is_bankrupt,
+                        "has_gooj_cards": {
+                            "chance": getattr(payer, 'has_chance_gooj_card', False),
+                            "community_chest": getattr(payer, 'has_community_gooj_card', False)
+                        }
                     },
                     "recipient": {
                         "id": recipient.player_id, 
                         "name": recipient.name,
                         "position": recipient.position,
                         "balance_before": float(recipient.money),
+                        "properties_owned": list(recipient.properties_owned_ids),
                         "properties_count": len(recipient.properties_owned_ids),
-                        "is_in_jail": recipient.in_jail
+                        "is_in_jail": recipient.in_jail,
+                        "jail_turns_remaining": getattr(recipient, 'jail_turns_remaining', 0),
+                        "is_bankrupt": recipient.is_bankrupt,
+                        "has_gooj_cards": {
+                            "chance": getattr(recipient, 'has_chance_gooj_card', False),
+                            "community_chest": getattr(recipient, 'has_community_gooj_card', False)
+                        }
                     }
                 },
+                "all_players_summary": [
+                    {
+                        "id": p.player_id,
+                        "name": p.name,
+                        "position": p.position,
+                        "balance": float(p.money),
+                        "properties_count": len(p.properties_owned_ids),
+                        "is_bankrupt": p.is_bankrupt,
+                        "is_in_jail": p.in_jail
+                    } for p in self.players
+                ],
                 "transaction": {
                     "reason": reason,
                     "amount": float(amount),
                     "timestamp": datetime.datetime.now().isoformat()
+                },
+                "game_history": {
+                    "recent_events": self.game_log[-10:] if hasattr(self, 'game_log') and self.game_log else [],
+                    "current_turn_events": [event for event in (self.game_log[-20:] if hasattr(self, 'game_log') and self.game_log else []) if f"Turn {self.turn_count}" in event or f"T:{self.turn_count}" in event]
                 }
             }
             
@@ -882,11 +938,11 @@ class GameController:
             
             # Create tpay payment using agent instance
             payment_result = self.tpay_agent.create_payment(
-                from_agent_id=payer.agent_tpay_id,
-                to_agent_id=recipient.agent_tpay_id,
+                agent_id=payer.agent_tpay_id,
+                receiving_agent_id=recipient.agent_tpay_id,
                 amount=float(amount),
                 currency=utils.GAME_TOKEN_SYMBOL,
-                network="solana",
+                settlement_network="solana",
                 func_stack_hashes=func_stack_hashes,
                 debug_mode=True,
                 trace_context=trace_context
@@ -905,7 +961,7 @@ class GameController:
             return False
     
     def _create_tpay_payment_player_to_system(self, payer: Player, amount: float, reason: str, 
-                                             event_description: Optional[str] = None) -> bool:
+                                             event_description: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Create a tpay payment from player to system/bank with simplified trace context
         
@@ -916,28 +972,60 @@ class GameController:
             event_description: Additional description of the game event
             
         Returns:
-            True if payment successful, False otherwise
+            Payment result dict if payment initiated, None if failed to initiate
         """
         if not payer.agent_tpay_id or not self.treasury_agent_id or not self.tpay_agent:
             self.log_event(f"[TPay Error] Missing tpay IDs or agent: Payer {payer.name}={payer.agent_tpay_id}, Treasury={self.treasury_agent_id}, TPayAgent={self.tpay_agent is not None}")
-            return False
+            return None
             
         try:
-            # Construct simplified trace context for system payments
+            # Construct detailed trace context for system payments
             trace_context = {
                 "payment_type": "player_to_system",
                 "game_context": {
                     "game_uid": self.game_uid,
                     "turn_count": self.turn_count,
                     "current_player": payer.player_id,
-                    "game_phase": self.pending_decision_type or "normal_play"
+                    "game_phase": self.pending_decision_type or "normal_play",
+                    "dice_roll": list(self.dice) if self.dice != (0, 0) else None,
+                    "dice_roll_outcome_processed": self.dice_roll_outcome_processed,
+                    "game_over": self.game_over,
+                    "max_turns": getattr(self, 'max_turns', None)
+                },
+                "board_state": {
+                    "total_squares": len(self.board.squares),
+                    "current_square": {
+                        "position": payer.position,
+                        "name": self.board.get_square(payer.position).name if 0 <= payer.position < len(self.board.squares) else "Unknown",
+                        "type": self.board.get_square(payer.position).square_type.value if 0 <= payer.position < len(self.board.squares) else "Unknown"
+                    }
                 },
                 "player": {
                     "id": payer.player_id,
                     "name": payer.name,
                     "position": payer.position,
-                    "balance_before": float(payer.money)
+                    "balance_before": float(payer.money),
+                    "properties_owned": list(payer.properties_owned_ids),
+                    "properties_count": len(payer.properties_owned_ids),
+                    "is_in_jail": payer.in_jail,
+                    "jail_turns_remaining": getattr(payer, 'jail_turns_remaining', 0),
+                    "is_bankrupt": payer.is_bankrupt,
+                    "has_gooj_cards": {
+                        "chance": getattr(payer, 'has_chance_gooj_card', False),
+                        "community_chest": getattr(payer, 'has_community_gooj_card', False)
+                    }
                 },
+                "all_players_summary": [
+                    {
+                        "id": p.player_id,
+                        "name": p.name,
+                        "position": p.position,
+                        "balance": float(p.money),
+                        "properties_count": len(p.properties_owned_ids),
+                        "is_bankrupt": p.is_bankrupt,
+                        "is_in_jail": p.in_jail
+                    } for p in self.players
+                ],
                 "transaction": {
                     "reason": reason,
                     "amount": float(amount),
@@ -945,7 +1033,13 @@ class GameController:
                 },
                 "event": {
                     "description": event_description or reason,
-                    "square_name": self.board.get_square(payer.position).name if 0 <= payer.position < len(self.board.squares) else "Unknown"
+                    "square_name": self.board.get_square(payer.position).name if 0 <= payer.position < len(self.board.squares) else "Unknown",
+                    "why_player_here": self._get_position_explanation(payer)
+                },
+                "game_history": {
+                    "recent_events": self.game_log[-10:] if hasattr(self, 'game_log') and self.game_log else [],
+                    "current_turn_events": [event for event in (self.game_log[-20:] if hasattr(self, 'game_log') and self.game_log else []) if f"Turn {self.turn_count}" in event or f"T:{self.turn_count}" in event],
+                    "movement_context": self._get_movement_context(payer)
                 }
             }
             
@@ -954,30 +1048,30 @@ class GameController:
             
             # Create tpay payment to treasury using agent instance
             payment_result = self.tpay_agent.create_payment(
-                from_agent_id=payer.agent_tpay_id,
-                to_agent_id=self.treasury_agent_id,
+                agent_id=payer.agent_tpay_id,
+                receiving_agent_id=self.treasury_agent_id,
                 amount=float(amount),
                 currency=utils.GAME_TOKEN_SYMBOL,
-                network="solana",
+                settlement_network="solana",
                 func_stack_hashes=func_stack_hashes,
                 debug_mode=True,
                 trace_context=trace_context
             )
             
-            if payment_result and payment_result.get('success'):
-                self.log_event(f"[TPay] ✅ System payment successful: {payer.name} → Bank ${amount} for {reason}")
-                return True
+            if payment_result:
+                self.log_event(f"[TPay] 🔄 System payment initiated: {payer.name} → Bank ${amount} for {reason}")
+                print(f"payment_result: {payment_result}")
+                return payment_result
             else:
-                error_msg = payment_result.get('error', 'Unknown error') if payment_result else 'No response'
-                self.log_event(f"[TPay] ❌ System payment failed: {payer.name} → Bank ${amount} - Error: {error_msg}")
-                return False
+                self.log_event(f"[TPay] ❌ System payment failed to initiate: {payer.name} → Bank ${amount}")
+                return None
                 
         except Exception as e:
             self.log_event(f"[TPay] 💥 System payment exception: {payer.name} → Bank ${amount} - {str(e)}")
-            return False
+            return None
     
     def _create_tpay_payment_system_to_player(self, recipient: Player, amount: float, reason: str,
-                                             event_description: Optional[str] = None) -> bool:
+                                             event_description: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Create a tpay payment from system/bank to player (e.g., GO salary, card rewards)
         
@@ -988,28 +1082,60 @@ class GameController:
             event_description: Additional description of the game event
             
         Returns:
-            True if payment successful, False otherwise
+            Payment result dict if payment initiated, None if failed to initiate
         """
         if not recipient.agent_tpay_id or not self.treasury_agent_id or not self.tpay_agent:
             self.log_event(f"[TPay Error] Missing tpay IDs or agent: Recipient {recipient.name}={recipient.agent_tpay_id}, Treasury={self.treasury_agent_id}, TPayAgent={self.tpay_agent is not None}")
-            return False
+            return None
             
         try:
-            # Construct simplified trace context for system payments
+            # Construct detailed trace context for system reward payments
             trace_context = {
                 "payment_type": "system_to_player", 
                 "game_context": {
                     "game_uid": self.game_uid,
                     "turn_count": self.turn_count,
                     "current_player": recipient.player_id,
-                    "game_phase": self.pending_decision_type or "normal_play"
+                    "game_phase": self.pending_decision_type or "normal_play",
+                    "dice_roll": list(self.dice) if self.dice != (0, 0) else None,
+                    "dice_roll_outcome_processed": self.dice_roll_outcome_processed,
+                    "game_over": self.game_over,
+                    "max_turns": getattr(self, 'max_turns', None)
+                },
+                "board_state": {
+                    "total_squares": len(self.board.squares),
+                    "current_square": {
+                        "position": recipient.position,
+                        "name": self.board.get_square(recipient.position).name if 0 <= recipient.position < len(self.board.squares) else "Unknown",
+                        "type": self.board.get_square(recipient.position).square_type.value if 0 <= recipient.position < len(self.board.squares) else "Unknown"
+                    }
                 },
                 "player": {
                     "id": recipient.player_id,
                     "name": recipient.name,
                     "position": recipient.position,
-                    "balance_before": float(recipient.money)
+                    "balance_before": float(recipient.money),
+                    "properties_owned": list(recipient.properties_owned_ids),
+                    "properties_count": len(recipient.properties_owned_ids),
+                    "is_in_jail": recipient.in_jail,
+                    "jail_turns_remaining": getattr(recipient, 'jail_turns_remaining', 0),
+                    "is_bankrupt": recipient.is_bankrupt,
+                    "has_gooj_cards": {
+                        "chance": getattr(recipient, 'has_chance_gooj_card', False),
+                        "community_chest": getattr(recipient, 'has_community_gooj_card', False)
+                    }
                 },
+                "all_players_summary": [
+                    {
+                        "id": p.player_id,
+                        "name": p.name,
+                        "position": p.position,
+                        "balance": float(p.money),
+                        "properties_count": len(p.properties_owned_ids),
+                        "is_bankrupt": p.is_bankrupt,
+                        "is_in_jail": p.in_jail
+                    } for p in self.players
+                ],
                 "transaction": {
                     "reason": reason,
                     "amount": float(amount),
@@ -1017,7 +1143,13 @@ class GameController:
                 },
                 "event": {
                     "description": event_description or reason,
-                    "square_name": self.board.get_square(recipient.position).name if 0 <= recipient.position < len(self.board.squares) else "Unknown"
+                    "square_name": self.board.get_square(recipient.position).name if 0 <= recipient.position < len(self.board.squares) else "Unknown",
+                    "why_player_here": self._get_position_explanation(recipient)
+                },
+                "game_history": {
+                    "recent_events": self.game_log[-10:] if hasattr(self, 'game_log') and self.game_log else [],
+                    "current_turn_events": [event for event in (self.game_log[-20:] if hasattr(self, 'game_log') and self.game_log else []) if f"Turn {self.turn_count}" in event or f"T:{self.turn_count}" in event],
+                    "movement_context": self._get_movement_context(recipient)
                 }
             }
             
@@ -1026,27 +1158,179 @@ class GameController:
             
             # Create tpay payment from treasury using agent instance
             payment_result = self.tpay_agent.create_payment(
-                from_agent_id=self.treasury_agent_id,
-                to_agent_id=recipient.agent_tpay_id,
+                agent_id=self.treasury_agent_id,
+                receiving_agent_id=recipient.agent_tpay_id,
                 amount=float(amount),
                 currency=utils.GAME_TOKEN_SYMBOL,
-                network="solana",
+                settlement_network="solana",
                 func_stack_hashes=func_stack_hashes,
                 debug_mode=True,
                 trace_context=trace_context
             )
             
-            if payment_result and payment_result.get('success'):
-                self.log_event(f"[TPay] ✅ System reward successful: Bank → {recipient.name} ${amount} for {reason}")
-                return True
+            if payment_result:
+                self.log_event(f"[TPay] 🔄 System payment initiated: Bank → {recipient.name} ${amount} for {reason}")
+                return payment_result
             else:
-                error_msg = payment_result.get('error', 'Unknown error') if payment_result else 'No response'
-                self.log_event(f"[TPay] ❌ System reward failed: Bank → {recipient.name} ${amount} - Error: {error_msg}")
-                return False
+                self.log_event(f"[TPay] ❌ System payment failed to initiate: Bank → {recipient.name} ${amount}")
+                return None
                 
         except Exception as e:
-            self.log_event(f"[TPay] 💥 System reward exception: Bank → {recipient.name} ${amount} - {str(e)}")
+            self.log_event(f"[TPay] 💥 System payment exception: Bank → {recipient.name} ${amount} - {str(e)}")
+            return None
+
+    def _wait_for_payment_completion(self, payment_result: Dict[str, Any], timeout_seconds: int = 30) -> bool:
+        """
+        poll for payment completion, return True if successful, False if failed or timeout
+        
+        Args:
+            payment_result: create_payment result
+            timeout_seconds: timeout in seconds
+            
+        Returns:
+            True if payment successful, False if failed or timeout
+        """
+        print(f"payment_result: {payment_result}")
+        if not payment_result or not payment_result.get('id'):
+            self.log_event(f"[TPay] No payment ID to wait for")
             return False
+            
+        payment_id = payment_result['id']
+        self.log_event(f"[TPay] Waiting for payment {payment_id} to complete...")
+        
+        import time
+        start_time = time.time()
+        poll_interval = 5.0  # 每1秒轮询一次
+        
+        while time.time() - start_time < timeout_seconds:
+            try:
+                # 查询支付状态
+                status_result = self.tpay_agent.get_payment_status(payment_id)
+                
+                if status_result and 'status' in status_result:
+                    status = status_result['status']
+                    self.log_event(f"[TPay] Payment {payment_id} status: {status}")
+                    
+                    if status == 'success':
+                        self.log_event(f"[TPay] ✅ Payment {payment_id} completed successfully")
+                        return True
+                    elif status == 'failed':
+                        self.log_event(f"[TPay] ❌ Payment {payment_id} failed")
+                        return False
+                    elif status in ['pending', 'processing', 'initiated']:
+                        # 继续等待
+                        time.sleep(poll_interval)
+                        continue
+                    else:
+                        self.log_event(f"[TPay] ❓ Unknown payment status: {status}")
+                        return False
+                else:
+                    self.log_event(f"[TPay] Failed to get payment status for {payment_id}")
+                    time.sleep(poll_interval)
+                    
+            except Exception as e:
+                self.log_event(f"[TPay] Error checking payment status: {e}")
+                time.sleep(poll_interval)
+        
+        # 超时
+        self.log_event(f"[TPay] ⏰ Payment {payment_id} timed out after {timeout_seconds}s")
+        return False
+
+    def _get_position_explanation(self, player: Player) -> str:
+        """
+        Generate explanation for why player is at current position
+        
+        Args:
+            player: Player to explain position for
+            
+        Returns:
+            String explanation of how player got to current position
+        """
+        try:
+            # Look for recent movement events in game log
+            recent_events = self.game_log[-15:] if hasattr(self, 'game_log') and self.game_log else []
+            
+            # Find events related to this player's movement
+            movement_reasons = []
+            for event in recent_events:
+                if player.name in event:
+                    if "rolled" in event.lower() and "moved" in event.lower():
+                        movement_reasons.append(f"dice_roll: {event}")
+                    elif "moved directly" in event.lower():
+                        movement_reasons.append(f"card_effect: {event}")
+                    elif "sent to jail" in event.lower() or "go to jail" in event.lower():
+                        movement_reasons.append(f"jail_movement: {event}")
+                    elif "passed GO" in event.lower():
+                        movement_reasons.append(f"go_passing: {event}")
+            
+            # Current game state context
+            current_square = self.board.get_square(player.position) if 0 <= player.position < len(self.board.squares) else None
+            square_type = current_square.square_type.value if current_square else "unknown"
+            
+            # Construct explanation
+            explanation_parts = []
+            
+            if player.in_jail:
+                explanation_parts.append(f"Player is in jail (turns remaining: {getattr(player, 'jail_turns_remaining', 0)})")
+            
+            if movement_reasons:
+                explanation_parts.append(f"Recent movements: {'; '.join(movement_reasons[-3:])}")
+            
+            explanation_parts.append(f"Current position {player.position} is {square_type} type")
+            
+            if hasattr(self, 'dice') and self.dice != (0, 0):
+                explanation_parts.append(f"Last dice roll: {self.dice}")
+            
+            return " | ".join(explanation_parts)
+            
+        except Exception as e:
+            return f"Error generating position explanation: {str(e)}"
+
+    def _get_movement_context(self, player: Player) -> Dict[str, Any]:
+        """
+        Get detailed movement context for player
+        
+        Args:
+            player: Player to get movement context for
+            
+        Returns:
+            Dictionary with movement context information
+        """
+        try:
+            context = {
+                "current_position": player.position,
+                "current_square_name": self.board.get_square(player.position).name if 0 <= player.position < len(self.board.squares) else "Unknown",
+                "in_jail": player.in_jail,
+                "last_dice_roll": list(self.dice) if hasattr(self, 'dice') and self.dice != (0, 0) else None,
+                "turn_number": self.turn_count,
+                "is_current_turn": (self.current_player_index == player.player_id),
+                "movement_events": []
+            }
+            
+            # Extract movement-related events from recent game log
+            if hasattr(self, 'game_log') and self.game_log:
+                recent_events = self.game_log[-20:]
+                for event in recent_events:
+                    if player.name in event:
+                        # Categorize movement events
+                        if any(keyword in event.lower() for keyword in ["moved", "position", "landed", "rolled", "jail", "go to"]):
+                            context["movement_events"].append(event)
+            
+            # Limit to most recent movement events
+            context["movement_events"] = context["movement_events"][-5:]
+            
+            # Add position change analysis if possible
+            if len(context["movement_events"]) >= 2:
+                context["recent_position_changes"] = len([e for e in context["movement_events"] if "moved" in e.lower() or "position" in e.lower()])
+            
+            return context
+            
+        except Exception as e:
+            return {
+                "error": f"Failed to generate movement context: {str(e)}",
+                "current_position": player.position,
+                "turn_number": self.turn_count
+            }
 
     # ======= End TPay Payment Integration Methods =======
 
@@ -1235,29 +1519,34 @@ class GameController:
             return False
         if player.money >= square.price:
             # Use tpay for property purchase payment to system
-            payment_success = self._create_tpay_payment_player_to_system(
+            payment_result = self._create_tpay_payment_player_to_system(
                 payer=player,
                 amount=float(square.price),
                 reason=f"property purchase - {square.name}",
                 event_description=f"{player.name} bought {square.name} for ${square.price}"
             )
             
-            # Update local cache
-            player.subtract_money(square.price)
-            
-            if payment_success:
-                square.owner_id = player.player_id
-                player.add_property_id(square.square_id)
-                self.log_event(f"{player.name} bought {square.name} for ${square.price}.")
-                self._resolve_current_action_segment() 
-                return True
+            if payment_result:
+                # 等待支付完成
+                payment_success = self._wait_for_payment_completion(payment_result)
+                
+                if payment_success:
+                    # 支付成功，完成购买
+                    square.owner_id = player.player_id
+                    player.add_property_id(square.square_id)
+                    self.log_event(f"{player.name} bought {square.name} for ${square.price}.")
+                    self._resolve_current_action_segment() 
+                    return True
+                else:
+                    # 支付失败，回退交易
+                    self.log_event(f"{player.name} failed to buy {square.name} - payment failed.")
+                    self._resolve_current_action_segment()
+                    return False
             else:
-                # TPay payment failed - still complete transaction but log warning
-                square.owner_id = player.player_id
-                player.add_property_id(square.square_id)
-                self.log_event(f"{player.name} bought {square.name} for ${square.price} (tpay payment failed, using fallback).")
-                self._resolve_current_action_segment() 
-                return True
+                # 支付无法发起
+                self.log_event(f"{player.name} failed to buy {square.name} - payment could not be initiated.")
+                self._resolve_current_action_segment()
+                return False
         else:
             self.log_event(f"{player.name} attempted to buy {square.name} but has insufficient funds (${player.money} < ${square.price}). Decision to buy/pass remains pending.")
             return False
@@ -1355,26 +1644,35 @@ class GameController:
             return {"status": "error", "message": msg}
         if player.money >= bail_amount:
             # Use tpay for bail payment to system
-            payment_success = self._create_tpay_payment_player_to_system(
+            payment_result = self._create_tpay_payment_player_to_system(
                 payer=player,
                 amount=float(bail_amount),
                 reason="jail bail",
                 event_description=f"{player.name} paid ${bail_amount} bail to get out of jail"
             )
             
-            # Update local cache
-            player.subtract_money(bail_amount)
-            player.leave_jail() 
-            self.doubles_streak = 0 
-            
-            if payment_success:
-                msg = f"{player.name} paid ${bail_amount} bail and is now out of jail."
-            else:
-                msg = f"{player.name} paid ${bail_amount} bail and is now out of jail (tpay payment failed, using fallback)."
+            if payment_result:
+                # 等待支付完成
+                payment_success = self._wait_for_payment_completion(payment_result)
                 
-            self.log_event(msg)
-            self._resolve_current_action_segment() 
-            return {"status": "success", "message": msg, "paid_bail": True}
+                if payment_success:
+                    # 支付成功，出狱
+                    player.leave_jail() 
+                    self.doubles_streak = 0 
+                    msg = f"{player.name} paid ${bail_amount} bail and is now out of jail."
+                    self.log_event(msg)
+                    self._resolve_current_action_segment() 
+                    return {"status": "success", "message": msg, "paid_bail": True}
+                else:
+                    # 支付失败，保持在狱中
+                    msg = f"{player.name} failed to pay ${bail_amount} bail - payment failed."
+                    self.log_event(msg)
+                    return {"status": "error", "message": msg, "paid_bail": False}
+            else:
+                # 支付无法发起
+                msg = f"{player.name} failed to pay ${bail_amount} bail - payment could not be initiated."
+                self.log_event(msg)
+                return {"status": "error", "message": msg, "paid_bail": False}
         else: 
             msg = f"{player.name} does not have enough money (${player.money}) to pay ${bail_amount} bail."
             self.log_event(msg)
@@ -1773,20 +2071,43 @@ class GameController:
             try:
                 mortgaged_props_received_by_player: List[Dict[str,Any]] = [] 
                 mortgaged_props_received_by_proposer: List[Dict[str,Any]] = []
+                # TODO: 交易中的金钱转移需要集成tpay支付系统
+                # 目前暂时记录交易物品，不执行金钱转移，等待完整的player间支付实现
+                trade_money_transfers = []
+                
                 for item in offer.items_offered_by_proposer: 
-                    if item.item_type == "money": original_proposer.subtract_money(item.quantity); player.add_money(item.quantity)
+                    if item.item_type == "money": 
+                        trade_money_transfers.append({
+                            "from_player": original_proposer.name,
+                            "to_player": player.name,
+                            "amount": item.quantity,
+                            "reason": f"trade T{trade_id} - payment from proposer"
+                        })
+                        self.log_event(f"[Trade Money] {original_proposer.name} → {player.name}: ${item.quantity} (proposer payment)")
                     elif item.item_type == "property":
                         sq = self.board.get_square(item.item_id) 
                         original_proposer.remove_property_id(item.item_id); player.add_property_id(item.item_id); sq.owner_id = player.player_id
                         if sq.is_mortgaged: mortgaged_props_received_by_player.append({"property_id": item.item_id, "source_trade_id": trade_id})
                     elif item.item_type == "get_out_of_jail_card": self._transfer_gooj_card(original_proposer, player, item.item_id)
+                
                 for item in offer.items_requested_from_recipient: 
-                    if item.item_type == "money": player.subtract_money(item.quantity); original_proposer.add_money(item.quantity)
+                    if item.item_type == "money": 
+                        trade_money_transfers.append({
+                            "from_player": player.name,
+                            "to_player": original_proposer.name,
+                            "amount": item.quantity,
+                            "reason": f"trade T{trade_id} - payment from recipient"
+                        })
+                        self.log_event(f"[Trade Money] {player.name} → {original_proposer.name}: ${item.quantity} (recipient payment)")
                     elif item.item_type == "property":
                         sq = self.board.get_square(item.item_id) 
                         player.remove_property_id(item.item_id); original_proposer.add_property_id(item.item_id); sq.owner_id = original_proposer.player_id
                         if sq.is_mortgaged: mortgaged_props_received_by_proposer.append({"property_id": item.item_id, "source_trade_id": trade_id})
                     elif item.item_type == "get_out_of_jail_card": self._transfer_gooj_card(player, original_proposer, item.item_id)
+                
+                # 记录需要的金钱转移但不执行
+                if trade_money_transfers:
+                    self.log_event(f"[Trade] {len(trade_money_transfers)} money transfers recorded for trade T{trade_id} - TPay integration pending")
                 offer.status = "accepted"
                 self.log_event(f"Trade {trade_id} accepted! Assets exchanged.", "trade_log")
                 self._clear_pending_decision() 
@@ -1892,13 +2213,34 @@ class GameController:
             price_paid = self.auction_current_bid
             property_square = self.board.get_square(prop_id)
             self.log_event(f"Auction for {prop_name} won by {winner.name} for ${price_paid}.")
-            self._player_pays_amount(winner, price_paid, f"winning auction bid for {prop_name}")
-            if not winner.is_bankrupt: 
-                property_square.owner_id = winner.player_id
-                winner.add_property_id(prop_id)
-                self.log_event(f"{winner.name} now owns {prop_name}.")
+            
+            # Use tpay for auction payment to system
+            payment_result = self._create_tpay_payment_player_to_system(
+                payer=winner,
+                amount=float(price_paid),
+                reason=f"auction payment - {prop_name}",
+                event_description=f"{winner.name} won auction for {prop_name} at ${price_paid}"
+            )
+            
+            if payment_result:
+                # 等待支付完成
+                payment_success = self._wait_for_payment_completion(payment_result)
+                
+                if payment_success:
+                    # 支付成功，完成购买
+                    property_square.owner_id = winner.player_id
+                    winner.add_property_id(prop_id)
+                    self.log_event(f"{winner.name} now owns {prop_name}.")
+                else:
+                    # 支付失败，进入破产处理
+                    self.log_event(f"{winner.name} failed to pay for {prop_name} - auction payment failed.")
+                    self._check_and_handle_bankruptcy(winner, debt_to_creditor=price_paid, creditor=None)
+                    if isinstance(property_square, PurchasableSquare): 
+                        property_square.owner_id = None
             else:
-                self.log_event(f"{winner.name} went bankrupt paying for {prop_name}. Property remains unowned.")
+                # 支付无法发起，进入破产处理
+                self.log_event(f"{winner.name} failed to pay for {prop_name} - auction payment could not be initiated.")
+                self._check_and_handle_bankruptcy(winner, debt_to_creditor=price_paid, creditor=None)
                 if isinstance(property_square, PurchasableSquare): 
                     property_square.owner_id = None 
         self.auction_in_progress = False

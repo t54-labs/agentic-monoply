@@ -40,13 +40,15 @@ class Player:
 
     @property
     def money(self) -> int:
-        """Get current money balance from tpay in real-time, fallback to local cache"""
+        """Get current money balance from tpay in real-time (synchronous)"""
         if self.agent_tpay_id:
             try:
-                # Use tpay SDK to get real-time balance
+                # Use synchronous tpay SDK to get real-time balance
                 balance = tpay.get_agent_asset_balance(agent_id=self.agent_tpay_id, network="solana", asset=utils.GAME_TOKEN_SYMBOL)
                 if balance is not None:
-                    return float(balance)
+                    # Update local cache with real value
+                    self._money = float(balance)
+                    return self._money
                 else:
                     print(f"[Player] Warning: Could not get tpay balance for agent {self.agent_tpay_id}, using cached value ${self._money}")
             except Exception as e:
@@ -75,32 +77,6 @@ class Player:
         return (f"Player {self.player_id}{db_id_str}{agent_uid_str}{agent_tpay_str}: {self.name} (${self.money}, Position: {self.position}{jail_status}, "
                 f"Properties: {len(self.properties_owned_ids)}{gooj_str}{pending_mort_str})"
                 f"{bankrupt_status}")   
-
-    def add_money(self, amount: int) -> None:
-        if amount < 0:
-            raise ValueError("Amount to add must be non-negative.")
-        if not self.is_bankrupt:
-            # Update local cache
-            self._money += amount
-            # Note: Real tpay balance updates should be handled by tpay transfer operations
-            # This method is for game logic tracking only
-
-    def subtract_money(self, amount: int) -> bool:
-        """
-        Subtracts money from the player. 
-        Returns True if the player can afford the payment, False otherwise.
-        Does not automatically handle bankruptcy here, that's for the game controller.
-        """
-        if amount < 0:
-            raise ValueError("Amount to subtract must be non-negative.")
-        if self.is_bankrupt: # Bankrupt players can't pay
-            return False 
-            
-        # Update local cache
-        self._money -= amount # Allow money to go negative, GC handles bankruptcy check
-        # Note: Real tpay balance updates should be handled by tpay transfer operations
-        # This method is for game logic tracking only
-        return self._money >= 0 # Returns true if still solvent after this subtraction
 
     def move_to(self, new_position: int, passed_go: bool, go_salary: int = 200) -> None:
         if not (0 <= new_position < 40): # Assuming 40 squares

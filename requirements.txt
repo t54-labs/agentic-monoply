@@ -7,3 +7,4 @@ psycopg2-binary>=2.9.0,<3.0.0
 python-dotenv>=0.20.0,<1.0.0
 requests>=2.25.0,<3.0.0 
 websocket-client>=1.6.0 
+httpx>=0.24.0

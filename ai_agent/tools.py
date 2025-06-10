@@ -60,7 +60,18 @@ def tool_buy_property(gc: Any, player_id: int, property_id: Optional[int] = None
             return {"status": "failure", "message": "Not in correct state to buy property or property_id missing."}
         
         square_to_buy = gc.board.get_square(target_property_id)
-        success = gc.execute_buy_property_decision(player_id, target_property_id)
+        # Call async GC method 
+        import asyncio
+        try:
+            # If we're already in an async context, use await
+            loop = asyncio.get_running_loop()
+            # We're in asyncio.to_thread, so we need to call the async method differently
+            success = asyncio.run_coroutine_threadsafe(
+                gc.execute_buy_property_decision(player_id, target_property_id), loop
+            ).result()
+        except RuntimeError:
+            # No event loop running, we can use asyncio.run
+            success = asyncio.run(gc.execute_buy_property_decision(player_id, target_property_id))
         
         status_msg = "OK" if success else "FAIL"
         if not success:
@@ -89,7 +100,18 @@ def tool_pass_on_buying_property(gc: Any, player_id: int, property_id: Optional[
             return {"status": "failure", "message": "Not in correct state to pass on buying property."}
 
         square = gc.board.get_square(target_property_id)
-        success = gc._pass_on_buying_property_action(player, square)
+        # Call async GC method
+        import asyncio
+        try:
+            # If we're already in an async context, use await
+            loop = asyncio.get_running_loop()
+            # We're in asyncio.to_thread, so we need to call the async method differently
+            success = asyncio.run_coroutine_threadsafe(
+                gc._pass_on_buying_property_action(player_id, target_property_id), loop
+            ).result()
+        except RuntimeError:
+            # No event loop running, we can use asyncio.run
+            success = asyncio.run(gc._pass_on_buying_property_action(player_id, target_property_id))
         result = {"status": "success" if success else "failure", "message": f"Passed on buying {square.name}. Auction initiated by GC."}
         _log_agent_action(gc, player_id, "tool_pass_on_buying_property", {"property_id": target_property_id}, result)
         return result
@@ -159,8 +181,18 @@ def tool_pay_bail(gc: Any, player_id: int, params: Dict[str, Any] = None) -> Dic
     try:
         if not (player.in_jail and gc.pending_decision_type == "jail_options" and gc.pending_decision_context.get("player_id") == player_id):
              return {"status": "failure", "message": "Cannot pay bail: not in correct jail decision state."}
-        # Call GC method with player_id and params (even if empty for this specific tool)
-        action_outcome = gc._pay_to_get_out_of_jail(player_id, params) 
+        # Call async GC method with player_id and params (even if empty for this specific tool)
+        import asyncio
+        try:
+            # If we're already in an async context, use await
+            loop = asyncio.get_running_loop()
+            # We're in asyncio.to_thread, so we need to call the async method differently
+            action_outcome = asyncio.run_coroutine_threadsafe(
+                gc._pay_to_get_out_of_jail(player_id, params), loop
+            ).result()
+        except RuntimeError:
+            # No event loop running, we can use asyncio.run
+            action_outcome = asyncio.run(gc._pay_to_get_out_of_jail(player_id, params)) 
         result = {"status": action_outcome.get("status"), "message": action_outcome.get("message", "Pay bail attempt processed.")}
         _log_agent_action(gc, player_id, "tool_pay_bail", params, result)
         return result
@@ -196,8 +228,18 @@ def tool_roll_for_doubles_to_get_out_of_jail(gc: Any, player_id: int, params: Di
              # For safety, ensure agent doesn't try to roll if GC logic already determined max attempts.
              pass # Let GC method handle max attempts error
         
-        # Call GC method with player_id and params
-        action_outcome = gc._attempt_roll_out_of_jail(player_id, params)
+        # Call async GC method with player_id and params
+        import asyncio
+        try:
+            # If we're already in an async context, use await
+            loop = asyncio.get_running_loop()
+            # We're in asyncio.to_thread, so we need to call the async method differently
+            action_outcome = asyncio.run_coroutine_threadsafe(
+                gc._attempt_roll_out_of_jail(player_id, params), loop
+            ).result()
+        except RuntimeError:
+            # No event loop running, we can use asyncio.run
+            action_outcome = asyncio.run(gc._attempt_roll_out_of_jail(player_id, params))
         dice_rolled = action_outcome.get("dice_roll", gc.dice) 
         got_out = action_outcome.get("got_out", False)
         message = action_outcome.get("message", f"Roll for doubles (in jail): Dice {dice_rolled}, Got out: {got_out}.")

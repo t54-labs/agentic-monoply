@@ -36,6 +36,7 @@ MAINTENANCE_INTERVAL = 30  # Seconds between game count maintenance checks
 # Agent management configuration
 AGENTS_PER_GAME = NUM_PLAYERS     # Number of agents per game (should match NUM_PLAYERS)
 AGENT_INITIAL_BALANCE = 1500  # Starting balance for each game
+TREASURY_AGENT_ID = "agnt_d755a309-682b-49b7-b997-956efef2b591"
 
 # 1. Colorama setup & Global placeholders
 class Fore: CYAN=YELLOW=GREEN=RED=MAGENTA=WHITE=BLACK=BLUE=""; LIGHTBLACK_EX=LIGHTBLUE_EX=LIGHTCYAN_EX=LIGHTGREEN_EX=LIGHTMAGENTA_EX=LIGHTRED_EX=LIGHTWHITE_EX=LIGHTYELLOW_EX=""
@@ -626,7 +627,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 active_player_id = gc.pending_decision_context.get("player_to_bid_id")
                 if active_player_id is None: 
                     await gc.send_event_to_frontend({"type":"error_log", "message": f"[E] GameLoop G{game_uid}: Auction but no bidder."})
-                    gc._conclude_auction(no_winner=True); 
+                    await gc._conclude_auction(no_winner=True); 
                     active_player_id = current_main_turn_player_id # Fallback to current main player 
                 current_acting_player = gc.players[active_player_id]
             elif gc.pending_decision_type in ["respond_to_trade_offer", "handle_received_mortgaged_property", "propose_new_trade_after_rejection"]:
@@ -700,7 +701,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                         if active_player_id == current_main_turn_player_id: roll_action_taken_this_main_turn_segment = True
                         if not action_result.get("went_to_jail", False):
                             dice_val = action_result.get("dice_roll", gc.dice)
-                            if dice_val and sum(dice_val) > 0 : gc._move_player(current_acting_player, sum(dice_val))
+                            if dice_val and sum(dice_val) > 0 : await gc._move_player(current_acting_player, sum(dice_val))
                             else: 
                                 gc.log_event(f"[E] Invalid dice {dice_val} from roll_dice tool for P{active_player_id}. Ending segment.", "error_log")
                                 gc._resolve_current_action_segment() # Resolve to avoid stuck state
@@ -920,6 +921,11 @@ async def lifespan(app_instance: FastAPI):
     # Initialize tpay sdk
     print(f"Initializing tpay sdk with api_key: {TLEDGER_API_KEY}, api_secret: {TLEDGER_API_SECRET}, project_id: {TLEDGER_PROJECT_ID}, base_url: {TLEDGER_BASE_URL}, timeout: 1000")
     tpay.tpay_initialize(api_key=TLEDGER_API_KEY, api_secret=TLEDGER_API_SECRET, project_id=TLEDGER_PROJECT_ID, base_url=TLEDGER_BASE_URL, timeout=1000)
+    
+    # Initialize treasury agent
+    print(f"Initializing treasury agent with agent_id: {TREASURY_AGENT_ID}")
+    utils.reset_agent_game_balance(agent_id=TREASURY_AGENT_ID, new_balance=10000000000000)
+    print(f"Treasury agent initialized")
 
     # Initialize agent manager and load agents from database
     print("Initializing Agent Manager...")

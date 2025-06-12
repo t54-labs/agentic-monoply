@@ -124,7 +124,18 @@ def tool_build_house(gc: Any, player_id: int, property_id: int) -> Dict[str, Any
     try:
         # Asset management can happen when no other specific decision is pending.
         # gc.pending_decision_type might be None or a generic "manage_assets" phase.
-        success = gc.build_house_on_property(player_id, property_id)
+        import asyncio
+        try:
+            # If we're already in an async context, use await
+            loop = asyncio.get_running_loop()
+            # We're in asyncio.to_thread, so we need to call the async method differently
+            success = asyncio.run_coroutine_threadsafe(
+                gc.build_house_on_property(player_id, property_id), loop
+            ).result()
+        except RuntimeError:
+            # No event loop running, we can use asyncio.run
+            success = asyncio.run(gc.build_house_on_property(player_id, property_id))
+        
         status = "success" if success else "failure"
         # GameController method build_house_on_property already logs details.
         message = f"Build house on property {property_id}: {status}."
@@ -138,7 +149,18 @@ def tool_build_house(gc: Any, player_id: int, property_id: int) -> Dict[str, Any
 def tool_sell_house(gc: Any, player_id: int, property_id: int) -> Dict[str, Any]:
     """Player attempts to sell a house/hotel from one of their properties."""
     try:
-        success = gc.sell_house_on_property(player_id, property_id)
+        import asyncio
+        try:
+            # If we're already in an async context, use await
+            loop = asyncio.get_running_loop()
+            # We're in asyncio.to_thread, so we need to call the async method differently
+            success = asyncio.run_coroutine_threadsafe(
+                gc.sell_house_on_property(player_id, property_id), loop
+            ).result()
+        except RuntimeError:
+            # No event loop running, we can use asyncio.run
+            success = asyncio.run(gc.sell_house_on_property(player_id, property_id))
+        
         status = "success" if success else "failure"
         message = f"Sell house on property {property_id}: {status}."
         result = {"status": status, "message": message}
@@ -151,7 +173,18 @@ def tool_sell_house(gc: Any, player_id: int, property_id: int) -> Dict[str, Any]
 def tool_mortgage_property(gc: Any, player_id: int, property_id: int) -> Dict[str, Any]:
     """Player attempts to mortgage one of their properties."""
     try:
-        success = gc.mortgage_property_for_player(player_id, property_id)
+        import asyncio
+        try:
+            # If we're already in an async context, use await
+            loop = asyncio.get_running_loop()
+            # We're in asyncio.to_thread, so we need to call the async method differently
+            success = asyncio.run_coroutine_threadsafe(
+                gc.mortgage_property_for_player(player_id, property_id), loop
+            ).result()
+        except RuntimeError:
+            # No event loop running, we can use asyncio.run
+            success = asyncio.run(gc.mortgage_property_for_player(player_id, property_id))
+        
         status = "success" if success else "failure"
         message = f"Mortgage property {property_id}: {status}."
         result = {"status": status, "message": message}
@@ -164,7 +197,18 @@ def tool_mortgage_property(gc: Any, player_id: int, property_id: int) -> Dict[st
 def tool_unmortgage_property(gc: Any, player_id: int, property_id: int) -> Dict[str, Any]:
     """Player attempts to unmortgage one of their properties."""
     try:
-        success = gc.unmortgage_property_for_player(player_id, property_id)
+        import asyncio
+        try:
+            # If we're already in an async context, use await
+            loop = asyncio.get_running_loop()
+            # We're in asyncio.to_thread, so we need to call the async method differently
+            success = asyncio.run_coroutine_threadsafe(
+                gc.unmortgage_property_for_player(player_id, property_id), loop
+            ).result()
+        except RuntimeError:
+            # No event loop running, we can use asyncio.run
+            success = asyncio.run(gc.unmortgage_property_for_player(player_id, property_id))
+        
         status = "success" if success else "failure"
         message = f"Unmortgage property {property_id}: {status}."
         result = {"status": status, "message": message}

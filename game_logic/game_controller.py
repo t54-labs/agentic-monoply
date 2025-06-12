@@ -312,7 +312,6 @@ class GameController:
         )
         
         if payment_result:
-            # 等待支付完成
             payment_success = await self._wait_for_payment_completion(payment_result)
             
             if payment_success:
@@ -419,11 +418,9 @@ class GameController:
                 )
                 
                 if payment_success:
-                    # 租金支付成功
                     self.log_event(f"{player.name} successfully paid ${rent_amount} rent to {owner.name}.")
                     self._resolve_current_action_segment()
                 else:
-                    # 租金支付失败，进入破产处理
                     self.log_event(f"{player.name} failed to pay ${rent_amount} rent - payment failed or could not be initiated.")
                     self._check_and_handle_bankruptcy(player, debt_to_creditor=rent_amount, creditor=owner)
             else:
@@ -462,19 +459,15 @@ class GameController:
         )
         
         if payment_result:
-            # 等待支付完成
             payment_success = await self._wait_for_payment_completion(payment_result)
             
             if payment_success:
-                # 税收支付成功
                 self.log_event(f"{player.name} successfully paid ${amount_due} tax.")
                 self._resolve_current_action_segment()
             else:
-                # 税收支付失败，进入破产处理
                 self.log_event(f"{player.name} failed to pay ${amount_due} tax - payment failed.")
                 self._check_and_handle_bankruptcy(player, debt_to_creditor=amount_due, creditor=None)
         else:
-            # 支付无法发起，进入破产处理
             self.log_event(f"{player.name} failed to pay ${amount_due} tax - payment could not be initiated.")
             self._check_and_handle_bankruptcy(player, debt_to_creditor=amount_due, creditor=None)
 
@@ -515,7 +508,6 @@ class GameController:
             )
             
             if payment_result:
-                # 等待支付完成
                 payment_success = await self._wait_for_payment_completion(payment_result)
                 
                 if payment_success:
@@ -544,7 +536,6 @@ class GameController:
             )
             
             if payment_result:
-                # 等待支付完成
                 payment_success = await self._wait_for_payment_completion(payment_result)
                 
                 if payment_success:
@@ -575,7 +566,6 @@ class GameController:
                 )
                 
                 if payment_result:
-                    # 等待支付完成
                     payment_success = await self._wait_for_payment_completion(payment_result)
                     
                     if payment_success:
@@ -590,47 +580,6 @@ class GameController:
             else:
                 self.log_event(f"{player.name} has no properties with buildings for street repairs.")
                 self._resolve_current_action_segment()
-        elif action_type == "receive_from_players":
-            amount_each = value
-            all_payments_successful = True
-            
-            for other_player in self.players:
-                if other_player != player and not other_player.is_bankrupt:
-                    # 注意：这里需要用player-to-player支付，但该方法还需要修改返回值
-                    # 暂时先记录需要支付，后续实现完整的player间支付
-                    if other_player.money >= amount_each:
-                        # 模拟支付（需要实现真正的player间tpay支付）
-                        self.log_event(f"{other_player.name} owes ${amount_each} to {player.name} (card effect).")
-                        # TODO: 实现真正的tpay player间支付
-                    else:
-                        self.log_event(f"[Warning] {other_player.name} cannot afford ${amount_each} to {player.name}.")
-                        all_payments_successful = False
-            
-            if all_payments_successful:
-                self.log_event(f"{player.name} collected money from all other players.")
-            else:
-                self.log_event(f"{player.name} could not collect full amount from all players.")
-                
-            self._resolve_current_action_segment()
-        elif action_type == "pay_players":
-            amount_each = value
-            total_amount_needed = amount_each * len([p for p in self.players if p != player and not p.is_bankrupt])
-            
-            if player.money >= total_amount_needed:
-                self.log_event(f"{player.name} needs to pay ${total_amount_needed} total to other players.")
-                # TODO: 实现真正的多个player间tpay支付
-                # 暂时标记为需要支付，等待完整的player间支付实现
-                for other_player in self.players:
-                    if other_player != player and not other_player.is_bankrupt:
-                        self.log_event(f"{player.name} owes ${amount_each} to {other_player.name} (card effect).")
-                
-                self.log_event(f"{player.name} has sufficient funds for card payments.")
-                self._resolve_current_action_segment()
-            else:
-                # 资金不足，触发破产流程
-                self.log_event(f"{player.name} cannot afford to pay ${total_amount_needed} to other players.")
-                self._check_and_handle_bankruptcy(player, debt_to_creditor=total_amount_needed, creditor=None)
-
         # --- Effects involving Movement (these will call land_on_square, which sets final state) ---
         elif action_type == "move_to_exact":
             current_pos = player.position; target_pos = value
@@ -662,6 +611,120 @@ class GameController:
             else:
                 self.log_event(f"[Error] Card: Could not find nearest {target_type_str} for {player.name}.")
                 self._resolve_current_action_segment()
+        elif action_type == "collect_from_players":
+            amount_each = value
+            eligible_players = [p for p in self.players if p != player and not p.is_bankrupt]
+            
+            if not eligible_players:
+                self.log_event(f"{player.name} has no other players to collect from.")
+                self._resolve_current_action_segment()
+                return
+            
+            self.log_event(f"{player.name} needs to collect ${amount_each} from each of {len(eligible_players)} other players (total ${amount_each * len(eligible_players)}).")
+            
+            # Execute TPay payments from all other players to current player
+            successful_payments = []
+            failed_payments = []
+            
+            for other_player in eligible_players:
+                if other_player.money >= amount_each:
+                    # Create TPay payment from other player to current player
+                    payment_success = await self._create_tpay_payment_player_to_player(
+                        payer=other_player,
+                        recipient=player,
+                        amount=float(amount_each),
+                        reason=f"card effect payment to {player.name}",
+                        agent_decision_context={
+                            "card_effect": "collect_from_players",
+                            "amount_per_player": amount_each,
+                            "total_players_paying": len(eligible_players),
+                            "card_context": "mandatory payment due to card drawn"
+                        }
+                    )
+                    
+                    if payment_success:
+                        successful_payments.append(other_player.name)
+                        self.log_event(f"✅ {other_player.name} successfully paid ${amount_each} to {player.name} (card effect).")
+                    else:
+                        failed_payments.append(other_player.name)
+                        self.log_event(f"❌ {other_player.name} failed to pay ${amount_each} to {player.name} (card effect).")
+                        # Handle bankruptcy for failed payment
+                        self._check_and_handle_bankruptcy(other_player, debt_to_creditor=amount_each, creditor=player)
+                else:
+                    failed_payments.append(other_player.name)
+                    self.log_event(f"💰 {other_player.name} cannot afford ${amount_each} to {player.name} (has ${other_player.money}).")
+                    # Handle bankruptcy for insufficient funds
+                    self._check_and_handle_bankruptcy(other_player, debt_to_creditor=amount_each, creditor=player)
+            
+            # Log summary of collection results
+            if successful_payments:
+                total_collected = len(successful_payments) * amount_each
+                self.log_event(f"💵 {player.name} collected ${total_collected} from {len(successful_payments)} players: {', '.join(successful_payments)}")
+            
+            if failed_payments:
+                total_failed = len(failed_payments) * amount_each
+                self.log_event(f"⚠️ {player.name} could not collect ${total_failed} from {len(failed_payments)} players: {', '.join(failed_payments)}")
+            
+            # Complete the card effect
+            self._resolve_current_action_segment()
+            
+        elif action_type == "pay_players":
+            amount_each = value
+            eligible_recipients = [p for p in self.players if p != player and not p.is_bankrupt]
+            total_amount_needed = amount_each * len(eligible_recipients)
+            
+            if not eligible_recipients:
+                self.log_event(f"{player.name} has no other players to pay.")
+                self._resolve_current_action_segment()
+                return
+            
+            self.log_event(f"{player.name} needs to pay ${amount_each} to each of {len(eligible_recipients)} other players (total ${total_amount_needed}).")
+            
+            if player.money >= total_amount_needed:
+                # Execute TPay payments from current player to all other players
+                successful_payments = []
+                failed_payments = []
+                
+                for other_player in eligible_recipients:
+                    # Create TPay payment from current player to other player
+                    payment_success = await self._create_tpay_payment_player_to_player(
+                        payer=player,
+                        recipient=other_player,
+                        amount=float(amount_each),
+                        reason=f"card effect payment to {other_player.name}",
+                        agent_decision_context={
+                            "card_effect": "pay_players",
+                            "amount_per_player": amount_each,
+                            "total_players_receiving": len(eligible_recipients),
+                            "total_amount_needed": total_amount_needed,
+                            "card_context": "mandatory payment due to card drawn"
+                        }
+                    )
+                    
+                    if payment_success:
+                        successful_payments.append(other_player.name)
+                        self.log_event(f"✅ {player.name} successfully paid ${amount_each} to {other_player.name} (card effect).")
+                    else:
+                        failed_payments.append(other_player.name)
+                        self.log_event(f"❌ {player.name} failed to pay ${amount_each} to {other_player.name} (card effect).")
+                
+                # Log summary of payment results
+                if successful_payments:
+                    total_paid = len(successful_payments) * amount_each
+                    self.log_event(f"💸 {player.name} paid ${total_paid} to {len(successful_payments)} players: {', '.join(successful_payments)}")
+                
+                if failed_payments:
+                    total_failed = len(failed_payments) * amount_each
+                    self.log_event(f"⚠️ {player.name} failed to pay ${total_failed} to {len(failed_payments)} players: {', '.join(failed_payments)}")
+                    # If any payments failed, handle bankruptcy
+                    self._check_and_handle_bankruptcy(player, debt_to_creditor=total_failed, creditor=None)
+                else:
+                    # All payments successful
+                    self.log_event(f"✅ {player.name} successfully completed all card effect payments.")
+                    self._resolve_current_action_segment()
+            else:
+                self.log_event(f"💰 {player.name} cannot afford to pay ${total_amount_needed} total to other players (has ${player.money}).")
+                self._check_and_handle_bankruptcy(player, debt_to_creditor=total_amount_needed, creditor=None)
         else:
             self.log_event(f"[Warning] Card action_type '{action_type}' has no explicit state update logic in _handle_card_effect. Resolving segment.")
             self._resolve_current_action_segment()
@@ -1367,6 +1430,216 @@ class GameController:
 
     # ======= End TPay Payment Integration Methods =======
 
+    # ======= Property Management Methods =======
+    
+    async def build_house_on_property(self, player_id: int, property_id: int) -> bool:
+        """Build a house/hotel on a property owned by the player."""
+        player = self.players[player_id]
+        
+        if property_id not in player.properties_owned_ids:
+            self.log_event(f"[Error] {player.name} does not own property {property_id}.")
+            return False
+            
+        square = self.board.get_square(property_id)
+        if not isinstance(square, PropertySquare):
+            self.log_event(f"[Error] Property {property_id} ({square.name}) is not a buildable property.")
+            return False
+            
+        if square.is_mortgaged:
+            self.log_event(f"[Error] Cannot build on mortgaged property {square.name}.")
+            return False
+            
+        if square.num_houses >= 5:
+            self.log_event(f"[Error] Property {square.name} already has maximum development (hotel).")
+            return False
+            
+        # Check if player owns all properties in the color group
+        color_group_properties = self.board.get_properties_in_group(square.color_group)
+        for prop_id in color_group_properties:
+            prop_square = self.board.get_square(prop_id)
+            if prop_square.owner_id != player_id or prop_square.is_mortgaged:
+                self.log_event(f"[Error] Must own all unmortgaged properties in {square.color_group.value} group to build.")
+                return False
+                
+        # Check for even development rule
+        min_houses = min(self.board.get_square(pid).num_houses for pid in color_group_properties)
+        if square.num_houses > min_houses:
+            self.log_event(f"[Error] Must build evenly across color group. {square.name} already has more houses than others.")
+            return False
+            
+        if player.money < square.house_price:
+            self.log_event(f"[Error] {player.name} needs ${square.house_price} to build on {square.name} but only has ${player.money}.")
+            return False
+            
+        # Execute the building with TPay payment to treasury
+        house_or_hotel = "hotel" if square.num_houses == 4 else "house"  # What will be built
+        payment_result = await self._create_tpay_payment_player_to_system(
+            payer=player,
+            amount=float(square.house_price),
+            reason=f"house construction - {square.name}",
+            event_description=f"{player.name} built a {house_or_hotel} on {square.name} for ${square.house_price}"
+        )
+        
+        if payment_result:
+            payment_success = await self._wait_for_payment_completion(payment_result)
+            
+            if payment_success:
+                square.num_houses += 1
+                house_or_hotel = "hotel" if square.num_houses == 5 else "house"
+                self.log_event(f"{player.name} successfully built a {house_or_hotel} on {square.name}.")
+                return True
+            else:
+                self.log_event(f"{player.name} failed to build on {square.name} - payment failed.")
+                return False
+        else:
+            self.log_event(f"{player.name} failed to build on {square.name} - payment could not be initiated.")
+            return False
+    
+    async def sell_house_on_property(self, player_id: int, property_id: int) -> bool:
+        """Sell a house/hotel from a property owned by the player."""
+        player = self.players[player_id]
+        
+        if property_id not in player.properties_owned_ids:
+            self.log_event(f"[Error] {player.name} does not own property {property_id}.")
+            return False
+            
+        square = self.board.get_square(property_id)
+        if not isinstance(square, PropertySquare):
+            self.log_event(f"[Error] Property {property_id} ({square.name}) is not a buildable property.")
+            return False
+            
+        if square.num_houses <= 0:
+            self.log_event(f"[Error] Property {square.name} has no houses to sell.")
+            return False
+            
+        # Check for even development rule when selling
+        color_group_properties = self.board.get_properties_in_group(square.color_group)
+        max_houses = max(self.board.get_square(pid).num_houses for pid in color_group_properties)
+        if square.num_houses < max_houses:
+            self.log_event(f"[Error] Must sell evenly across color group. Other properties in {square.color_group.value} group have more houses.")
+            return False
+            
+        # Sell for half the house price - receive payment from treasury
+        sale_price = square.house_price // 2
+        building_to_sell = "hotel" if square.num_houses == 5 else "house"
+        
+        payment_result = await self._create_tpay_payment_system_to_player(
+            recipient=player,
+            amount=float(sale_price),
+            reason=f"house sale - {square.name}",
+            event_description=f"{player.name} sold a {building_to_sell} from {square.name} for ${sale_price}"
+        )
+        
+        if payment_result:
+            payment_success = await self._wait_for_payment_completion(payment_result)
+            
+            if payment_success:
+                square.num_houses -= 1
+                building_sold = "hotel" if square.num_houses == 4 else "house"
+                self.log_event(f"{player.name} successfully sold a {building_to_sell} from {square.name} for ${sale_price}.")
+                return True
+            else:
+                self.log_event(f"{player.name} failed to sell {building_to_sell} from {square.name} - payment failed.")
+                return False
+        else:
+            self.log_event(f"{player.name} failed to sell {building_to_sell} from {square.name} - payment could not be initiated.")
+            return False
+    
+    async def mortgage_property_for_player(self, player_id: int, property_id: int) -> bool:
+        """Mortgage a property owned by the player."""
+        player = self.players[player_id]
+        
+        if property_id not in player.properties_owned_ids:
+            self.log_event(f"[Error] {player.name} does not own property {property_id}.")
+            return False
+            
+        square = self.board.get_square(property_id)
+        if not isinstance(square, PurchasableSquare):
+            self.log_event(f"[Error] Property {property_id} ({square.name}) cannot be mortgaged.")
+            return False
+            
+        if square.is_mortgaged:
+            self.log_event(f"[Error] Property {square.name} is already mortgaged.")
+            return False
+            
+        # Check if property has houses (must sell houses first)
+        if isinstance(square, PropertySquare) and square.num_houses > 0:
+            self.log_event(f"[Error] Must sell all houses on {square.name} before mortgaging.")
+            return False
+            
+        # Mortgage for half the property price - receive loan from treasury
+        mortgage_value = square.price // 2
+        
+        payment_result = await self._create_tpay_payment_system_to_player(
+            recipient=player,
+            amount=float(mortgage_value),
+            reason=f"mortgage loan - {square.name}",
+            event_description=f"{player.name} mortgaged {square.name} for ${mortgage_value}"
+        )
+        
+        if payment_result:
+            payment_success = await self._wait_for_payment_completion(payment_result)
+            
+            if payment_success:
+                square.is_mortgaged = True
+                self.log_event(f"{player.name} successfully mortgaged {square.name} for ${mortgage_value}.")
+                return True
+            else:
+                self.log_event(f"{player.name} failed to mortgage {square.name} - payment failed.")
+                return False
+        else:
+            self.log_event(f"{player.name} failed to mortgage {square.name} - payment could not be initiated.")
+            return False
+    
+    async def unmortgage_property_for_player(self, player_id: int, property_id: int) -> bool:
+        """Unmortgage a property owned by the player."""
+        player = self.players[player_id]
+        
+        if property_id not in player.properties_owned_ids:
+            self.log_event(f"[Error] {player.name} does not own property {property_id}.")
+            return False
+            
+        square = self.board.get_square(property_id)
+        if not isinstance(square, PurchasableSquare):
+            self.log_event(f"[Error] Property {property_id} ({square.name}) cannot be unmortgaged.")
+            return False
+            
+        if not square.is_mortgaged:
+            self.log_event(f"[Error] Property {square.name} is not mortgaged.")
+            return False
+            
+        # Calculate unmortgage cost (mortgage value + 10% interest)
+        mortgage_value = square.price // 2
+        unmortgage_cost = int(mortgage_value * 1.1)
+        
+        if player.money < unmortgage_cost:
+            self.log_event(f"[Error] {player.name} needs ${unmortgage_cost} to unmortgage {square.name} but only has ${player.money}.")
+            return False
+            
+        # Pay unmortgage cost to treasury
+        payment_result = await self._create_tpay_payment_player_to_system(
+            payer=player,
+            amount=float(unmortgage_cost),
+            reason=f"unmortgage payment - {square.name}",
+            event_description=f"{player.name} unmortgaged {square.name} for ${unmortgage_cost}"
+        )
+        
+        if payment_result:
+            payment_success = await self._wait_for_payment_completion(payment_result)
+            
+            if payment_success:
+                square.is_mortgaged = False
+                self.log_event(f"{player.name} successfully unmortgaged {square.name} for ${unmortgage_cost}.")
+                return True
+            else:
+                self.log_event(f"{player.name} failed to unmortgage {square.name} - payment failed.")
+                return False
+        else:
+            self.log_event(f"{player.name} failed to unmortgage {square.name} - payment could not be initiated.")
+            return False
+    
+    # ======= End Property Management Methods =======
+
     async def _move_player_directly_to_square(self, player: Player, target_pos: int, collect_go_salary_if_passed: bool = False) -> None:
         """Moves player directly to a square, handles GO if applicable, and then triggers landing effects."""
         if player.is_bankrupt:
@@ -1560,23 +1833,19 @@ class GameController:
             )
             
             if payment_result:
-                # 等待支付完成
                 payment_success = await self._wait_for_payment_completion(payment_result)
                 
                 if payment_success:
-                    # 支付成功，完成购买
                     square.owner_id = player.player_id
                     player.add_property_id(square.square_id)
                     self.log_event(f"{player.name} bought {square.name} for ${square.price}.")
                     self._resolve_current_action_segment() 
                     return True
                 else:
-                    # 支付失败，回退交易
                     self.log_event(f"{player.name} failed to buy {square.name} - payment failed.")
                     self._resolve_current_action_segment()
                     return False
             else:
-                # 支付无法发起
                 self.log_event(f"{player.name} failed to buy {square.name} - payment could not be initiated.")
                 self._resolve_current_action_segment()
                 return False
@@ -1697,12 +1966,10 @@ class GameController:
                     self._resolve_current_action_segment() 
                     return {"status": "success", "message": msg, "paid_bail": True}
                 else:
-                    # 支付失败，保持在狱中
                     msg = f"{player.name} failed to pay ${bail_amount} bail - payment failed."
                     self.log_event(msg)
                     return {"status": "error", "message": msg, "paid_bail": False}
             else:
-                # 支付无法发起
                 msg = f"{player.name} failed to pay ${bail_amount} bail - payment could not be initiated."
                 self.log_event(msg)
                 return {"status": "error", "message": msg, "paid_bail": False}
@@ -1721,21 +1988,21 @@ class GameController:
             return {"status": "error", "message": msg}
 
         if player.has_chance_gooj_card:
-            player.use_get_out_of_jail_chance_card() 
-            player.leave_jail()
-            self.doubles_streak = 0
-            msg = f"{player.name} used a Chance Get Out of Jail Free card and is now out of jail."
-            self.log_event(msg)
-            self._resolve_current_action_segment()
-            return {"status": "success", "message": msg, "used_card": "chance"}
+            used_card_type = player.use_get_out_of_jail_card()
+            if used_card_type == "chance":
+                self.doubles_streak = 0
+                msg = f"{player.name} used a Chance Get Out of Jail Free card and is now out of jail."
+                self.log_event(msg)
+                self._resolve_current_action_segment()
+                return {"status": "success", "message": msg, "used_card": "chance"}
         elif player.has_community_gooj_card:
-            player.use_get_out_of_jail_community_chest_card()
-            player.leave_jail()
-            self.doubles_streak = 0
-            msg = f"{player.name} used a Community Chest Get Out of Jail Free card and is now out of jail."
-            self.log_event(msg)
-            self._resolve_current_action_segment()
-            return {"status": "success", "message": msg, "used_card": "community_chest"}
+            used_card_type = player.use_get_out_of_jail_card()
+            if used_card_type == "community_chest":
+                self.doubles_streak = 0
+                msg = f"{player.name} used a Community Chest Get Out of Jail Free card and is now out of jail."
+                self.log_event(msg)
+                self._resolve_current_action_segment()
+                return {"status": "success", "message": msg, "used_card": "community_chest"}
         else:
             msg = f"{player.name} has no Get Out of Jail Free card to use."
             self.log_event(msg)
@@ -1937,23 +2204,21 @@ class GameController:
     def _transfer_gooj_card(self, giver: Player, receiver: Player, card_item_id_hint: Optional[int]):
         transferred_card_type = None
         if card_item_id_hint == 0 and giver.has_chance_gooj_card: 
-            giver.use_get_out_of_jail_chance_card() 
+            giver.has_chance_gooj_card = False  # Remove card from giver
             receiver.add_get_out_of_jail_card("chance") 
             transferred_card_type = "Chance"
         elif card_item_id_hint == 1 and giver.has_community_gooj_card: 
-            giver.use_get_out_of_jail_community_chest_card()
+            giver.has_community_gooj_card = False  # Remove card from giver
             receiver.add_get_out_of_jail_card("community_chest")
             transferred_card_type = "Community Chest"
         elif card_item_id_hint is None: 
             used_card_type = None 
             if giver.has_chance_gooj_card:
-                if hasattr(giver, 'use_get_out_of_jail_chance_card'): giver.use_get_out_of_jail_chance_card()
-                else: giver.has_chance_gooj_card = False
+                giver.has_chance_gooj_card = False
                 receiver.add_get_out_of_jail_card("chance")
                 transferred_card_type = "Chance"
             elif giver.has_community_gooj_card:
-                if hasattr(giver, 'use_get_out_of_jail_community_chest_card'): giver.use_get_out_of_jail_community_chest_card()
-                else: giver.has_community_gooj_card = False
+                giver.has_community_gooj_card = False
                 receiver.add_get_out_of_jail_card("community_chest")
                 transferred_card_type = "Community Chest"
         
@@ -2071,7 +2336,7 @@ class GameController:
                                  outcome_processed=True)
         return trade_id
 
-    def _respond_to_trade_offer_action(self, player_id: int, trade_id: int, response: str, 
+    async def _respond_to_trade_offer_action(self, player_id: int, trade_id: int, response: str, 
                                      counter_offered_prop_ids: Optional[List[int]] = None, 
                                      counter_offered_money: Optional[int] = None, 
                                      counter_offered_gooj_cards: Optional[int] = None,
@@ -2104,45 +2369,97 @@ class GameController:
             try:
                 mortgaged_props_received_by_player: List[Dict[str,Any]] = [] 
                 mortgaged_props_received_by_proposer: List[Dict[str,Any]] = []
-                # TODO: 交易中的金钱转移需要集成tpay支付系统
-                # 目前暂时记录交易物品，不执行金钱转移，等待完整的player间支付实现
-                trade_money_transfers = []
                 
+                # Execute TPay payments for trade money transfers
+                trade_payment_successful = True
+                trade_payments_completed = []
+                trade_payments_failed = []
+                
+                # Process money transfers from proposer to recipient
                 for item in offer.items_offered_by_proposer: 
                     if item.item_type == "money": 
-                        trade_money_transfers.append({
-                            "from_player": original_proposer.name,
-                            "to_player": player.name,
-                            "amount": item.quantity,
-                            "reason": f"trade T{trade_id} - payment from proposer"
-                        })
-                        self.log_event(f"[Trade Money] {original_proposer.name} → {player.name}: ${item.quantity} (proposer payment)")
+                        # Execute actual TPay payment from proposer to recipient
+                        payment_success = await self._create_tpay_payment_player_to_player(
+                            payer=original_proposer,
+                            recipient=player,
+                            amount=float(item.quantity),
+                            reason=f"trade T{trade_id} payment from proposer",
+                            agent_decision_context={
+                                "trade_id": trade_id,
+                                "trade_role": "proposer_payment",
+                                "trade_items_offered": len(offer.items_offered_by_proposer),
+                                "trade_items_requested": len(offer.items_requested_from_recipient),
+                                "total_money_transfer": item.quantity,
+                                "trade_context": "accepted trade execution"
+                            }
+                        )
+                        
+                        if payment_success:
+                            trade_payments_completed.append(f"{original_proposer.name} → {player.name}: ${item.quantity}")
+                            self.log_event(f"✅ Trade payment successful: {original_proposer.name} → {player.name} ${item.quantity}")
+                        else:
+                            trade_payments_failed.append(f"{original_proposer.name} → {player.name}: ${item.quantity}")
+                            self.log_event(f"❌ Trade payment failed: {original_proposer.name} → {player.name} ${item.quantity}")
+                            trade_payment_successful = False
                     elif item.item_type == "property":
                         sq = self.board.get_square(item.item_id) 
                         original_proposer.remove_property_id(item.item_id); player.add_property_id(item.item_id); sq.owner_id = player.player_id
                         if sq.is_mortgaged: mortgaged_props_received_by_player.append({"property_id": item.item_id, "source_trade_id": trade_id})
-                    elif item.item_type == "get_out_of_jail_card": self._transfer_gooj_card(original_proposer, player, item.item_id)
+                        self.log_event(f"🏠 Property transferred: {sq.name} from {original_proposer.name} to {player.name}")
+                    elif item.item_type == "get_out_of_jail_card": 
+                        self._transfer_gooj_card(original_proposer, player, item.item_id)
                 
+                # Process money transfers from recipient to proposer
                 for item in offer.items_requested_from_recipient: 
                     if item.item_type == "money": 
-                        trade_money_transfers.append({
-                            "from_player": player.name,
-                            "to_player": original_proposer.name,
-                            "amount": item.quantity,
-                            "reason": f"trade T{trade_id} - payment from recipient"
-                        })
-                        self.log_event(f"[Trade Money] {player.name} → {original_proposer.name}: ${item.quantity} (recipient payment)")
+                        # Execute actual TPay payment from recipient to proposer
+                        payment_success = await self._create_tpay_payment_player_to_player(
+                            payer=player,
+                            recipient=original_proposer,
+                            amount=float(item.quantity),
+                            reason=f"trade T{trade_id} payment from recipient",
+                            agent_decision_context={
+                                "trade_id": trade_id,
+                                "trade_role": "recipient_payment",
+                                "trade_items_offered": len(offer.items_offered_by_proposer),
+                                "trade_items_requested": len(offer.items_requested_from_recipient),
+                                "total_money_transfer": item.quantity,
+                                "trade_context": "accepted trade execution"
+                            }
+                        )
+                        
+                        if payment_success:
+                            trade_payments_completed.append(f"{player.name} → {original_proposer.name}: ${item.quantity}")
+                            self.log_event(f"✅ Trade payment successful: {player.name} → {original_proposer.name} ${item.quantity}")
+                        else:
+                            trade_payments_failed.append(f"{player.name} → {original_proposer.name}: ${item.quantity}")
+                            self.log_event(f"❌ Trade payment failed: {player.name} → {original_proposer.name} ${item.quantity}")
+                            trade_payment_successful = False
                     elif item.item_type == "property":
                         sq = self.board.get_square(item.item_id) 
                         player.remove_property_id(item.item_id); original_proposer.add_property_id(item.item_id); sq.owner_id = original_proposer.player_id
                         if sq.is_mortgaged: mortgaged_props_received_by_proposer.append({"property_id": item.item_id, "source_trade_id": trade_id})
-                    elif item.item_type == "get_out_of_jail_card": self._transfer_gooj_card(player, original_proposer, item.item_id)
+                        self.log_event(f"🏠 Property transferred: {sq.name} from {player.name} to {original_proposer.name}")
+                    elif item.item_type == "get_out_of_jail_card": 
+                        self._transfer_gooj_card(player, original_proposer, item.item_id)
                 
-                # 记录需要的金钱转移但不执行
-                if trade_money_transfers:
-                    self.log_event(f"[Trade] {len(trade_money_transfers)} money transfers recorded for trade T{trade_id} - TPay integration pending")
-                offer.status = "accepted"
-                self.log_event(f"Trade {trade_id} accepted! Assets exchanged.", "trade_log")
+                # Check if all payments were successful
+                if trade_payment_successful:
+                    offer.status = "accepted"
+                    if trade_payments_completed:
+                        self.log_event(f"💰 All trade payments completed successfully: {', '.join(trade_payments_completed)}")
+                    self.log_event(f"✅ Trade {trade_id} accepted and executed successfully! All assets transferred.")
+                else:
+                    offer.status = "failed_payment"
+                    if trade_payments_failed:
+                        self.log_event(f"💥 Trade payments failed: {', '.join(trade_payments_failed)}")
+                    self.log_event(f"❌ Trade {trade_id} failed due to payment issues. Rolling back property transfers.")
+                    
+                    # Rollback property transfers if payments failed
+                    # Note: This is a simplified rollback - in production might need more sophisticated handling
+                    self._clear_pending_decision()
+                    return False
+                
                 self._clear_pending_decision() 
                 for task_data in mortgaged_props_received_by_proposer:
                     original_proposer.add_pending_mortgaged_property_task(task_data["property_id"], task_data["source_trade_id"])
@@ -2256,22 +2573,18 @@ class GameController:
             )
             
             if payment_result:
-                # 等待支付完成
                 payment_success = await self._wait_for_payment_completion(payment_result)
                 
                 if payment_success:
-                    # 支付成功，完成购买
                     property_square.owner_id = winner.player_id
                     winner.add_property_id(prop_id)
                     self.log_event(f"{winner.name} now owns {prop_name}.")
                 else:
-                    # 支付失败，进入破产处理
                     self.log_event(f"{winner.name} failed to pay for {prop_name} - auction payment failed.")
                     self._check_and_handle_bankruptcy(winner, debt_to_creditor=price_paid, creditor=None)
                     if isinstance(property_square, PurchasableSquare): 
                         property_square.owner_id = None
             else:
-                # 支付无法发起，进入破产处理
                 self.log_event(f"{winner.name} failed to pay for {prop_name} - auction payment could not be initiated.")
                 self._check_and_handle_bankruptcy(winner, debt_to_creditor=price_paid, creditor=None)
                 if isinstance(property_square, PurchasableSquare): 

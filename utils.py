@@ -91,12 +91,13 @@ def reset_agent_game_balance(agent_id: str,
         True if successful, False otherwise
     """
     try:
+        new_balance = int(new_balance * 10 ** 6)
         result = admin_create_asset_account(
             agent_id=agent_id,
             asset=game_token,
             balance=new_balance,
             network="solana",
-            account_metadata="{}"
+            account_metadata='{"decimals": 6}'
         )
         
         return result is not None

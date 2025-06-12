@@ -47,7 +47,7 @@ class Player:
                 balance = tpay.get_agent_asset_balance(agent_id=self.agent_tpay_id, network="solana", asset=utils.GAME_TOKEN_SYMBOL)
                 if balance is not None:
                     # Update local cache with real value
-                    self._money = float(balance)
+                    self._money = float(balance / 10 ** 6)
                     return self._money
                 else:
                     print(f"[Player] Warning: Could not get tpay balance for agent {self.agent_tpay_id}, using cached value ${self._money}")

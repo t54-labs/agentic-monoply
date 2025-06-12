@@ -1,6 +1,10 @@
 import asyncio
 import json
 import random  # Added for random turn delays
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from queue import Queue as SyncQueue, Empty
+import traceback
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +19,7 @@ from tpay.tools import taudit_verifier
 
 from game_logic.player import Player
 from game_logic.game_controller import GameController 
+from game_logic.game_controller_v2 import GameControllerV2
 from ai_agent.agent import OpenAIAgent
 from main import TOOL_REGISTRY, NUM_PLAYERS, PLAYER_NAMES, MAX_TURNS, ACTION_DELAY_SECONDS, MAX_ACTIONS_PER_SEGMENT, execute_agent_action, print_game_summary, _setup_tool_placeholders
 from colorama import init, Fore as ColoramaFore, Style as ColoramaStyle
@@ -38,6 +43,17 @@ AGENTS_PER_GAME = NUM_PLAYERS     # Number of agents per game (should match NUM_
 AGENT_INITIAL_BALANCE = 1500  # Starting balance for each game
 TREASURY_AGENT_ID = "agnt_d755a309-682b-49b7-b997-956efef2b591"
 
+def print_startup_config():
+    """Print startup configuration for debugging"""
+    print(f"{Fore.CYAN}=== MONOPOLY GAME SERVER CONFIGURATION ==={Style.RESET_ALL}")
+    print(f"{Fore.GREEN}Concurrent Games: {CONCURRENT_GAMES_COUNT}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}Auto Restart: {AUTO_RESTART_GAMES}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}Agents Per Game: {AGENTS_PER_GAME}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}Maintenance Interval: {MAINTENANCE_INTERVAL}s{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}Max Turns: {MAX_TURNS}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}Action Delay: {ACTION_DELAY_SECONDS}s{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}============================================{Style.RESET_ALL}")
+
 # 1. Colorama setup & Global placeholders
 class Fore: CYAN=YELLOW=GREEN=RED=MAGENTA=WHITE=BLACK=BLUE=""; LIGHTBLACK_EX=LIGHTBLUE_EX=LIGHTCYAN_EX=LIGHTGREEN_EX=LIGHTMAGENTA_EX=LIGHTRED_EX=LIGHTWHITE_EX=LIGHTYELLOW_EX=""
 class Style: RESET_ALL=BRIGHT=DIM=NORMAL="";
@@ -45,7 +61,8 @@ COLORAMA_OK = False
 try: 
     init()
     Fore = ColoramaFore; Style = ColoramaStyle; COLORAMA_OK = True
-    if os.getenv("RUN_CONTEXT") != "test" and __name__ == "__main__": print(f"{Fore.GREEN}Colorama initialized.{Style.RESET_ALL}")
+    if os.getenv("RUN_CONTEXT") != "test" and __name__ == "__main__": 
+        print(f"{Fore.GREEN}Colorama initialized.{Style.RESET_ALL}")
 except ImportError: 
     if os.getenv("RUN_CONTEXT") != "test" and __name__ == "__main__": print("Colorama not found.")
     pass 
@@ -110,6 +127,7 @@ class AgentManager:
         self.available_agents: List[Dict[str, Any]] = []  # Available agents for matchmaking
         self.agents_in_game: Dict[str, str] = {}  # agent_uid -> game_uid mapping
         self.agent_instances: Dict[str, OpenAIAgent] = {}  # agent_uid -> OpenAIAgent instance
+        self._lock = threading.RLock()  # Thread-safe lock for agent operations
         
     async def initialize_agents_from_database(self):
         """Load all active agents from database and create their instances"""
@@ -119,80 +137,13 @@ class AgentManager:
                 stmt = select(agents_table).where(agents_table.c.status == 'active')
                 result = session.execute(stmt)
                 agents_data = result.fetchall()
+                # shuffle agents_data
+                random.shuffle(agents_data)
                 
                 print(f"{Fore.GREEN}[Agent Manager] Found {len(agents_data)} active agents in database{Style.RESET_ALL}")
                 
-                for agent_row in agents_data:
-                    agent_dict = {
-                        'id': agent_row.id,
-                        'agent_uid': agent_row.agent_uid,
-                        'name': agent_row.name,
-                        'personality_prompt': agent_row.personality_prompt,
-                        'memory_data': agent_row.memory_data or {},
-                        'preferences': agent_row.preferences or {},
-                        'total_games_played': agent_row.total_games_played,
-                        'total_wins': agent_row.total_wins,
-                        'tpay_account_id': agent_row.tpay_account_id,
-                        'status': agent_row.status
-                    }
-                    
-                    # Create OpenAI agent instance
-                    agent_instance = OpenAIAgent(
-                        player_id=-1,  # Will be set when joining a game
-                        name=agent_dict['name']
-                    )
-                    
-                    # Store agent instance
-                    self.agent_instances[agent_dict['agent_uid']] = agent_instance
-                    
-                    # Add to available agents if not in game
-                    if agent_dict['status'] == 'active':
-                        self.available_agents.append(agent_dict)
-                
-                print(f"{Fore.GREEN}[Agent Manager] Initialized {len(self.available_agents)} available agents{Style.RESET_ALL}")
-                
-        except Exception as e:
-            print(f"{Fore.RED}[Agent Manager] Error initializing agents: {e}{Style.RESET_ALL}")
-    
-    def get_available_agents_for_game(self, num_needed: int) -> List[Dict[str, Any]]:
-        """Get available agents for a new game"""
-        if len(self.available_agents) < num_needed:
-            print(f"{Fore.YELLOW}[Agent Manager] Not enough available agents. Need {num_needed}, have {len(self.available_agents)}{Style.RESET_ALL}")
-            return []
-        
-        # Select agents (for now, just take first N available)
-        selected_agents = self.available_agents[:num_needed]
-        
-        # Remove selected agents from available pool
-        for agent in selected_agents:
-            self.available_agents.remove(agent)
-            # Mark as in_game in memory (will update DB when game starts)
-            
-        return selected_agents
-    
-    def assign_agents_to_game(self, agents: List[Dict[str, Any]], game_uid: str):
-        """Assign agents to a specific game"""
-        for agent in agents:
-            self.agents_in_game[agent['agent_uid']] = game_uid
-            # Update status in database
-            self._update_agent_status(agent['agent_uid'], 'in_game')
-    
-    def release_agents_from_game(self, game_uid: str):
-        """Release agents back to available pool when game ends"""
-        agents_to_release = [agent_uid for agent_uid, g_uid in self.agents_in_game.items() if g_uid == game_uid]
-        
-        for agent_uid in agents_to_release:
-            # Remove from in_game mapping
-            del self.agents_in_game[agent_uid]
-            
-            # Find agent data and add back to available pool
-            try:
-                with Session(engine) as session:
-                    stmt = select(agents_table).where(agents_table.c.agent_uid == agent_uid)
-                    result = session.execute(stmt)
-                    agent_row = result.fetchone()
-                    
-                    if agent_row:
+                with self._lock:  # Thread-safe initialization
+                    for agent_row in agents_data:
                         agent_dict = {
                             'id': agent_row.id,
                             'agent_uid': agent_row.agent_uid,
@@ -203,17 +154,92 @@ class AgentManager:
                             'total_games_played': agent_row.total_games_played,
                             'total_wins': agent_row.total_wins,
                             'tpay_account_id': agent_row.tpay_account_id,
-                            'status': 'active'
+                            'status': agent_row.status
                         }
-                        self.available_agents.append(agent_dict)
                         
-                        # Update status in database
-                        self._update_agent_status(agent_uid, 'active')
+                        # Create OpenAI agent instance
+                        agent_instance = OpenAIAgent(
+                            player_id=-1,  # Will be set when joining a game
+                            name=agent_dict['name']
+                        )
                         
-                        print(f"{Fore.GREEN}[Agent Manager] Released agent {agent_dict['name']} back to available pool{Style.RESET_ALL}")
+                        # Store agent instance
+                        self.agent_instances[agent_dict['agent_uid']] = agent_instance
                         
-            except Exception as e:
-                print(f"{Fore.RED}[Agent Manager] Error releasing agent {agent_uid}: {e}{Style.RESET_ALL}")
+                        # Add to available agents if not in game
+                        if agent_dict['status'] == 'active':
+                            self.available_agents.append(agent_dict)
+                
+                print(f"{Fore.GREEN}[Agent Manager] Initialized {len(self.available_agents)} available agents{Style.RESET_ALL}")
+                
+        except Exception as e:
+            print(f"{Fore.RED}[Agent Manager] Error initializing agents: {e}{Style.RESET_ALL}")
+    
+    def get_available_agents_for_game(self, num_needed: int) -> List[Dict[str, Any]]:
+        """Thread-safely get and reserve available agents for a new game"""
+        with self._lock:
+            if len(self.available_agents) < num_needed:
+                print(f"{Fore.YELLOW}[Agent Manager] Not enough available agents. Need {num_needed}, have {len(self.available_agents)}{Style.RESET_ALL}")
+                return []
+            
+            # Select agents (for now, just take first N available)
+            selected_agents = self.available_agents[:num_needed]
+            
+            # Remove selected agents from available pool IMMEDIATELY to prevent double allocation
+            for agent in selected_agents:
+                if agent in self.available_agents:
+                    self.available_agents.remove(agent)
+                    print(f"{Fore.CYAN}[Agent Manager] Reserved agent {agent['name']} for new game{Style.RESET_ALL}")
+            
+            return selected_agents
+    
+    def assign_agents_to_game(self, agents: List[Dict[str, Any]], game_uid: str):
+        """Assign agents to a specific game (agents should already be removed from available pool)"""
+        with self._lock:
+            for agent in agents:
+                self.agents_in_game[agent['agent_uid']] = game_uid
+                # Update status in database
+                self._update_agent_status(agent['agent_uid'], 'in_game')
+                print(f"{Fore.GREEN}[Agent Manager] Assigned agent {agent['name']} to game {game_uid}{Style.RESET_ALL}")
+    
+    def release_agents_from_game(self, game_uid: str):
+        """Release agents back to available pool when game ends"""
+        with self._lock:
+            agents_to_release = [agent_uid for agent_uid, g_uid in self.agents_in_game.items() if g_uid == game_uid]
+            
+            for agent_uid in agents_to_release:
+                # Remove from in_game mapping
+                del self.agents_in_game[agent_uid]
+                
+                # Find agent data and add back to available pool
+                try:
+                    with Session(engine) as session:
+                        stmt = select(agents_table).where(agents_table.c.agent_uid == agent_uid)
+                        result = session.execute(stmt)
+                        agent_row = result.fetchone()
+                        
+                        if agent_row:
+                            agent_dict = {
+                                'id': agent_row.id,
+                                'agent_uid': agent_row.agent_uid,
+                                'name': agent_row.name,
+                                'personality_prompt': agent_row.personality_prompt,
+                                'memory_data': agent_row.memory_data or {},
+                                'preferences': agent_row.preferences or {},
+                                'total_games_played': agent_row.total_games_played,
+                                'total_wins': agent_row.total_wins,
+                                'tpay_account_id': agent_row.tpay_account_id,
+                                'status': 'active'
+                            }
+                            self.available_agents.append(agent_dict)
+                            
+                            # Update status in database
+                            self._update_agent_status(agent_uid, 'active')
+                            
+                            print(f"{Fore.GREEN}[Agent Manager] Released agent {agent_dict['name']} back to available pool{Style.RESET_ALL}")
+                            
+                except Exception as e:
+                    print(f"{Fore.RED}[Agent Manager] Error releasing agent {agent_uid}: {e}{Style.RESET_ALL}")
     
     def _update_agent_status(self, agent_uid: str, status: str):
         """Update agent status in database"""
@@ -233,9 +259,252 @@ class AgentManager:
     def get_agent_instance(self, agent_uid: str) -> Optional[OpenAIAgent]:
         """Get the OpenAI agent instance for a given agent_uid"""
         return self.agent_instances.get(agent_uid)
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get current agent manager status for debugging"""
+        with self._lock:
+            return {
+                "available_agents_count": len(self.available_agents),
+                "available_agents": [a['name'] for a in self.available_agents],
+                "agents_in_game_count": len(self.agents_in_game),
+                "agents_in_game": list(self.agents_in_game.items()),
+                "total_agent_instances": len(self.agent_instances)
+            }
 
 # Global agent manager instance
 agent_manager = AgentManager()
+
+# 4.6. Thread-Safe Game Instance Manager
+class ThreadSafeGameInstance:
+    """
+    Thread-safe game instance management class that runs game logic in separate threads
+    Prevents TPay and other async operations from blocking the main server event loop
+    """
+    def __init__(self, game_uid: str, connection_manager: ConnectionManager, 
+                 app_instance: FastAPI, available_agents: List[Dict[str, Any]]):
+        self.game_uid = game_uid
+        self.connection_manager = connection_manager
+        self.app_instance = app_instance
+        self.available_agents = available_agents
+        
+        # Thread-related attributes
+        self.thread: Optional[threading.Thread] = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.running = False
+        self.game_controller: Optional[GameControllerV2] = None
+        
+        # Thread-safe state access
+        self._state_lock = threading.RLock()
+        self._cached_state = {}
+        self._state_update_time = 0
+        
+        # Thread-safe message queue for WebSocket communication
+        self._message_queue = asyncio.Queue()
+        self._queue_processor_task = None
+        self._main_loop = asyncio.get_event_loop()  # Save reference to main thread's event loop
+        
+    def start(self):
+        """Start game in a separate thread"""
+        if self.running:
+            print(f"{Fore.YELLOW}[Game Thread] Game {self.game_uid} is already running{Style.RESET_ALL}")
+            return
+            
+        # Start message queue processor in main thread
+        self._start_message_queue_processor()
+            
+        self.thread = threading.Thread(target=self._run_game_thread, daemon=True)
+        self.thread.start()
+        print(f"{Fore.GREEN}[Game Thread] Started game {self.game_uid} in thread {self.thread.ident}{Style.RESET_ALL}")
+        
+    def _run_game_thread(self):
+        """Main game thread function - runs complete game logic in separate thread"""
+        # Create new event loop for this thread
+        print(f"{Fore.CYAN}[Game Thread] Creating new event loop for {self.game_uid}{Style.RESET_ALL}")
+
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.running = True
+        
+        try:
+            print(f"{Fore.CYAN}[Game Thread] Running game {self.game_uid} in thread {threading.current_thread().ident}{Style.RESET_ALL}")
+            # Run game in this thread's event loop
+            self.loop.run_until_complete(self._run_game_async())
+            print(f"{Fore.GREEN}[Game Thread] Game {self.game_uid} completed successfully{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}[Game Thread] Game {self.game_uid} error: {e}{Style.RESET_ALL}")
+            import traceback
+            print(f"{Fore.RED}[Game Thread] Full traceback for {self.game_uid}:{Style.RESET_ALL}")
+            traceback.print_exc()
+            
+            # Additional debugging info
+            print(f"{Fore.YELLOW}[Game Thread] Error details for {self.game_uid}:{Style.RESET_ALL}")
+            print(f"  - Error type: {type(e).__name__}")
+            print(f"  - Error message: {str(e)}")
+            print(f"  - Thread ID: {threading.current_thread().ident}")
+            print(f"  - Loop running: {self.loop and not self.loop.is_closed() if self.loop else 'No loop'}")
+        finally:
+            self.running = False
+            
+            print(f"{Fore.YELLOW}[Game Thread] Cleaning up game {self.game_uid}...{Style.RESET_ALL}")
+            
+            # Stop message queue processor
+            if self._queue_processor_task and not self._queue_processor_task.done():
+                self._queue_processor_task.cancel()
+                print(f"{Fore.YELLOW}[Game Thread] Cancelled message queue processor for {self.game_uid}{Style.RESET_ALL}")
+            
+            if self.loop:
+                try:
+                    # Close any remaining tasks
+                    pending_tasks = [task for task in asyncio.all_tasks(self.loop) if not task.done()]
+                    if pending_tasks:
+                        print(f"{Fore.YELLOW}[Game Thread] Cancelling {len(pending_tasks)} pending tasks for {self.game_uid}{Style.RESET_ALL}")
+                        for task in pending_tasks:
+                            task.cancel()
+                    
+                    self.loop.close()
+                    print(f"{Fore.GREEN}[Game Thread] Loop closed successfully for {self.game_uid}{Style.RESET_ALL}")
+                except Exception as e:
+                    print(f"{Fore.RED}[Game Thread] Error closing loop for {self.game_uid}: {e}{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}[Game Thread] Game {self.game_uid} thread finished{Style.RESET_ALL}")
+            
+    async def _run_game_async(self):
+        """Run game logic asynchronously in separate thread's event loop"""
+        # Run the original start_monopoly_game_instance logic here
+        # but in separate thread and event loop, won't block main server
+        await start_monopoly_game_instance(
+            self.game_uid, 
+            self.connection_manager, 
+            self.app_instance, 
+            self.available_agents
+        )
+    
+    def get_state_safely(self, player_id: int) -> Optional[Dict[str, Any]]:
+        """Thread-safely get game state"""
+        with self._state_lock:
+            try:
+                if not self.running or not self.game_controller:
+                    return None
+                    
+                # Caching mechanism to avoid frequent cross-thread access
+                import time
+                current_time = time.time()
+                cache_key = f"player_{player_id}"
+                
+                if (cache_key in self._cached_state and 
+                    current_time - self._state_update_time < 1.0):  # 1 second cache
+                    return self._cached_state[cache_key]
+                
+                # Get latest state
+                state = self.game_controller.get_game_state_for_agent(player_id)
+                self._cached_state[cache_key] = state
+                self._state_update_time = current_time
+                
+                return state
+            except Exception as e:
+                print(f"{Fore.RED}[Game Thread] Error getting state for {self.game_uid}: {e}{Style.RESET_ALL}")
+                return None
+    
+    def get_board_layout_safely(self) -> Optional[List[Dict[str, Any]]]:
+        """Thread-safely get board layout"""
+        with self._state_lock:
+            try:
+                if not self.running or not self.game_controller:
+                    return None
+                    
+                # Check cache
+                import time
+                current_time = time.time()
+                cache_key = "board_layout"
+                
+                if (cache_key in self._cached_state and 
+                    current_time - self._state_update_time < 5.0):  # 5 second cache (board changes less frequently)
+                    return self._cached_state[cache_key]
+                
+                # Get latest board layout
+                layout = self.game_controller.get_board_layout_for_frontend()
+                self._cached_state[cache_key] = layout
+                self._state_update_time = current_time
+                
+                return layout
+            except Exception as e:
+                print(f"{Fore.RED}[Game Thread] Error getting board layout for {self.game_uid}: {e}{Style.RESET_ALL}")
+                return None
+    
+    def is_running(self) -> bool:
+        """Check if game is currently running"""
+        return self.running and self.thread and self.thread.is_alive()
+    
+    def get_basic_info(self) -> Dict[str, Any]:
+        """Get basic game info (no locks needed)"""
+        info = {
+            "game_uid": self.game_uid,
+            "running": self.is_running(),
+            "thread_id": self.thread.ident if self.thread else None,
+            "has_controller": self.game_controller is not None
+        }
+        
+        # Try to get basic state info
+        try:
+            if self.game_controller:
+                info.update({
+                    "turn_count": getattr(self.game_controller, 'turn_count', 0),
+                    "game_over": getattr(self.game_controller, 'game_over', False),
+                    "current_player": getattr(self.game_controller, 'current_player_index', 0),
+                    "player_count": len(getattr(self.game_controller, 'players', []))
+                })
+        except Exception:
+            pass  # Ignore errors when getting state
+            
+        return info
+    
+    def _start_message_queue_processor(self):
+        """Start message queue processor in main thread"""
+        if self._queue_processor_task is None or self._queue_processor_task.done():
+            self._queue_processor_task = asyncio.create_task(self._process_message_queue())
+            print(f"{Fore.CYAN}[Game Thread] Started message queue processor for {self.game_uid}{Style.RESET_ALL}")
+    
+    async def _process_message_queue(self):
+        """Process messages from game thread and send to frontend (runs in main thread)"""
+        try:
+            while self.is_running():
+                try:
+                    # Get message from async queue with timeout
+                    message = await asyncio.wait_for(self._message_queue.get(), timeout=1.0)
+                    
+                    # Send message via connection manager in main thread
+                    await self.connection_manager.broadcast_to_game(self.game_uid, message)
+                    
+                    # Mark task as done
+                    self._message_queue.task_done()
+                    
+                except asyncio.TimeoutError:
+                    # No messages in queue, continue polling
+                    continue
+                except Exception as e:
+                    print(f"{Fore.RED}[Game Thread] Error processing message for {self.game_uid}: {e}{Style.RESET_ALL}")
+                    continue
+                    
+        except Exception as e:
+            print(f"{Fore.RED}[Game Thread] Message queue processor error for {self.game_uid}: {e}{Style.RESET_ALL}")
+        finally:
+            print(f"{Fore.YELLOW}[Game Thread] Message queue processor stopped for {self.game_uid}{Style.RESET_ALL}")
+    
+    def send_message_safely(self, message: Dict[str, Any]):
+        """Thread-safely queue a message for sending to frontend"""
+        try:
+            # Schedule the put operation in the main thread's event loop
+            asyncio.run_coroutine_threadsafe(self._message_queue.put(message), self._main_loop)
+        except Exception as e:
+            print(f"{Fore.RED}[Game Thread] Failed to queue message for {self.game_uid}: {e}{Style.RESET_ALL}")
+
+# Global game instance manager
+game_instances: Dict[str, ThreadSafeGameInstance] = {}
+
+# Global app instance reference (for cross-thread access)
+global_app_instance: Optional[FastAPI] = None
+
+# Global lock for game count maintenance
+_game_maintenance_lock = threading.RLock()
 
 async def initialize_agent_tpay_balances(available_agents: List[Dict[str, Any]], game_uid: str):
     """Initialize game token accounts for agents at game start"""
@@ -284,95 +553,155 @@ async def update_agent_game_statistics(available_agents: List[Dict[str, Any]], g
         with Session(engine) as session:
             for i, agent_data in enumerate(available_agents):
                 player = gc.players[i]
-                is_winner = (agent_data['id'] == winner_agent_id)
                 
-                # Calculate final ranking (1st = winner, others based on money/assets)
-                final_ranking = 1 if is_winner else (len(available_agents) if player.is_bankrupt else 2)
+                # Update game count
+                total_games = agent_data.get('total_games_played', 0) + 1
+                total_wins = agent_data.get('total_wins', 0)
                 
-                # Update agents table
-                agent_update = update(agents_table).where(
+                # Update win count if this agent won
+                if winner_agent_id and agent_data['id'] == winner_agent_id:
+                    total_wins += 1
+                
+                # Update agent statistics in database
+                stmt = update(agents_table).where(
                     agents_table.c.id == agent_data['id']
                 ).values(
-                    total_games_played=agents_table.c.total_games_played + 1,
-                    total_wins=agents_table.c.total_wins + (1 if is_winner else 0),
+                    total_games_played=total_games,
+                    total_wins=total_wins,
                     last_active=func.now()
                 )
-                session.execute(agent_update)
-                
-                # Update players table with final game data
-                player_update = update(players_table).where(
-                    players_table.c.id == available_agents[i]['db_id']
-                ).values(
-                    final_balance=player.money,
-                    final_ranking=final_ranking
-                )
-                session.execute(player_update)
-                
-                print(f"{Fore.CYAN}[Stats] Agent {agent_data['name']}: Ranking {final_ranking}, Final Balance: ${player.money}{Style.RESET_ALL}")
+                session.execute(stmt)
             
             session.commit()
+            print(f"{Fore.GREEN}[Agent Manager] Updated game statistics for {len(available_agents)} agents{Style.RESET_ALL}")
             
     except Exception as e:
-        print(f"{Fore.RED}[Agent Stats] Error updating agent statistics: {e}{Style.RESET_ALL}")
-        raise
+        print(f"{Fore.RED}[Agent Manager] Error updating agent statistics: {e}{Style.RESET_ALL}")
 
-# 5. Game management functions
 async def create_new_game_instance(app_instance: FastAPI) -> str:
-    """Create and start a new game instance"""
+    """Create and start a new game instance in a separate thread"""
     global GAME_COUNTER
     
-    # Check if we have enough available agents
-    available_agents = agent_manager.get_available_agents_for_game(AGENTS_PER_GAME)
-    if not available_agents:
-        print(f"{Fore.YELLOW}[Game Manager] Cannot create new game - not enough available agents (need {AGENTS_PER_GAME}){Style.RESET_ALL}")
-        return None
-    
-    GAME_COUNTER += 1
-    game_uid = f"monopoly_game_{GAME_COUNTER}_{uuid.uuid4().hex[:6]}"
-    print(f"{Fore.GREEN}[Game Manager] Creating new game instance: {game_uid} with agents: {[a['name'] for a in available_agents]}{Style.RESET_ALL}")
-    
-    # Assign agents to this game
-    agent_manager.assign_agents_to_game(available_agents, game_uid)
-    
-    game_task = asyncio.create_task(start_monopoly_game_instance_with_restart(game_uid, manager, app_instance, available_agents))
-    app_instance.state.game_tasks[game_uid] = game_task
-    
-    print(f"{Fore.GREEN}[Game Manager] Game {game_uid} task created and started{Style.RESET_ALL}")
-    return game_uid
-
-async def maintain_game_count(app_instance: FastAPI):
-    """Ensure we maintain the desired number of concurrent games"""
-    if not hasattr(app_instance.state, 'game_tasks'):
-        return
+    # Double check with lock to prevent race conditions
+    with _game_maintenance_lock:
+        # Count active threaded games again
+        active_thread_games = {uid: instance for uid, instance in game_instances.items() 
+                              if instance.is_running()}
         
-    # Count active (not done) game tasks
-    active_games = {uid: task for uid, task in app_instance.state.game_tasks.items() 
-                   if not task.done()}
-    
-    # Remove completed tasks from the registry
-    completed_games = [uid for uid, task in app_instance.state.game_tasks.items() if task.done()]
-    for completed_uid in completed_games:
-        print(f"{Fore.YELLOW}[Game Manager] Removing completed game {completed_uid} from registry{Style.RESET_ALL}")
-        del app_instance.state.game_tasks[completed_uid]
-    
-    # Start new games if needed
-    games_needed = CONCURRENT_GAMES_COUNT - len(active_games)
-    if games_needed > 0 and AUTO_RESTART_GAMES:
-        print(f"{Fore.CYAN}[Game Manager] Need to start {games_needed} new games (active: {len(active_games)}/{CONCURRENT_GAMES_COUNT}){Style.RESET_ALL}")
+        # If we already have enough games, don't create new one
+        if len(active_thread_games) >= CONCURRENT_GAMES_COUNT:
+            print(f"{Fore.YELLOW}[Game Manager] Already have {len(active_thread_games)}/{CONCURRENT_GAMES_COUNT} games running. Not creating new game.{Style.RESET_ALL}")
+            return None
         
         # Check if we have enough available agents
-        available_agent_count = len(agent_manager.available_agents)
-        max_possible_games = available_agent_count // AGENTS_PER_GAME
+        available_agents = agent_manager.get_available_agents_for_game(AGENTS_PER_GAME)
+        if not available_agents:
+            print(f"{Fore.YELLOW}[Game Manager] Cannot create new game - not enough available agents (need {AGENTS_PER_GAME}){Style.RESET_ALL}")
+            return None
+    
+        GAME_COUNTER += 1
+        game_uid = f"monopoly_game_{GAME_COUNTER}_{uuid.uuid4().hex[:6]}"
+        print(f"{Fore.GREEN}[Game Manager] Creating new threaded game instance: {game_uid} with agents: {[a['name'] for a in available_agents]}{Style.RESET_ALL}")
         
-        if max_possible_games < games_needed:
-            print(f"{Fore.YELLOW}[Game Manager] Not enough agents for all requested games. Available agents: {available_agent_count}, can start {max_possible_games} games{Style.RESET_ALL}")
-            games_needed = max_possible_games
+        # Assign agents to this game
+        agent_manager.assign_agents_to_game(available_agents, game_uid)
         
-        for _ in range(games_needed):
-            created_game_uid = await create_new_game_instance(app_instance)
-            if created_game_uid is None:
-                print(f"{Fore.YELLOW}[Game Manager] Could not create more games - no available agents{Style.RESET_ALL}")
-                break
+        # Create threaded game instance instead of async task
+        game_instance = ThreadSafeGameInstance(game_uid, manager, app_instance, available_agents)
+        game_instances[game_uid] = game_instance
+        
+        # Start the game in its own thread
+        game_instance.start()
+        
+        # Create a monitoring task to clean up when the game finishes
+        monitoring_task = asyncio.create_task(monitor_threaded_game(game_uid, game_instance))
+        app_instance.state.game_tasks[game_uid] = monitoring_task
+        
+        print(f"{Fore.GREEN}[Game Manager] Threaded game {game_uid} started and monitoring task created{Style.RESET_ALL}")
+        return game_uid
+
+async def monitor_threaded_game(game_uid: str, game_instance: ThreadSafeGameInstance):
+    """Monitor a threaded game and handle cleanup when it finishes"""
+    print(f"{Fore.CYAN}[Game Monitor] Monitoring game {game_uid} in thread {threading.current_thread().ident}{Style.RESET_ALL}")
+
+    try:
+        # Wait for game thread to complete
+        while game_instance.is_running():
+            await asyncio.sleep(5)  # Check every 5 seconds
+            
+        print(f"{Fore.YELLOW}[Game Monitor] Game {game_uid} thread has finished{Style.RESET_ALL}")
+        
+    except Exception as e:
+        print(f"{Fore.RED}[Game Monitor] Error monitoring game {game_uid}: {e}{Style.RESET_ALL}")
+    finally:
+        # Clean up game instance
+        if game_uid in game_instances:
+            del game_instances[game_uid]
+            print(f"{Fore.YELLOW}[Game Monitor] Cleaned up game instance {game_uid}{Style.RESET_ALL}")
+        
+        # Release agents
+        try:
+            agent_manager.release_agents_from_game(game_uid)
+            print(f"{Fore.GREEN}[Game Monitor] Released agents from {game_uid} back to available pool{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}[Game Monitor] Error releasing agents from {game_uid}: {e}{Style.RESET_ALL}")
+        
+        # If auto-restart is enabled, trigger new game creation (with delay to prevent rapid cycling)
+        if AUTO_RESTART_GAMES and global_app_instance:
+            await asyncio.sleep(2)  # 2 second delay to prevent rapid game cycling
+            asyncio.create_task(maintain_game_count(global_app_instance))
+
+async def maintain_game_count(app_instance: Optional[FastAPI] = None):
+    """Ensure we maintain the desired number of concurrent games (thread-safe)"""
+    # Use lock to prevent concurrent execution
+    with _game_maintenance_lock:
+        # Get app instance
+        if app_instance is None:
+            app_instance = global_app_instance
+            
+        if app_instance is None:
+            print(f"{Fore.RED}[Game Manager] No app instance available for maintenance{Style.RESET_ALL}")
+            return
+            
+        if not hasattr(app_instance.state, 'game_tasks'):
+            return
+            
+        # Count active threaded games
+        active_thread_games = {uid: instance for uid, instance in game_instances.items() 
+                              if instance.is_running()}
+        
+        # Count active monitoring tasks
+        active_tasks = {uid: task for uid, task in app_instance.state.game_tasks.items() 
+                       if not task.done()}
+        
+        # Remove completed tasks from the registry
+        completed_games = [uid for uid, task in app_instance.state.game_tasks.items() if task.done()]
+        for completed_uid in completed_games:
+            print(f"{Fore.YELLOW}[Game Manager] Removing completed monitoring task {completed_uid} from registry{Style.RESET_ALL}")
+            del app_instance.state.game_tasks[completed_uid]
+        
+        # Start new games if needed (based on actual running games, not tasks)
+        games_needed = CONCURRENT_GAMES_COUNT - len(active_thread_games)
+        if games_needed > 0 and AUTO_RESTART_GAMES:
+            print(f"{Fore.CYAN}[Game Manager] Need to start {games_needed} new games (active: {len(active_thread_games)}/{CONCURRENT_GAMES_COUNT}){Style.RESET_ALL}")
+            
+            # Check if we have enough available agents
+            available_agent_count = len(agent_manager.available_agents)
+            max_possible_games = available_agent_count // AGENTS_PER_GAME
+            
+            if max_possible_games < games_needed:
+                print(f"{Fore.YELLOW}[Game Manager] Not enough agents for all requested games. Available agents: {available_agent_count}, can start {max_possible_games} games{Style.RESET_ALL}")
+                games_needed = max_possible_games
+            
+            for i in range(games_needed):
+                created_game_uid = await create_new_game_instance(app_instance)
+                if created_game_uid is None:
+                    print(f"{Fore.YELLOW}[Game Manager] Could not create more games - no available agents or limit reached{Style.RESET_ALL}")
+                    break
+                
+                # Add a small delay between game creations to prevent overwhelming the system
+                if i < games_needed - 1:  # Don't delay after the last game
+                    await asyncio.sleep(1)
 
 async def start_monopoly_game_instance_with_restart(game_uid: str, connection_manager_param: ConnectionManager, app_instance: FastAPI, available_agents: List[Dict[str, Any]]):
     """Wrapper for game instance that handles auto-restart"""
@@ -380,20 +709,12 @@ async def start_monopoly_game_instance_with_restart(game_uid: str, connection_ma
         await start_monopoly_game_instance(game_uid, connection_manager_param, app_instance, available_agents)
     except Exception as e:
         print(f"{Fore.RED}[Game Manager] Game {game_uid} ended with error: {e}{Style.RESET_ALL}")
+        import traceback
+        traceback.print_exc()
     finally:
-        print(f"{Fore.CYAN}[Game Manager] Game {game_uid} has finished. Checking if new game should be started...{Style.RESET_ALL}")
-        
-        # Always release agents back to available pool
-        try:
-            agent_manager.release_agents_from_game(game_uid)
-            print(f"{Fore.GREEN}[Game Manager] Released agents from {game_uid} back to available pool{Style.RESET_ALL}")
-        except Exception as e:
-            print(f"{Fore.RED}[Game Manager] Error releasing agents from {game_uid}: {e}{Style.RESET_ALL}")
-        
-        # Schedule a new game to maintain the count (will be handled by periodic maintenance)
-        if AUTO_RESTART_GAMES:
-            # Use asyncio.create_task to avoid blocking this cleanup
-            asyncio.create_task(maintain_game_count(app_instance))
+        print(f"{Fore.CYAN}[Game Manager] Game {game_uid} has finished{Style.RESET_ALL}")
+        # Note: Agent cleanup and game restart is handled by monitor_threaded_game
+        # to avoid double cleanup and maintain proper timing
 
 async def periodic_game_maintenance(app_instance: FastAPI):
     """Periodically check and maintain the desired number of games"""
@@ -408,37 +729,60 @@ async def periodic_game_maintenance(app_instance: FastAPI):
             print(f"{Fore.RED}[Game Manager] Error in periodic maintenance: {e}{Style.RESET_ALL}")
 
 def get_game_status(app_instance: FastAPI) -> Dict[str, Any]:
-    """Get current status of all games"""
-    if not hasattr(app_instance.state, 'game_tasks'):
-        return {"active_games": 0, "total_games": 0, "games": []}
-    
+    """Get current status of all games using thread-safe instances"""
     active_games = []
     completed_count = 0
     
-    for uid, task in app_instance.state.game_tasks.items():
-        if task.done():
-            completed_count += 1
-        else:
+    # Check monitoring tasks if available
+    monitoring_tasks_count = 0
+    if hasattr(app_instance.state, 'game_tasks'):
+        monitoring_tasks_count = len(app_instance.state.game_tasks)
+        for uid, task in app_instance.state.game_tasks.items():
+            if task.done():
+                completed_count += 1
+    
+    # Get info from thread-safe game instances
+    for game_uid, game_instance in game_instances.items():
+        try:
+            basic_info = game_instance.get_basic_info()
+            
             game_info = {
-                "game_uid": uid,
-                "status": "running",
-                "task_done": False
+                "game_uid": game_uid,
+                "status": "running" if basic_info['running'] else "finished",
+                "task_done": False,  # Thread-based, so different concept
+                "thread_id": basic_info.get('thread_id'),
+                "has_controller": basic_info.get('has_controller', False)
             }
-            # Try to get more details from active_games if available
-            if hasattr(app_instance.state, 'active_games') and uid in app_instance.state.active_games:
-                gc = app_instance.state.active_games[uid]
+            
+            # Add detailed info if available
+            if basic_info.get('has_controller'):
                 game_info.update({
-                    "turn_count": getattr(gc, 'turn_count', 0),
-                    "game_over": getattr(gc, 'game_over', False),
-                    "current_player": getattr(gc, 'current_player_index', 0),
-                    "player_count": len(getattr(gc, 'players', []))
+                    "turn_count": basic_info.get('turn_count', 0),
+                    "game_over": basic_info.get('game_over', False),
+                    "current_player": basic_info.get('current_player', 0),
+                    "player_count": basic_info.get('player_count', 0)
                 })
+            
             active_games.append(game_info)
+            
+        except Exception as e:
+            # Add error info for debugging
+            error_info = {
+                "game_uid": game_uid,
+                "status": "error",
+                "error": str(e),
+                "running": False
+            }
+            active_games.append(error_info)
+    
+    # Count actually running games
+    running_games = len([g for g in active_games if g.get('status') == 'running'])
     
     return {
-        "active_games": len(active_games),
-        "completed_games": completed_count,
-        "total_games": len(app_instance.state.game_tasks),
+        "active_games": running_games,
+        "total_thread_games": len(game_instances),
+        "completed_monitoring_tasks": completed_count,
+        "total_monitoring_tasks": monitoring_tasks_count,
         "concurrent_games_target": CONCURRENT_GAMES_COUNT,
         "auto_restart_enabled": AUTO_RESTART_GAMES,
         "games": active_games
@@ -510,8 +854,15 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
         return 
 
     try:
-        gc = GameController(game_uid=game_uid, ws_manager=connection_manager_param, 
+        gc = GameControllerV2(game_uid=game_uid, ws_manager=connection_manager_param, 
                             game_db_id=game_db_id, participants=available_agents, treasury_agent_id="agnt_d755a309-682b-49b7-b997-956efef2b591")
+        
+        # Set the game controller reference in the thread-safe instance if available
+        if game_uid in game_instances:
+            game_instances[game_uid].game_controller = gc
+            # Set reverse reference for thread-safe communication
+            gc._threaded_game_instance = game_instances[game_uid]
+            print(f"{Fore.GREEN}GameController for G_UID:{game_uid} linked to thread-safe instance.{Style.RESET_ALL}")
         
         if hasattr(app_instance.state, 'active_games'):
             app_instance.state.active_games[game_uid] = gc
@@ -622,8 +973,11 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 action_sequence_this_gc_turn = 0
                 last_gc_turn_for_action_seq = gc.turn_count
             
+            print(f"{Fore.CYAN}[DEBUG] About to determine active player...{Style.RESET_ALL}")
+            
             # Determine active player for this segment (main turn, auction, trade response, etc.)
             if gc.auction_in_progress and gc.pending_decision_type == "auction_bid":
+                print(f"{Fore.CYAN}[DEBUG] Auction in progress, determining bidder...{Style.RESET_ALL}")
                 active_player_id = gc.pending_decision_context.get("player_to_bid_id")
                 if active_player_id is None: 
                     await gc.send_event_to_frontend({"type":"error_log", "message": f"[E] GameLoop G{game_uid}: Auction but no bidder."})
@@ -631,6 +985,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                     active_player_id = current_main_turn_player_id # Fallback to current main player 
                 current_acting_player = gc.players[active_player_id]
             elif gc.pending_decision_type in ["respond_to_trade_offer", "handle_received_mortgaged_property", "propose_new_trade_after_rejection"]:
+                print(f"{Fore.CYAN}[DEBUG] Pending decision: {gc.pending_decision_type}{Style.RESET_ALL}")
                 active_player_id = gc.pending_decision_context.get("player_id")
                 if active_player_id is None: 
                     await gc.send_event_to_frontend({"type":"error_log", "message": f"[E] GameLoop G{game_uid}: Pending '{gc.pending_decision_type}' but no P_ID."})
@@ -638,16 +993,30 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                     active_player_id = current_main_turn_player_id # Fallback
                 current_acting_player = gc.players[active_player_id]
             else: # Default to the main player for the current game controller turn
+                print(f"{Fore.CYAN}[DEBUG] Using main player for turn{Style.RESET_ALL}")
                 active_player_id = current_main_turn_player_id
                 current_acting_player = gc.players[active_player_id]
             
             print(f"{Fore.BLUE}  Active Player ID for this segment: {active_player_id}, Name: {current_acting_player.name if current_acting_player else 'N/A'}{Style.RESET_ALL}")
-            agent_to_act = agents[active_player_id]
-            await gc.send_event_to_frontend({"type": "turn_info", "data": f"--- Loop {loop_turn_count} (GC_Turn {gc.turn_count}) for P{active_player_id} ({current_acting_player.name}) --- PendDec: {gc.pending_decision_type}"}) 
             
-            if not current_acting_player.is_bankrupt: 
-                player_state_data_before_segment = gc.get_game_state_for_agent(current_acting_player.player_id)
-                await gc.send_event_to_frontend({"type": "player_state_update", "data": player_state_data_before_segment})
+            try:
+                print(f"{Fore.CYAN}[DEBUG] Getting agent for player {active_player_id}...{Style.RESET_ALL}")
+                agent_to_act = agents[active_player_id]
+                print(f"{Fore.CYAN}[DEBUG] Agent obtained: {agent_to_act.name}{Style.RESET_ALL}")
+                
+                await gc.send_event_to_frontend({"type": "turn_info", "data": f"--- Loop {loop_turn_count} (GC_Turn {gc.turn_count}) for P{active_player_id} ({current_acting_player.name}) --- PendDec: {gc.pending_decision_type}"}) 
+            
+                print(f"{Fore.CYAN}[DEBUG] About to get player state for agent...{Style.RESET_ALL}")
+                if not current_acting_player.is_bankrupt: 
+                    player_state_data_before_segment = gc.get_game_state_for_agent(current_acting_player.player_id)
+                    await gc.send_event_to_frontend({"type": "player_state_update", "data": player_state_data_before_segment})
+                    print(f"{Fore.CYAN}[DEBUG] Player state updated successfully{Style.RESET_ALL}")
+                
+            except Exception as debug_e:
+                print(f"{Fore.RED}[DEBUG ERROR] Error in agent setup: {debug_e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+                raise  # Re-raise to trigger main exception handler
             
             if current_acting_player.is_bankrupt:
                 if gc.game_over: break 
@@ -683,10 +1052,34 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 game_state_for_agent = gc.get_game_state_for_agent(active_player_id)
                 await gc.send_event_to_frontend({"type": "agent_thinking_start", "player_id": active_player_id, "available_actions": available_actions, "context": gc.pending_decision_context, "turn": gc.turn_count, "seq": action_sequence_this_gc_turn})
                 print(f"[DEBUG SERVER LOOP] Passing gc.turn_count: {gc.turn_count} to agent {active_player_id} (Name: {agent_to_act.name}) for decide_action")
-                chosen_tool_name, params = await asyncio.to_thread(agent_to_act.decide_action, game_state_for_agent, available_actions, gc.turn_count, action_sequence_this_gc_turn)
+                
+                try:
+                    print(f"{Fore.CYAN}[DEBUG] About to call agent.decide_action...{Style.RESET_ALL}")
+                    print(f"{Fore.CYAN}[DEBUG] Agent: {agent_to_act}, Player ID: {active_player_id}, Available actions: {len(available_actions)}{Style.RESET_ALL}")
+                    
+                    chosen_tool_name, params = await asyncio.to_thread(agent_to_act.decide_action, game_state_for_agent, available_actions, gc.turn_count, action_sequence_this_gc_turn)
+                    
+                    print(f"{Fore.GREEN}[DEBUG] Agent decision completed successfully: {chosen_tool_name} with params: {params}{Style.RESET_ALL}")
+                    
+                except Exception as agent_decision_error:
+                    print(f"{Fore.RED}[DEBUG ERROR] Agent decision failed: {agent_decision_error}{Style.RESET_ALL}")
+                    import traceback
+                    traceback.print_exc()
+                    raise  # Re-raise to trigger main exception handler
+                    
                 thoughts = agent_to_act.get_player_thought_process()
                 await gc.send_event_to_frontend({"type": "agent_decision", "player_id": active_player_id, "tool_name": chosen_tool_name, "params": params, "thoughts": thoughts})
-                action_result = await asyncio.to_thread(execute_agent_action, gc, active_player_id, chosen_tool_name, params)
+                
+                try:
+                    print(f"{Fore.CYAN}[DEBUG] About to execute agent action: {chosen_tool_name}{Style.RESET_ALL}")
+                    action_result = await asyncio.to_thread(execute_agent_action, gc, active_player_id, chosen_tool_name, params)
+                    print(f"{Fore.GREEN}[DEBUG] Action executed successfully: {action_result.get('status', 'N/A')}{Style.RESET_ALL}")
+                    
+                except Exception as action_execution_error:
+                    print(f"{Fore.RED}[DEBUG ERROR] Action execution failed: {action_execution_error}{Style.RESET_ALL}")
+                    import traceback
+                    traceback.print_exc()
+                    raise  # Re-raise to trigger main exception handler
                 await asyncio.to_thread(_log_agent_action_to_db, gc, active_player_id, agent_to_act, action_result)
                 await gc.send_event_to_frontend({"type": "action_result", "player_id": active_player_id, "tool_name": chosen_tool_name, "result_status": action_result.get('status'), "result_message": action_result.get('message')})
                 if not current_acting_player.is_bankrupt: 
@@ -717,10 +1110,12 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                         player_turn_segment_active = False 
                 
                 elif chosen_tool_name == "tool_pass_on_buying_property":
-                    # GC._initiate_auction sets pending_decision for next auction bidder. Current player's segment is done.
-                    player_turn_segment_active = False 
+                    # Pass on buying property should initiate auction. Check if action succeeded.
+                    if action_result.get("status") == "success":
+                        player_turn_segment_active = False 
                 
                 elif chosen_tool_name == "tool_end_turn" or chosen_tool_name == "tool_resign_game": 
+                    print(f"{Fore.CYAN}[DEBUG] End turn or resign game tool chosen. Ending segment.{Style.RESET_ALL}")
                     player_turn_segment_active = False
                 
                 elif gc.pending_decision_type == "jail_options":
@@ -763,7 +1158,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 
                 elif chosen_tool_name == "tool_end_trade_negotiation":
                     # After ending trade negotiation, current player's segment is done
-                    player_turn_segment_active = False
+                    player_turn_segment_active = False 
                 
                 elif gc.pending_decision_type is None and gc.dice_roll_outcome_processed: # General actions phase after a roll or other resolved decision
                     current_av_actions = gc.get_available_actions(active_player_id)
@@ -882,6 +1277,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 except Exception as e: print(f"[DB E] Update game end status for G_DB_ID {game_db_id}: {e}")
     
     except Exception as game_logic_e:
+        traceback.print_exc()
         print(f"{Fore.RED}[FATAL GAME LOGIC ERROR] for G_UID:{game_uid}: {game_logic_e}{Style.RESET_ALL}")
         if game_db_id: 
             try:
@@ -911,9 +1307,17 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
 
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
+    global global_app_instance
     print("FastAPI server starting up (via lifespan)...")
+    
+    # Print startup configuration
+    print_startup_config()
+    
     create_db_and_tables()
     print("DB tables checked/created (via lifespan).")
+    
+    # Set global app instance reference for cross-thread access
+    global_app_instance = app_instance
     
     app_instance.state.active_games = {} 
     app_instance.state.game_tasks = {}   
@@ -921,11 +1325,11 @@ async def lifespan(app_instance: FastAPI):
     # Initialize tpay sdk
     print(f"Initializing tpay sdk with api_key: {TLEDGER_API_KEY}, api_secret: {TLEDGER_API_SECRET}, project_id: {TLEDGER_PROJECT_ID}, base_url: {TLEDGER_BASE_URL}, timeout: 1000")
     tpay.tpay_initialize(api_key=TLEDGER_API_KEY, api_secret=TLEDGER_API_SECRET, project_id=TLEDGER_PROJECT_ID, base_url=TLEDGER_BASE_URL, timeout=1000)
-    
+
     # Initialize treasury agent
     print(f"Initializing treasury agent with agent_id: {TREASURY_AGENT_ID}")
-    utils.reset_agent_game_balance(agent_id=TREASURY_AGENT_ID, new_balance=10000000000000)
-    print(f"Treasury agent initialized")
+    result = utils.reset_agent_game_balance(agent_id=TREASURY_AGENT_ID, new_balance=10000000000000)
+    print(f"Treasury agent initialized: {result}")
 
     # Initialize agent manager and load agents from database
     print("Initializing Agent Manager...")
@@ -1026,78 +1430,97 @@ app.add_middleware(
 # 9. Define routes
 @app.get("/api/lobby/games")
 async def get_lobby_games_api(request: Request):
+    """Get lobby games using thread-safe game instances"""
     active_games_info = []
-    if not hasattr(request.app.state, 'active_games'):
-        print(f"{Fore.RED}[API E] active_games not found in app.state for lobby. Server not initialized correctly?{Style.RESET_ALL}")
-        # Return empty list or error, an empty list might be better for frontend resilience
-        return [] 
-        # raise HTTPException(status_code=500, detail="Server error: Game state not available.")
+    
+    # Use global game_instances instead of app.state.active_games
+    if not game_instances:
+        return []  # Return empty list if no games are running
 
-    # Accessing NUM_PLAYERS from main, ensure it's available or pass to GC and store there
+    # Get max players constant
     try:
-        from main import NUM_PLAYERS as MAX_PLAYERS_CONST # Assuming this is the max players per game
+        from main import NUM_PLAYERS as MAX_PLAYERS_CONST
     except ImportError:
-        MAX_PLAYERS_CONST = 4 # Default fallback
+        MAX_PLAYERS_CONST = 4
         print(f"{Fore.YELLOW}[API W] Could not import NUM_PLAYERS from main for lobby, defaulting to {MAX_PLAYERS_CONST}{Style.RESET_ALL}")
 
-
-    active_game_controllers = list(request.app.state.active_games.values()) # Get a list of current GC instances
-
-    for gc_instance in active_game_controllers:
-        if gc_instance: # Ensure instance is not None
-            game_status = "in_progress"
-            if gc_instance.game_over:
-                game_status = "completed"
-            # Add more sophisticated status if available, e.g. gc_instance.status if it exists
-            # For "initializing" or "waiting_for_players", that state might be in DB before GC is fully ready or if GC has such a state.
-            # This simple version assumes active_games only holds fully started or completed games from GC perspective.
-
-            players_info = []
-            for p in gc_instance.players:
-                players_info.append({
-                    "id": p.player_id,
-                    "name": p.name,
-                    "is_ai": p.is_ai, # Assuming Player object has is_ai attribute
-                    "is_bankrupt": p.is_bankrupt
-                })
+    # Iterate through thread-safe game instances
+    for game_uid, game_instance in game_instances.items():
+        try:
+            # Get basic info (doesn't require locks)
+            basic_info = game_instance.get_basic_info()
             
+            if basic_info['running'] and basic_info['has_controller']:
+                # Try to get more detailed info safely
+                game_status = "in_progress"
+            if basic_info.get('game_over', False): 
+                game_status = "completed"
+                
+            # Build game info with available data
+            print(f"{Fore.CYAN}[API W] Building game info for {game_uid} with status {game_status}{Style.RESET_ALL}")
             game_info = {
-                "game_uid": gc_instance.game_uid,
-                "status": game_status,
-                "current_players_count": len(gc_instance.players), # Or count non-bankrupt if that's more relevant
-                "max_players": gc_instance.num_players if hasattr(gc_instance, 'num_players') else MAX_PLAYERS_CONST, # Get from GC if stored, else constant
-                "players": players_info,
-                "turn_count": gc_instance.turn_count if hasattr(gc_instance, 'turn_count') else 0
-            }
+                    "game_uid": game_uid,
+                    "status": game_status,
+                    "current_players_count": basic_info.get('player_count', 0),
+                    "max_players": MAX_PLAYERS_CONST,
+                    "players": [],  # Simplified for lobby view to avoid thread issues
+                    "turn_count": basic_info.get('turn_count', 0)
+                }
+            
+            # Try to get player info safely (optional, may be empty if access fails)
+            try:
+                if basic_info.get('player_count', 0) > 0:
+                    # For lobby, we just need basic player count, not detailed info
+                    game_info["players"] = [
+                        {"id": i, "name": f"Player {i+1}", "is_ai": True, "is_bankrupt": False}
+                        for i in range(basic_info.get('player_count', 0))
+                    ]
+            except Exception:
+                pass  # Ignore player info errors for lobby view
+                
             active_games_info.append(game_info)
+                
+        except Exception as e:
+            print(f"{Fore.YELLOW}[API W] Error getting info for game {game_uid}: {e}{Style.RESET_ALL}")
+            continue  # Skip this game and continue with others
     
     return active_games_info
 
 @app.get("/api/game/{game_id}/board_layout")
 async def get_board_layout_api(game_id: str, request: Request):
-    if not hasattr(request.app.state, 'active_games'):
-        print(f"{Fore.RED}[API E] active_games not found in app.state. Server not initialized correctly?{Style.RESET_ALL}")
-        raise HTTPException(status_code=500, detail="Server error: Game state not available.")
-
-    gc_instance = request.app.state.active_games.get(game_id)
+    """Get board layout using thread-safe game instances"""
+    # Check if game exists in thread-safe instances
+    game_instance = game_instances.get(game_id)
     
-    if not gc_instance:
+    if not game_instance:
         not_found_msg = f"Game {game_id} not found or not active."
         print(f"{Fore.YELLOW}[API W] {not_found_msg}{Style.RESET_ALL}")
         raise HTTPException(status_code=404, detail=not_found_msg)
         
-    if not hasattr(gc_instance, 'get_board_layout_for_frontend'):
-        method_missing_msg = f"Game controller for {game_id} is missing 'get_board_layout_for_frontend' method."
-        print(f"{Fore.RED}[API E] {method_missing_msg}{Style.RESET_ALL}")
-        raise HTTPException(status_code=501, detail="Server error: Feature not implemented on game controller.")
+    # Check if game is running
+    if not game_instance.is_running():
+        inactive_msg = f"Game {game_id} is not currently running."
+        print(f"{Fore.YELLOW}[API W] {inactive_msg}{Style.RESET_ALL}")
+        raise HTTPException(status_code=410, detail=inactive_msg)  # 410 Gone
         
     try:
-        board_layout = gc_instance.get_board_layout_for_frontend() 
+        # Use thread-safe method to get board layout
+        board_layout = game_instance.get_board_layout_safely()
+        
+        if board_layout is None:
+            error_msg = f"Could not retrieve board layout for game {game_id} - game state not available."
+            print(f"{Fore.YELLOW}[API W] {error_msg}{Style.RESET_ALL}")
+            raise HTTPException(status_code=503, detail=error_msg)  # 503 Service Unavailable
+        
         return {"game_id": game_id, "board_layout": board_layout, "status": "success"}
+        
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
     except Exception as e:
         error_msg = f"Failed to retrieve board layout for game {game_id} due to an internal error."
-        print(f"{Fore.RED}[API E] Error in get_board_layout_for_frontend for {game_id}: {e}{Style.RESET_ALL}")
-        # Log the full exception `e` for server-side debugging.
+        print(f"{Fore.RED}[API E] Error in get_board_layout_safely for {game_id}: {e}{Style.RESET_ALL}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=error_msg)
 
 @app.websocket("/ws/lobby")
@@ -1126,23 +1549,36 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
 
 @app.get("/api/admin/games/status")
 async def get_games_status_api(request: Request):
-    """Get detailed status of all games"""
+    """Get current status of all running games"""
+    if not global_app_instance:
+        raise HTTPException(status_code=500, detail="App instance not available")
+    
+    status = get_game_status(global_app_instance)
+    return {"status": "success", "data": status}
+
+@app.get("/api/admin/agents/status")
+async def get_agent_manager_status_api(request: Request):
+    """Get current status of the agent manager"""
     try:
-        status = get_game_status(request.app)
-        return status
+        status = agent_manager.get_status()
+        return {"status": "success", "data": status}
     except Exception as e:
-        print(f"{Fore.RED}[API E] Error getting games status: {e}{Style.RESET_ALL}")
-        raise HTTPException(status_code=500, detail="Failed to get games status")
+        raise HTTPException(status_code=500, detail=f"Error getting agent status: {str(e)}")
 
 @app.post("/api/admin/games/create")
 async def create_game_api(request: Request):
     """Manually create a new game instance"""
+    if not global_app_instance:
+        raise HTTPException(status_code=500, detail="App instance not available")
+    
     try:
-        game_uid = await create_new_game_instance(request.app)
-        return {"success": True, "game_uid": game_uid, "message": f"Game {game_uid} created successfully"}
+        game_uid = await create_new_game_instance(global_app_instance)
+        if game_uid:
+            return {"status": "success", "game_uid": game_uid}
+        else:
+            return {"status": "error", "message": "Could not create game - not enough agents or limit reached"}
     except Exception as e:
-        print(f"{Fore.RED}[API E] Error creating new game: {e}{Style.RESET_ALL}")
-        raise HTTPException(status_code=500, detail="Failed to create new game")
+        raise HTTPException(status_code=500, detail=f"Error creating game: {str(e)}")
 
 @app.post("/api/admin/games/maintain")
 async def trigger_maintenance_api(request: Request):

@@ -1,0 +1,50 @@
+name: 🎮 Monopoly Game Tests
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  test-gamecontroller-v2:
+    name: "Test GameControllerV2"
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+
+    - name: 🐍 Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: 📦 Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: 🔧 Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: 🎮 Run GameControllerV2 Tests
+      run: |
+        echo "🧪 Starting tests..."
+        python run_tests.py --core
+
+    - name: 📊 Display test results
+      if: always()
+      run: |
+        echo "📋 Test Results Summary:"
+        if [ -f test_results.json ]; then
+          echo "✅ Test results file found:"
+          cat test_results.json | python -m json.tool || cat test_results.json
+        else
+          echo "⚠️ No test results file generated"
+        fi

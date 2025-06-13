@@ -143,6 +143,7 @@ class GameController:
                 self.current_player_index = proposer_id
                 self.log_event(f"Trade Test Mode: Proposer P{proposer_id} ({self.players[proposer_id].name}) will start first.", "debug_test")
             else:
+                self.log_event(f"[Error TradeTest] Invalid proposer ID: {proposer_id}. Using random starting player.", "error_log")
                 self.current_player_index = random.randrange(len(self.players))
         else:
             self.current_player_index = random.randrange(len(self.players))
@@ -248,11 +249,26 @@ class GameController:
         if self.ws_manager:
             message_to_send = {"type": "initial_board_layout", "data": board_layout_data}
             if hasattr(self, 'loop') and self.loop and self.loop.is_running():
-                try: asyncio.run_coroutine_threadsafe(self.send_event_to_frontend(message_to_send), self.loop)
-                except Exception as e: print(f"[WS Send Error G:{self.game_uid}] Failed to schedule initial_board_layout: {e}")
+                try: 
+                    asyncio.run_coroutine_threadsafe(self.send_event_to_frontend(message_to_send), self.loop)
+                except Exception as e: 
+                    print(f"[WS Send Error G:{self.game_uid}] Failed to schedule initial_board_layout: {e}")
             else:
-                try: asyncio.create_task(self.send_event_to_frontend(message_to_send))
-                except RuntimeError as e: print(f"[WS Send Error G:{self.game_uid}] Failed to create_task for initial_board_layout: {e}")
+                try: 
+                    # Check if we're in an async context first
+                    loop = asyncio.get_running_loop()
+                    if loop:
+                        # Create task and store reference to avoid warnings
+                        task = asyncio.create_task(self.send_event_to_frontend(message_to_send))
+                        # Store task reference to prevent garbage collection
+                        if not hasattr(self, '_background_tasks'):
+                            self._background_tasks = set()
+                        self._background_tasks.add(task)
+                        task.add_done_callback(self._background_tasks.discard)
+                    else:
+                        print(f"[WS Send Warning G:{self.game_uid}] No event loop running for initial_board_layout")
+                except RuntimeError as e: 
+                    print(f"[WS Send Error G:{self.game_uid}] No event loop available for initial_board_layout: {e}")
             self.log_event(f"Sent initial_board_layout to frontend ({len(board_layout_data)} squares).", "debug_event_send")
 
         # If not in a specific test mode that sets a pending decision, proceed with normal start-of-turn checks for the first player.
@@ -922,7 +938,7 @@ class GameController:
         # Note: MAX_TURNS check is primarily handled by the server.py loop.
         # If GameController were to enforce its own MAX_TURNS, that logic could also go here,
         # but it would need access to MAX_TURNS (e.g., passed in __init__ or imported).
-    
+
     # ======= TPay Payment Integration Methods =======
     
     async def _create_tpay_payment_player_to_player(self, payer: Player, recipient: Player, amount: float, reason: str, 
@@ -1158,7 +1174,7 @@ class GameController:
                 self.log_event(f"[TPay] 🔄 System payment initiated: {payer.name} → Bank ${amount} for {reason}")
                 print(f"payment_result: {payment_result}")
                 return payment_result
-            else:
+            else: 
                 self.log_event(f"[TPay] ❌ System payment failed to initiate: {payer.name} → Bank ${amount}")
                 return None
                 
@@ -1455,14 +1471,13 @@ class GameController:
             
         # Check if player owns all properties in the color group
         color_group_properties = self.board.get_properties_in_group(square.color_group)
-        for prop_id in color_group_properties:
-            prop_square = self.board.get_square(prop_id)
+        for prop_square in color_group_properties:
             if prop_square.owner_id != player_id or prop_square.is_mortgaged:
                 self.log_event(f"[Error] Must own all unmortgaged properties in {square.color_group.value} group to build.")
                 return False
                 
         # Check for even development rule
-        min_houses = min(self.board.get_square(pid).num_houses for pid in color_group_properties)
+        min_houses = min(prop.num_houses for prop in color_group_properties if isinstance(prop, PropertySquare))
         if square.num_houses > min_houses:
             self.log_event(f"[Error] Must build evenly across color group. {square.name} already has more houses than others.")
             return False
@@ -1514,7 +1529,7 @@ class GameController:
             
         # Check for even development rule when selling
         color_group_properties = self.board.get_properties_in_group(square.color_group)
-        max_houses = max(self.board.get_square(pid).num_houses for pid in color_group_properties)
+        max_houses = max(prop.num_houses for prop in color_group_properties if isinstance(prop, PropertySquare))
         if square.num_houses < max_houses:
             self.log_event(f"[Error] Must sell evenly across color group. Other properties in {square.color_group.value} group have more houses.")
             return False
@@ -1991,18 +2006,18 @@ class GameController:
             used_card_type = player.use_get_out_of_jail_card()
             if used_card_type == "chance":
                 self.doubles_streak = 0
-                msg = f"{player.name} used a Chance Get Out of Jail Free card and is now out of jail."
-                self.log_event(msg)
-                self._resolve_current_action_segment()
-                return {"status": "success", "message": msg, "used_card": "chance"}
+            msg = f"{player.name} used a Chance Get Out of Jail Free card and is now out of jail."
+            self.log_event(msg)
+            self._resolve_current_action_segment()
+            return {"status": "success", "message": msg, "used_card": "chance"}
         elif player.has_community_gooj_card:
             used_card_type = player.use_get_out_of_jail_card()
             if used_card_type == "community_chest":
                 self.doubles_streak = 0
-                msg = f"{player.name} used a Community Chest Get Out of Jail Free card and is now out of jail."
-                self.log_event(msg)
-                self._resolve_current_action_segment()
-                return {"status": "success", "message": msg, "used_card": "community_chest"}
+            msg = f"{player.name} used a Community Chest Get Out of Jail Free card and is now out of jail."
+            self.log_event(msg)
+            self._resolve_current_action_segment()
+            return {"status": "success", "message": msg, "used_card": "community_chest"}
         else:
             msg = f"{player.name} has no Get Out of Jail Free card to use."
             self.log_event(msg)

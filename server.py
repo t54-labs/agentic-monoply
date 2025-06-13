@@ -319,8 +319,6 @@ class ThreadSafeGameInstance:
     def _run_game_thread(self):
         """Main game thread function - runs complete game logic in separate thread"""
         # Create new event loop for this thread
-        print(f"{Fore.CYAN}[Game Thread] Creating new event loop for {self.game_uid}{Style.RESET_ALL}")
-
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.running = True
@@ -622,8 +620,6 @@ async def create_new_game_instance(app_instance: FastAPI) -> str:
 
 async def monitor_threaded_game(game_uid: str, game_instance: ThreadSafeGameInstance):
     """Monitor a threaded game and handle cleanup when it finishes"""
-    print(f"{Fore.CYAN}[Game Monitor] Monitoring game {game_uid} in thread {threading.current_thread().ident}{Style.RESET_ALL}")
-
     try:
         # Wait for game thread to complete
         while game_instance.is_running():
@@ -1115,7 +1111,6 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                         player_turn_segment_active = False 
                 
                 elif chosen_tool_name == "tool_end_turn" or chosen_tool_name == "tool_resign_game": 
-                    print(f"{Fore.CYAN}[DEBUG] End turn or resign game tool chosen. Ending segment.{Style.RESET_ALL}")
                     player_turn_segment_active = False
                 
                 elif gc.pending_decision_type == "jail_options":
@@ -1453,11 +1448,10 @@ async def get_lobby_games_api(request: Request):
             if basic_info['running'] and basic_info['has_controller']:
                 # Try to get more detailed info safely
                 game_status = "in_progress"
-            if basic_info.get('game_over', False): 
+            if basic_info.get('game_over', False):
                 game_status = "completed"
                 
-            # Build game info with available data
-            print(f"{Fore.CYAN}[API W] Building game info for {game_uid} with status {game_status}{Style.RESET_ALL}")
+                # Build game info with available data
             game_info = {
                     "game_uid": game_uid,
                     "status": game_status,
@@ -1466,7 +1460,7 @@ async def get_lobby_games_api(request: Request):
                     "players": [],  # Simplified for lobby view to avoid thread issues
                     "turn_count": basic_info.get('turn_count', 0)
                 }
-            
+                
             # Try to get player info safely (optional, may be empty if access fails)
             try:
                 if basic_info.get('player_count', 0) > 0:

@@ -10,9 +10,10 @@ This directory contains GitHub Actions workflow configurations for the **Monopol
 * **Triggers**: On push to `main`, `master`, or `develop` branches, or on Pull Request creation
 * **Tests Included**:
 
-  * ✅ Full GameControllerV2 test suite (17 test cases)
-  * ✅ Trade negotiation tests (includes reject → renegotiate → accept flow)
-  * ✅ Additional validation using `pytest`
+     * ✅ Full GameControllerV2 test suite (17 test cases)
+   * ✅ Trade negotiation tests (includes reject → renegotiate → accept flow)
+   * ✅ Local tpay SDK installation from `dist/tpay-0.1.1.tar.gz`
+   * ✅ Additional validation using `pytest`
 * **Benefits**: Fast, focused, and easy to understand
 
 ### 2. `test.yml` – Full Workflow
@@ -60,6 +61,19 @@ This directory contains GitHub Actions workflow configurations for the **Monopol
 * Click the failed workflow to view detailed logs
 * Identify which specific test failed
 * Fix the code and push again
+
+## 📦 Local Dependencies
+
+This project uses a local **tpay SDK** that is not available on PyPI:
+
+* **Package**: `dist/tpay-0.1.1.tar.gz`
+* **Installation**: Automatically handled by GitHub Actions
+* **Local Development**: Run `pip install dist/tpay-0.1.1.tar.gz` after installing requirements.txt
+
+### Important Notes
+* The `dist/` directory is **included in the repository** (not gitignored)
+* GitHub Actions will automatically install the local tpay package after standard dependencies
+* If you update the tpay package, commit the new `.tar.gz` file to the `dist/` directory
 
 ## 🔧 Custom Configuration
 

@@ -1,6 +1,6 @@
 # Agentic Monopoly: A Multi-Agent Economic Simulation Platform
 
-![Tests](https://github.com/t54-labs/agentic-monoply/workflows/Core%20Unit%20Tests/badge.svg)
+[![Core Unit Tests](https://github.com/t54-labs/agentic-monoply/actions/workflows/monopoly-tests.yml/badge.svg)](https://github.com/t54-labs/agentic-monoply/actions/workflows/monopoly-tests.yml)
 
 ## Abstract
 

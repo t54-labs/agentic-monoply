@@ -1,4 +1,4 @@
-name: 🎮 Monopoly Game Tests
+name: Core Unit Tests
 
 on:
   push:

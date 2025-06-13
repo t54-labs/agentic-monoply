@@ -70,7 +70,7 @@ class PropertyManager(BaseManager):
             return False
             
         # Check if player has enough money
-        house_cost = property_square.house_cost
+        house_cost = property_square.house_price
         if player.money < house_cost:
             self.log_event(f"{player.name} cannot afford ${house_cost} house cost for {property_square.name}", "error_property")
             return False
@@ -138,7 +138,7 @@ class PropertyManager(BaseManager):
             return False
             
         # Determine sale price (50% of build cost)
-        house_cost = property_square.house_cost
+        house_cost = property_square.house_price
         sale_price = house_cost // 2
         
         # Handle hotel vs house selling
@@ -448,7 +448,7 @@ class PropertyManager(BaseManager):
     
     async def _build_hotel_on_property(self, player: Player, property_square: PropertySquare) -> bool:
         """Build a hotel on a property (internal method)"""
-        hotel_cost = property_square.house_cost  # Hotel costs same as house
+        hotel_cost = property_square.house_price  # Hotel costs same as house
         
         # Execute TPay payment for hotel construction
         payment_success = await self.gc.payment_manager.create_tpay_payment_player_to_system(

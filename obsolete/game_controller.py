@@ -275,12 +275,12 @@ class GameController:
         if not all_players_start_in_jail_test_mode and not test_mode_trade_details and not test_mode_auction_property_id:
             current_starting_player = self.get_current_player()
             if current_starting_player.in_jail:
-                 self._handle_jail_turn_initiation(current_starting_player)
+                self._handle_jail_turn_initiation(current_starting_player)
             elif current_starting_player.pending_mortgaged_properties_to_handle:
-                 self._handle_received_mortgaged_property_initiation(current_starting_player)
+                self._handle_received_mortgaged_property_initiation(current_starting_player)
             else: # Normal start, no specific pending decision from game setup
-                self._clear_pending_decision() # Corrected: Indented under else
-                self.dice_roll_outcome_processed = True # Corrected: Indented under else
+                self._clear_pending_decision()
+                self.dice_roll_outcome_processed = True
         
         self.log_event(f"GameController.start_game() finished. Game Over: {self.game_over}", "method_trace")
 

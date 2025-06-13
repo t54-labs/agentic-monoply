@@ -100,6 +100,7 @@ class GameControllerV2:
         self.auction_current_bidder_turn_index: int = 0
         self.trade_offers: Dict[int, TradeOffer] = {}
         self.next_trade_id: int = 1
+        self.MAX_TRADE_REJECTIONS: int = 5  # Maximum number of rejections allowed for a trade
         
         # Initialize managers for modular architecture FIRST
         self.payment_manager = PaymentManager(self)

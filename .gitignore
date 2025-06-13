@@ -117,3 +117,4 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/ 
+test_results.json

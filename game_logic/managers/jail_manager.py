@@ -62,7 +62,7 @@ class JailManager(BaseManager):
         
         if is_doubles:
             # Got doubles - free from jail
-            player.release_from_jail()
+            player.leave_jail()
             self.log_event(f"{player.name} rolled doubles ({dice1}, {dice2}) and is released from jail!", "jail_event")
             
             # Move player based on dice roll
@@ -140,7 +140,7 @@ class JailManager(BaseManager):
             
             if payment_success:
                 # Release from jail
-                player.release_from_jail()
+                player.leave_jail()
                 self.log_event(f"{player.name} paid ${bail_amount} bail and is released from jail", "jail_event")
                 
                 # Player can now roll dice for normal movement
@@ -197,7 +197,7 @@ class JailManager(BaseManager):
                 return {"success": False, "message": f"{player.name} has no Get Out of Jail Free cards"}
         
         # Release from jail
-        player.release_from_jail()
+        player.leave_jail()
         self.log_event(f"{player.name} used {card_type} Get Out of Jail Free card and is released", "jail_event")
         
         # Player can now take normal turn

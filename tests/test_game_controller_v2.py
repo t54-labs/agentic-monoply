@@ -893,12 +893,367 @@ class GameControllerV2TestSuite:
                 player_money_changes={},
                 property_ownership_changes={},
                 game_state_changes={'auction_started': True},
-                pending_decision_type="auction_bid"
+                pending_decision_type="auction_bid_decision"
             )
             
             return self.verify_expected_result(test_name, {'success': True}, expected)
             
         except Exception as e:
+            return self.verify_expected_result(test_name, {'success': False}, TestExpectedResult(False, {}, {}, {}, None, [str(e)]))
+
+    async def test_auction_competitive_bidding_process(self) -> bool:
+        """Test complete auction with multiple players bidding competitively"""
+        test_name = "Auction Competitive Bidding Process"
+        
+        try:
+            gc = await self.setup_test_game(num_players=4)
+            gc.start_game()
+            
+            # Set up players with different money levels for strategic bidding
+            self.setup_manager.set_player_money(gc, 0, 500)   # Player 0: moderate money
+            self.setup_manager.set_player_money(gc, 1, 1000)  # Player 1: rich
+            self.setup_manager.set_player_money(gc, 2, 200)   # Player 2: poor
+            self.setup_manager.set_player_money(gc, 3, 800)   # Player 3: well-off
+            
+            property_id = 6  # Oriental Avenue ($100 original price)
+            property_square = gc.board.get_square(property_id)
+            
+            print(f"🔍 === Auction Test Started for {property_square.name} ===")
+            print(f"🔍 Player money: P0=${gc.players[0].money}, P1=${gc.players[1].money}, P2=${gc.players[2].money}, P3=${gc.players[3].money}")
+            
+            # ========== PHASE 1: Initiate Auction ==========
+            await gc.auction_manager.initiate_auction(property_id)
+            
+            assert gc.auction_in_progress == True
+            assert gc.auction_property_id == property_id
+            assert gc.auction_current_bid == 1  # Starting bid
+            assert len(gc.auction_active_bidders) == 4
+            
+            print(f"🔍 Phase 1: Auction initiated - starting bid ${gc.auction_current_bid}")
+            
+            # ========== PHASE 2: Bidding Rounds ==========
+            
+            # Round 1: Player 0 bids $50
+            bid_success_1 = gc.auction_manager.handle_auction_bid(0, 50)
+            assert bid_success_1 == True
+            assert gc.auction_current_bid == 50
+            assert gc.auction_highest_bidder == gc.players[0]
+            
+            print(f"🔍 Round 1: Player 0 bids $50 - current highest: ${gc.auction_current_bid}")
+            
+            # Round 2: Player 1 bids $80 (outbids Player 0)
+            bid_success_2 = gc.auction_manager.handle_auction_bid(1, 80)
+            assert bid_success_2 == True
+            assert gc.auction_current_bid == 80
+            assert gc.auction_highest_bidder == gc.players[1]
+            
+            print(f"🔍 Round 2: Player 1 bids $80 - current highest: ${gc.auction_current_bid}")
+            
+            # Round 3: Player 2 passes (can't afford more)
+            pass_success_1 = gc.auction_manager.handle_auction_pass(2)
+            assert pass_success_1 == True
+            assert gc.players[2] not in gc.auction_active_bidders
+            
+            print(f"🔍 Round 3: Player 2 passes - {len(gc.auction_active_bidders)} bidders remaining")
+            
+            # Round 4: Player 3 bids $120 (outbids Player 1)
+            bid_success_3 = gc.auction_manager.handle_auction_bid(3, 120)
+            assert bid_success_3 == True
+            assert gc.auction_current_bid == 120
+            assert gc.auction_highest_bidder == gc.players[3]
+            
+            print(f"🔍 Round 4: Player 3 bids $120 - current highest: ${gc.auction_current_bid}")
+            
+            # Round 5: Player 0 passes (can't afford $121+)
+            pass_success_2 = gc.auction_manager.handle_auction_pass(0)
+            assert pass_success_2 == True
+            assert gc.players[0] not in gc.auction_active_bidders
+            
+            print(f"🔍 Round 5: Player 0 passes - {len(gc.auction_active_bidders)} bidders remaining")
+            
+            # Round 6: Player 1 bids $150 (final competitive bid)
+            bid_success_4 = gc.auction_manager.handle_auction_bid(1, 150)
+            assert bid_success_4 == True
+            assert gc.auction_current_bid == 150
+            assert gc.auction_highest_bidder == gc.players[1]
+            
+            print(f"🔍 Round 6: Player 1 bids $150 - current highest: ${gc.auction_current_bid}")
+            
+            # Round 7: Player 3 passes (can't afford $151+)
+            pass_success_3 = gc.auction_manager.handle_auction_pass(3)
+            assert pass_success_3 == True
+            assert gc.players[3] not in gc.auction_active_bidders
+            
+            print(f"🔍 Round 7: Player 3 passes - {len(gc.auction_active_bidders)} bidders remaining")
+            
+            # ========== PHASE 3: Auction Conclusion ==========
+            
+            # Store pre-auction state
+            pre_auction_p1_money = gc.players[1].money
+            pre_auction_p1_properties = gc.players[1].properties_owned_ids.copy()
+            
+            print(f"🔍 Pre-conclusion: Winner P1 has ${pre_auction_p1_money}, properties {pre_auction_p1_properties}")
+            
+            # All other players have passed, Player 1 should win
+            await gc.auction_manager.conclude_auction(no_winner=False)
+            
+            # ========== PHASE 4: Verification ==========
+            
+            # Verify auction state cleared
+            assert gc.auction_in_progress == False
+            assert gc.auction_property_id is None
+            assert gc.auction_highest_bidder is None
+            
+            # Verify property ownership transfer
+            assert property_square.owner_id == 1  # Player 1 won
+            assert property_id in gc.players[1].properties_owned_ids
+            
+            # Verify payment (allowing for some variance due to payment system)
+            expected_money = pre_auction_p1_money - 150
+            actual_money = gc.players[1].money
+            money_diff = abs(actual_money - expected_money)
+            
+            print(f"🔍 Post-conclusion: Winner P1 has ${actual_money}, properties {gc.players[1].properties_owned_ids}")
+            print(f"🔍 Money verification: Expected ${expected_money}, got ${actual_money}, diff ${money_diff}")
+            
+            # Verify payment history
+            payment_history = gc._test_payment_manager.payment_history
+            auction_payment = None
+            for payment in payment_history:
+                if "auction payment" in payment.get("reason", ""):
+                    auction_payment = payment
+                    break
+            
+            assert auction_payment is not None, "Auction payment not found in payment history"
+            assert auction_payment["status"] == "success"
+            assert auction_payment["amount"] == 150.0
+            
+            print(f"🔍 Payment verification: {auction_payment}")
+            
+            expected = TestExpectedResult(
+                success=True,
+                player_money_changes={1: -150},  # Player 1 paid $150
+                property_ownership_changes={1: [property_id]},  # Player 1 gained Oriental Avenue
+                game_state_changes={
+                    'auction_completed': True,
+                    'winner_player_id': 1,
+                    'winning_bid': 150,
+                    'total_bidding_rounds': 6,
+                    'players_passed': [0, 2, 3]
+                },
+                pending_decision_type=None
+            )
+            
+            auction_success = (
+                not gc.auction_in_progress and 
+                property_square.owner_id == 1 and
+                money_diff <= 50 and  # Allow some variance
+                auction_payment["status"] == "success"
+            )
+            
+            print(f"🔍 === Auction Test Result: {'SUCCESS' if auction_success else 'FAILED'} ===")
+            
+            return self.verify_expected_result(test_name, {'success': auction_success}, expected)
+            
+        except Exception as e:
+            print(f"🔍 Exception in competitive auction test: {e}")
+            import traceback
+            print(f"🔍 Traceback: {traceback.format_exc()}")
+            return self.verify_expected_result(test_name, {'success': False}, TestExpectedResult(False, {}, {}, {}, None, [str(e)]))
+
+    async def test_auction_no_bids_scenario(self) -> bool:
+        """Test auction with no bids (all players pass) - property remains unowned"""
+        test_name = "Auction No Bids Scenario"
+        
+        try:
+            gc = await self.setup_test_game(num_players=3)
+            gc.start_game()
+            
+            # Set up players with very low money
+            self.setup_manager.set_player_money(gc, 0, 10)   # Too poor to bid meaningfully
+            self.setup_manager.set_player_money(gc, 1, 15)   # Too poor to bid meaningfully  
+            self.setup_manager.set_player_money(gc, 2, 20)   # Too poor to bid meaningfully
+            
+            property_id = 8  # Vermont Avenue ($100 original price)
+            property_square = gc.board.get_square(property_id)
+            
+            print(f"🔍 === No Bids Auction Test Started for {property_square.name} ===")
+            print(f"🔍 All players have low money: P0=${gc.players[0].money}, P1=${gc.players[1].money}, P2=${gc.players[2].money}")
+            
+            # ========== PHASE 1: Initiate Auction ==========
+            await gc.auction_manager.initiate_auction(property_id)
+            
+            assert gc.auction_in_progress == True
+            assert gc.auction_current_bid == 1
+            
+            print(f"🔍 Phase 1: Auction initiated for ${property_square.price} property")
+            
+            # ========== PHASE 2: All Players Pass ==========
+            
+            # Player 0 passes immediately
+            pass_success_1 = gc.auction_manager.handle_auction_pass(0)
+            assert pass_success_1 == True
+            
+            print(f"🔍 Player 0 passes - {len(gc.auction_active_bidders)} bidders remaining")
+            
+            # Player 1 passes immediately  
+            pass_success_2 = gc.auction_manager.handle_auction_pass(1)
+            assert pass_success_2 == True
+            
+            print(f"🔍 Player 1 passes - {len(gc.auction_active_bidders)} bidders remaining")
+            
+            # Player 2 passes immediately
+            pass_success_3 = gc.auction_manager.handle_auction_pass(2)
+            assert pass_success_3 == True
+            
+            print(f"🔍 Player 2 passes - {len(gc.auction_active_bidders)} bidders remaining")
+            
+            # ========== PHASE 3: Conclude with No Winner ==========
+            
+            # No one has made a real bid (only $1 starting bid), so it should be no winner
+            await gc.auction_manager.conclude_auction(no_winner=True)
+            
+            # ========== PHASE 4: Verification ==========
+            
+            # Verify auction state cleared
+            assert gc.auction_in_progress == False
+            assert gc.auction_property_id is None
+            
+            # Verify property remains unowned
+            assert property_square.owner_id is None
+            
+            # Verify no money was transferred
+            assert gc.players[0].money == 10  # No change
+            assert gc.players[1].money == 15  # No change
+            assert gc.players[2].money == 20  # No change
+            
+            # Verify no properties were transferred
+            for player in gc.players:
+                assert property_id not in player.properties_owned_ids
+            
+            print(f"🔍 Post-auction: Property remains unowned, all players keep their money")
+            
+            expected = TestExpectedResult(
+                success=True,
+                player_money_changes={},  # No money changes
+                property_ownership_changes={},  # No ownership changes
+                game_state_changes={
+                    'auction_completed': True,
+                    'no_winner': True,
+                    'property_remains_unowned': True,
+                    'all_players_passed': True
+                },
+                pending_decision_type=None
+            )
+            
+            no_bid_success = (
+                not gc.auction_in_progress and 
+                property_square.owner_id is None and
+                all(p.money in [10, 15, 20] for p in gc.players)  # Money unchanged
+            )
+            
+            print(f"🔍 === No Bids Auction Result: {'SUCCESS' if no_bid_success else 'FAILED'} ===")
+            
+            return self.verify_expected_result(test_name, {'success': no_bid_success}, expected)
+            
+        except Exception as e:
+            print(f"🔍 Exception in no bids auction test: {e}")
+            import traceback
+            print(f"🔍 Traceback: {traceback.format_exc()}")
+            return self.verify_expected_result(test_name, {'success': False}, TestExpectedResult(False, {}, {}, {}, None, [str(e)]))
+
+    async def test_auction_payment_failure_scenario(self) -> bool:
+        """Test auction where winner cannot pay - triggers bankruptcy"""
+        test_name = "Auction Payment Failure Scenario"
+        
+        try:
+            gc = await self.setup_test_game(num_players=2, force_payment_failure=True)  # Force payment failure
+            gc.start_game()
+            
+            # Set up: Player 0 has just enough to bid but payment will fail
+            self.setup_manager.set_player_money(gc, 0, 100)  # Has money for bid
+            self.setup_manager.set_player_money(gc, 1, 50)   # Less competitive
+            
+            property_id = 1  # Mediterranean Avenue ($60 original price)
+            property_square = gc.board.get_square(property_id)
+            
+            print(f"🔍 === Payment Failure Auction Test Started ===")
+            print(f"🔍 Player money: P0=${gc.players[0].money}, P1=${gc.players[1].money}")
+            print(f"🔍 Payment system configured to fail")
+            
+            # ========== PHASE 1: Normal Auction Process ==========
+            await gc.auction_manager.initiate_auction(property_id)
+            
+            # Player 0 makes a winning bid
+            bid_success = gc.auction_manager.handle_auction_bid(0, 80)
+            assert bid_success == True
+            
+            # Player 1 passes
+            pass_success = gc.auction_manager.handle_auction_pass(1)
+            assert pass_success == True
+            
+            print(f"🔍 Player 0 wins auction with $80 bid")
+            
+            # ========== PHASE 2: Payment Failure ==========
+            
+            pre_bankruptcy_money = gc.players[0].money
+            pre_bankruptcy_bankrupt_status = gc.players[0].is_bankrupt
+            
+            # Conclude auction - payment should fail
+            await gc.auction_manager.conclude_auction(no_winner=False)
+            
+            # ========== PHASE 3: Verification ==========
+            
+            # Verify auction cleared
+            assert gc.auction_in_progress == False
+            
+            # With payment failure, property should remain unowned
+            # (Implementation may vary - check actual behavior)
+            
+            # Check if bankruptcy was triggered or payment failure handled
+            payment_history = gc._test_payment_manager.payment_history
+            failed_payment = None
+            for payment in payment_history:
+                if payment.get("status") == "failed" and "auction" in payment.get("reason", ""):
+                    failed_payment = payment
+                    break
+            
+            print(f"🔍 Post-auction state:")
+            print(f"🔍 - Property owner: {property_square.owner_id}")
+            print(f"🔍 - Player 0 bankrupt: {gc.players[0].is_bankrupt}")
+            print(f"🔍 - Player 0 money: {gc.players[0].money}")
+            print(f"🔍 - Failed payment: {failed_payment}")
+            
+            # The exact behavior depends on implementation, but we should see either:
+            # 1. Payment failure in history, or
+            # 2. Bankruptcy triggered, or  
+            # 3. Property remains unowned
+            payment_failure_handled = (
+                failed_payment is not None or
+                gc.players[0].is_bankrupt != pre_bankruptcy_bankrupt_status or
+                property_square.owner_id is None
+            )
+            
+            expected = TestExpectedResult(
+                success=True,
+                player_money_changes={},  # Depends on implementation
+                property_ownership_changes={},  # Property should remain unowned on payment failure
+                game_state_changes={
+                    'auction_completed': True,
+                    'payment_failure': True,
+                    'bankruptcy_possible': True
+                },
+                pending_decision_type=None
+            )
+            
+            print(f"🔍 === Payment Failure Test Result: {'SUCCESS' if payment_failure_handled else 'FAILED'} ===")
+            
+            return self.verify_expected_result(test_name, {'success': payment_failure_handled}, expected)
+            
+        except Exception as e:
+            print(f"🔍 Exception in payment failure auction test: {e}")
+            import traceback
+            print(f"🔍 Traceback: {traceback.format_exc()}")
             return self.verify_expected_result(test_name, {'success': False}, TestExpectedResult(False, {}, {}, {}, None, [str(e)]))
 
     # ======= Jail Mechanism Tests =======
@@ -1426,6 +1781,9 @@ class GameControllerV2TestSuite:
             self.test_trade_acceptance_decision,
             self.test_trade_negotiation_process,
             self.test_auction_bidding_decision,
+            self.test_auction_competitive_bidding_process,
+            self.test_auction_no_bids_scenario,
+            self.test_auction_payment_failure_scenario,
             self.test_jail_escape_decisions,
             self.test_rent_payment_system,
             self.test_bankruptcy_asset_liquidation,

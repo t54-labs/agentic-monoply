@@ -18,7 +18,6 @@ import tpay
 from tpay.tools import taudit_verifier
 
 from game_logic.player import Player
-from obsolete.game_controller import GameController 
 from game_logic.game_controller_v2 import GameControllerV2
 from ai_agent.agent import OpenAIAgent
 from main import TOOL_REGISTRY, NUM_PLAYERS, PLAYER_NAMES, MAX_TURNS, ACTION_DELAY_SECONDS, MAX_ACTIONS_PER_SEGMENT, execute_agent_action, print_game_summary, _setup_tool_placeholders
@@ -534,7 +533,7 @@ async def initialize_agent_tpay_balances(available_agents: List[Dict[str, Any]],
     except Exception as e:
         print(f"{Fore.RED}[TPay] Error initializing game token accounts for {game_uid}: {e}{Style.RESET_ALL}")
 
-async def update_agent_game_statistics(available_agents: List[Dict[str, Any]], gc: GameController, 
+async def update_agent_game_statistics(available_agents: List[Dict[str, Any]], gc: GameControllerV2, 
                                       game_db_id: int):
     """Update agent statistics after a game ends"""
     try:
@@ -819,7 +818,7 @@ def _log_agent_action_to_db(gc_ref: Any, player_id: int, agent_ref: Any, action_
 async def start_monopoly_game_instance(game_uid: str, connection_manager_param: ConnectionManager, app_instance: FastAPI, available_agents: List[Dict[str, Any]]):
     print(f"Attempting to start G_UID: {game_uid}")
     game_db_id: Optional[int] = None; 
-    gc: Optional[GameController] = None 
+    gc: Optional[GameControllerV2] = None 
 
     try:
         with Session(engine) as session:

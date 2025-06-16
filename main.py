@@ -4,7 +4,7 @@ from typing import Optional, Dict, Any, List, Tuple # Added Dict, Any, List, Tup
 import json # For pretty printing dicts
 import datetime
 
-from game_logic.game_controller import GameController
+from game_logic.game_controller_v2 import GameControllerV2
 from game_logic.property import PurchasableSquare, SquareType, PropertySquare # Ensure PropertySquare is imported if used explicitly
 from ai_agent.agent import OpenAIAgent # Assuming OpenAIAgent is the one we use
 from ai_agent import tools as agent_tools # Import the tools module
@@ -67,7 +67,7 @@ def _setup_tool_placeholders(gc_instance=None):
     # but for now, assume they are generic enough or take GC as param during execution.
 
     if TOOL_REGISTRY["tool_resign_game"].__name__ == '<lambda>':
-        def _resign_placeholder(gc: GameController, player_id: int) -> dict:
+        def _resign_placeholder(gc: GameControllerV2, player_id: int) -> dict:
             player = gc.players[player_id]
             gc.log_event(f"Agent {player.name} resigns (placeholder tool).")
             gc._check_and_handle_bankruptcy(player, 0, None)
@@ -75,12 +75,12 @@ def _setup_tool_placeholders(gc_instance=None):
         TOOL_REGISTRY["tool_resign_game"] = _resign_placeholder
 
     if TOOL_REGISTRY["tool_confirm_asset_liquidation_actions_done"].__name__ == '<lambda>':
-        def _confirm_liq_placeholder(gc: GameController, player_id: int) -> dict:
+        def _confirm_liq_placeholder(gc: GameControllerV2, player_id: int) -> dict:
             gc.confirm_asset_liquidation_done(player_id)
             return {"status": "success", "message": "Asset liquidation confirm placeholder processed."}
         TOOL_REGISTRY["tool_confirm_asset_liquidation_actions_done"] = _confirm_liq_placeholder
 
-    def _create_placeholder_tool_if_missing(tool_name_key, gc_for_placeholder_call: Optional[GameController] = None):
+    def _create_placeholder_tool_if_missing(tool_name_key, gc_for_placeholder_call: Optional[GameControllerV2] = None):
         is_lambda_placeholder = False
         try:
             if TOOL_REGISTRY.get(tool_name_key) and TOOL_REGISTRY[tool_name_key].__name__ == '<lambda>':
@@ -88,7 +88,7 @@ def _setup_tool_placeholders(gc_instance=None):
         except AttributeError: pass
         
         if is_lambda_placeholder:
-            def placeholder_tool_impl(gc_inner: GameController, player_id_inner: int, **kwargs) -> dict:
+            def placeholder_tool_impl(gc_inner: GameControllerV2, player_id_inner: int, **kwargs) -> dict:
                 p_name = gc_inner.players[player_id_inner].name
                 gc_inner.log_event(f"[Placeholder Tool] P{player_id_inner}({p_name}) uses '{tool_name_key}' with {kwargs}")
                 if tool_name_key == "tool_bid_on_auction": gc_inner._handle_auction_bid(gc_inner.players[player_id_inner], kwargs.get('bid_amount', 1))
@@ -105,7 +105,7 @@ def _setup_tool_placeholders(gc_instance=None):
 
 _setup_tool_placeholders() # Call at module level to ensure TOOL_REGISTRY is patched before use.
 
-def execute_agent_action(gc: GameController, player_id: int, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+def execute_agent_action(gc: GameControllerV2, player_id: int, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """Executes the chosen tool for the agent."""
     if tool_name in TOOL_REGISTRY:
         tool_function = TOOL_REGISTRY[tool_name]
@@ -157,7 +157,7 @@ def execute_agent_action(gc: GameController, player_id: int, tool_name: str, par
         gc.log_event(f"[E] Unknown tool '{tool_name}' P{player_id}.")
         return {"status": "error", "message": f"Unknown tool: {tool_name}"}
 
-def print_game_summary(gc: GameController, return_string: bool = False) -> Optional[str]:
+def print_game_summary(gc: GameControllerV2, return_string: bool = False) -> Optional[str]:
     summary_lines = []
     summary_lines.append("\n--- Game Summary ---")
     for player in gc.players:
@@ -182,7 +182,7 @@ def print_game_summary(gc: GameController, return_string: bool = False) -> Optio
         print(output_str)
         return None
 
-def get_user_input_for_action(gc: GameController, player: Any, game_state: Dict[str, Any], available_actions: List[str]) -> Tuple[Optional[str], Dict[str, Any]]:
+def get_user_input_for_action(gc: GameControllerV2, player: Any, game_state: Dict[str, Any], available_actions: List[str]) -> Tuple[Optional[str], Dict[str, Any]]:
     print(f"\n{Fore.YELLOW}Player {player.name} (P{player.player_id}), it's your turn to act.{Style.RESET_ALL}")
     print(f"Current Money: ${player.money}, Position: {player.position} ({game_state.get('my_position_name', 'N/A')})")
     if gc.pending_decision_type:
@@ -263,7 +263,7 @@ def get_user_input_for_action(gc: GameController, player: Any, game_state: Dict[
     return chosen_tool_name, params
 
 # New function to log agent actions to DB
-def _log_agent_action_to_db(gc: GameController, player_id: int, agent: OpenAIAgent, action_result: Dict[str, Any], current_game_turn_db_id: Optional[int]):
+def _log_agent_action_to_db(gc: GameControllerV2, player_id: int, agent: OpenAIAgent, action_result: Dict[str, Any], current_game_turn_db_id: Optional[int]):
     if gc.game_db_id is None: # Cannot log if no game_db_id
         return
     
@@ -315,7 +315,7 @@ def run_game_cli_simulation(interactive_mode=False, game_uid_for_server: Optiona
     game_id_to_use = game_uid_for_server if game_uid_for_server else "cli_game"
     
     print(f"Starting Monopoly CLI Simulation (Game ID: {game_id_to_use})...")
-    gc = GameController(num_players=NUM_PLAYERS, player_names=PLAYER_NAMES, game_uid=game_id_to_use, ws_manager=ws_manager_for_server)
+    gc = GameControllerV2(num_players=NUM_PLAYERS, player_names=PLAYER_NAMES, game_uid=game_id_to_use, ws_manager=ws_manager_for_server)
     agents = [OpenAIAgent(player_id=i, name=gc.players[i].name) for i in range(NUM_PLAYERS)]
     gc.log_event(f"Initialized {len(agents)} agents for game {game_id_to_use}.")
     gc.start_game()

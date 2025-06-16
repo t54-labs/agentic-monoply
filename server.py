@@ -18,7 +18,7 @@ import tpay
 from tpay.tools import taudit_verifier
 
 from game_logic.player import Player
-from game_logic.game_controller import GameController 
+from obsolete.game_controller import GameController 
 from game_logic.game_controller_v2 import GameControllerV2
 from ai_agent.agent import OpenAIAgent
 from main import TOOL_REGISTRY, NUM_PLAYERS, PLAYER_NAMES, MAX_TURNS, ACTION_DELAY_SECONDS, MAX_ACTIONS_PER_SEGMENT, execute_agent_action, print_game_summary, _setup_tool_placeholders
@@ -1423,6 +1423,27 @@ app.add_middleware(
 )
 
 # 9. Define routes
+
+@app.get("/")
+async def root():
+    """Health check and basic API info"""
+    return {
+        "status": "healthy",
+        "service": "Monopoly Game Server",
+        "version": "2.0",
+        "endpoints": {
+            "health": "/",
+            "docs": "/docs",
+            "lobby": "/api/lobby/games",
+            "admin": "/api/admin/"
+        }
+    }
+
+@app.get("/health")
+async def health_check():
+    """Simple health check endpoint for Heroku"""
+    return {"status": "ok", "timestamp": datetime.datetime.now().isoformat()}
+
 @app.get("/api/lobby/games")
 async def get_lobby_games_api(request: Request):
     """Get lobby games using thread-safe game instances"""

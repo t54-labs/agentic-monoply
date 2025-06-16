@@ -1415,7 +1415,9 @@ app.add_middleware(
         "http://127.0.0.1:3001",
         "http://127.0.0.1:3002",
         "http://127.0.0.1:3003",
-        "null"  # For file:// origins
+        "http://monopoly.t54.ai",
+        "https://monopoly.t54.ai",
+        "*"  # For file:// origins
     ], 
     allow_credentials=True,
     allow_methods=["*"], # Allow all methods

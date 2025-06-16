@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from 'react';
 import { useParams } from 'next/navigation'; 
 import Head from 'next/head'; // For setting the page title
 import MonopolyBoard from '../../components/MonopolyBoard'; // Adjusted path
+import { getApiUrl, getWsUrl, API_CONFIG } from '../../../config/api'; // Import API configuration
 
 export default function GamePage() {
     const params = useParams();
@@ -115,12 +116,16 @@ export default function GamePage() {
         setPlayerCards({});
         // setBoardLayout([]); // Removed: Initial board layout will be fetched via API
 
-        const ws = new WebSocket(`ws://localhost:8000/ws/game/${gameId}`);
+        // Use WebSocket configuration instead of hardcoded URL
+        const wsUrl = getWsUrl(API_CONFIG.WS_ENDPOINTS.GAME(gameId));
+        console.log('🔌 Connecting to game WebSocket:', wsUrl);
+        
+        const ws = new WebSocket(wsUrl);
         socketRef.current = ws;
 
         ws.onopen = () => {
             setConnectionStatus('Connected');
-            appendToLog(setGameLog, { timestamp: new Date().toLocaleTimeString(), message: `Connected to WebSocket for game ID: ${gameId}.`, type: 'info' });
+            appendToLog(setGameLog, { timestamp: new Date().toLocaleTimeString(), message: `✅ Connected to WebSocket for game ID: ${gameId} at ${wsUrl}`, type: 'info' });
             console.log("WebSocket connected for game ID:", gameId);
             // No longer setting boardLayout here, it's fetched by API.
             // If WS needs to send board layout updates later, the 'initial_board_layout' handler can still be used.
@@ -181,14 +186,14 @@ export default function GamePage() {
 
         ws.onclose = (event) => {
             setConnectionStatus('Disconnected');
-            appendToLog(setGameLog, { timestamp: new Date().toLocaleTimeString(), message: `WebSocket disconnected. Code: ${event.code}, Reason: ${event.reason || 'N/A'}`, type: event.wasClean ? 'info' : 'error' });
+            appendToLog(setGameLog, { timestamp: new Date().toLocaleTimeString(), message: `🔌 WebSocket disconnected. Code: ${event.code}, Reason: ${event.reason || 'N/A'}`, type: event.wasClean ? 'info' : 'error' });
             console.log("WebSocket disconnected.");
         };
 
         ws.onerror = (error) => {
             setConnectionStatus('Error');
             const errorMessage = error && error.message ? error.message : 'Unknown WebSocket error';
-            appendToLog(setGameLog, { timestamp: new Date().toLocaleTimeString(), message: `WebSocket Error: ${errorMessage}`, type: 'error' });
+            appendToLog(setGameLog, { timestamp: new Date().toLocaleTimeString(), message: `❌ WebSocket Error: ${errorMessage}`, type: 'error' });
             console.error("WebSocket Error: ", error);
         };
 
@@ -215,7 +220,11 @@ export default function GamePage() {
             const fetchBoardLayout = async () => {
                 appendToLog(setGameLog, { timestamp: new Date().toLocaleTimeString(), message: `Fetching board layout for game ${gameId}...`, type: 'info' });
                 try {
-                    const response = await fetch(`http://localhost:8000/api/game/${gameId}/board_layout`);
+                    // Use API configuration instead of hardcoded URL
+                    const apiUrl = getApiUrl(API_CONFIG.ENDPOINTS.GAME_BOARD(gameId));
+                    console.log('🌐 Fetching board layout from:', apiUrl);
+                    
+                    const response = await fetch(apiUrl);
                     if (!response.ok) {
                         const errorData = await response.json().catch(() => ({ detail: "Unknown error fetching layout" }));
                         throw new Error(`HTTP error ${response.status}: ${errorData.detail || "Failed to fetch board layout"}`);
@@ -223,14 +232,14 @@ export default function GamePage() {
                     const data = await response.json();
                     if (data.status === 'success' && data.board_layout) {
                         setBoardLayout(data.board_layout);
-                        appendToLog(setGameLog, { timestamp: new Date().toLocaleTimeString(), message: `Board layout loaded successfully (${data.board_layout.length} squares).`, type: 'info' });
+                        appendToLog(setGameLog, { timestamp: new Date().toLocaleTimeString(), message: `✅ Board layout loaded successfully (${data.board_layout.length} squares).`, type: 'info' });
                         console.log("Board layout fetched and set from API:", data.board_layout);
                     } else {
                         throw new Error(data.error || "Failed to load board layout from API.");
                     }
                 } catch (error) {
                     console.error("Error fetching board layout:", error);
-                    appendToLog(setGameLog, { timestamp: new Date().toLocaleTimeString(), message: `Error fetching board layout: ${error.message}`, type: 'error' });
+                    appendToLog(setGameLog, { timestamp: new Date().toLocaleTimeString(), message: `❌ Error fetching board layout: ${error.message}`, type: 'error' });
                     // Optionally set boardLayout to a default or error state here
                     setBoardLayout([]); // Clear or set to default on error
                 }

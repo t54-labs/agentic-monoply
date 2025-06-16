@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import GameTableCard from '../components/GameTableCard'; // Adjusted path
+import { getApiUrl, getWsUrl, API_CONFIG } from '../../config/api'; // Import API configuration
 // import Link from 'next/link'; // Link for Home button removed
 
 interface PlayerInfo {
@@ -20,9 +21,7 @@ interface GameData {
   turn_count?: number;
 }
 
-const MIN_ROWS = 10;
-const MIN_TABLES_PER_ROW = 2; 
-const MAX_TABLES_PER_ROW = 6; 
+// Layout configuration
 const ESTIMATED_TOTAL_SLOTS = 40; 
 
 // Function to generate fallback game data
@@ -62,19 +61,20 @@ const generateFallbackGames = (count: number): GameData[] => {
 const LobbyPage: React.FC = () => {
   const [games, setGames] = useState<GameData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     const fetchGames = async () => {
       setIsLoading(true);
-      setError(null);
       try {
-        const response = await fetch('/api/lobby/games');
+        // Use API configuration instead of hardcoded URL
+        const apiUrl = getApiUrl(API_CONFIG.ENDPOINTS.LOBBY_GAMES);
+        console.log('🌐 Fetching games from:', apiUrl);
+        
+        const response = await fetch(apiUrl);
         if (!response.ok) {
           const errorMsg = `API Error: ${response.status}`;
           console.error(errorMsg);
-          setError(errorMsg);
           setGames(generateFallbackGames(5)); 
           return; 
         }
@@ -85,10 +85,10 @@ const LobbyPage: React.FC = () => {
           console.log("API returned no games, showing fallback.");
           setGames(generateFallbackGames(5)); 
         }
-      } catch (e: any) {
+      } catch (e: unknown) {
         console.error("Failed to fetch games (catch block):", e);
-        const errorMsg = e.message || "Failed to load games.";
-        setError(errorMsg);
+        const errorMsg = e instanceof Error ? e.message : "Failed to load games.";
+        console.error(errorMsg);
         setGames(generateFallbackGames(5)); 
       } finally {
         setIsLoading(false);
@@ -97,17 +97,20 @@ const LobbyPage: React.FC = () => {
 
     fetchGames();
 
-    const wsUrl = `ws://localhost:8000/ws/lobby`;
+    // Use WebSocket configuration instead of hardcoded URL
+    const wsUrl = getWsUrl(API_CONFIG.WS_ENDPOINTS.LOBBY);
+    console.log('🔌 Connecting to WebSocket:', wsUrl);
+    
     socketRef.current = new WebSocket(wsUrl);
 
     socketRef.current.onopen = () => {
-      console.log("Lobby WebSocket connected");
+      console.log("✅ Lobby WebSocket connected to:", wsUrl);
     };
 
     socketRef.current.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data as string);
-        console.log("Lobby WebSocket message received:", message);
+        console.log("📨 Lobby WebSocket message received:", message);
 
         if (message.type === 'game_added') {
           setGames(prevGames => {
@@ -132,16 +135,16 @@ const LobbyPage: React.FC = () => {
         }
 
       } catch (e) {
-        console.error("Error processing lobby WebSocket message:", e, event.data);
+        console.error("❌ Error processing lobby WebSocket message:", e, event.data);
       }
     };
 
     socketRef.current.onclose = () => {
-      console.log("Lobby WebSocket disconnected");
+      console.log("🔌 Lobby WebSocket disconnected");
     };
 
     socketRef.current.onerror = (err) => {
-      console.error("Lobby WebSocket error:", err);
+      console.error("❌ Lobby WebSocket error:", err);
     };
 
     return () => {

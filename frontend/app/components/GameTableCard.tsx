@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import Image from 'next/image';
 import React from 'react';
 
 // Define the expected shape of a player object within a game
@@ -27,9 +28,11 @@ const GameTableCard: React.FC<GameTableCardProps> = ({ game, isEmpty }) => {
     return (
       <div style={styles.tableContainer}>
         <div style={styles.tableImage}>
-          <img 
+          <Image 
             src="/table.png" 
             alt="Empty Table" 
+            width={460}
+            height={300}
             style={styles.tableImg}
           />
         </div>
@@ -117,9 +120,11 @@ const GameTableCard: React.FC<GameTableCardProps> = ({ game, isEmpty }) => {
           }}
           title={`${player.name} (P${player.id})${player.is_bankrupt ? ' [BANKRUPT]': ''}`}
         >
-          <img 
+          <Image 
             src={avatarSrc}
             alt={player.name}
+            width={80}
+            height={80}
             style={styles.avatarImage}
             onError={(e) => handleImageError(e, player.id)}
             onLoad={() => console.log(`Successfully loaded avatar for player ${player.id}: ${avatarSrc}`)}
@@ -164,9 +169,11 @@ const GameTableCard: React.FC<GameTableCardProps> = ({ game, isEmpty }) => {
     <Link href={game_uid.startsWith('fake-') ? '#' : `/game/${game_uid}`} passHref style={{ textDecoration: 'none', pointerEvents: game_uid.startsWith('fake-') ? 'none' : 'auto' }}>
       <div style={styles.tableContainer}>
         <div style={styles.tableImage}>
-          <img 
+          <Image 
             src="/table.png" 
             alt="Game Table" 
+            width={460}
+            height={300}
             style={styles.tableImg}
           />
           <div style={styles.playersOnTable}>

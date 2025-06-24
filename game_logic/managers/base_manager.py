@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 # Avoid circular imports by using TYPE_CHECKING
 if TYPE_CHECKING:
-    from ..game_controller import GameController
+    from ..game_controller_v2 import GameControllerV2
 
 
 class BaseManager(ABC):
@@ -13,7 +13,7 @@ class BaseManager(ABC):
     the complexity of the main GameController class.
     """
     
-    def __init__(self, game_controller: 'GameController'):
+    def __init__(self, game_controller: 'GameControllerV2'):
         """
         Initialize the manager with a reference to the main game controller.
         

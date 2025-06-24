@@ -24,7 +24,7 @@ try:
     MAX_TRADE_REJECTIONS_FOR_PROMPT = MTR_MAIN
 except ImportError:
     try:
-        from game_logic.game_controller import MAX_TRADE_REJECTIONS as MTR_GC
+        from game_logic.game_controller_v2 import MAX_TRADE_REJECTIONS as MTR_GC
         MAX_TRADE_REJECTIONS_FOR_PROMPT = MTR_GC
     except ImportError:
         print("[Agent Prompt] MAX_TRADE_REJECTIONS constant not found, using default for prompt.")
@@ -61,7 +61,7 @@ class BaseAgent(ABC):
 
 class OpenAIAgent(BaseAgent):
     @taudit_verifier
-    def __init__(self, player_id: int, name: str, model_name: str = "gpt-4o-mini", api_key: str = None):
+    def __init__(self, agent_uid: str, player_id: int, name: str, model_name: str = "gpt-4o-mini", api_key: str = None):
         super().__init__(player_id, name)
 
         load_dotenv()
@@ -74,6 +74,9 @@ class OpenAIAgent(BaseAgent):
             raise ValueError("OpenAI API key not provided or found in OPENAI_API_KEY environment variable.")
         
         self.client = openai.OpenAI(api_key=self.api_key)
+
+        self.agent_uid = agent_uid
+
         self.model_name = model_name
         self.last_prompt: str = ""
         self.last_response_text: str = ""

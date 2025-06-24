@@ -2,6 +2,8 @@
 
 [![Core Unit Tests](https://github.com/t54-labs/agentic-monoply/actions/workflows/monopoly-tests.yml/badge.svg)](https://github.com/t54-labs/agentic-monoply/actions/workflows/monopoly-tests.yml)
 
+![banner](https://i.meee.com.tw/VaYKlkf.png)
+
 ## Abstract
 
 Agentic Monopoly represents a pioneering computational framework for investigating multi-agent economic behaviors through the lens of the classic Monopoly board game. This system implements a sophisticated agent economy simulation where autonomous AI agents engage in complex economic transactions, negotiations, and strategic decision-making processes. By leveraging large language models (LLMs) as the cognitive engine for each agent, the platform provides a rich environment for studying emergent economic behaviors, trading strategies, and inter-agent cooperation and competition dynamics.

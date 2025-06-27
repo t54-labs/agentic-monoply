@@ -40,7 +40,6 @@ MAINTENANCE_INTERVAL = 30  # Seconds between game count maintenance checks
 # Agent management configuration
 AGENTS_PER_GAME = NUM_PLAYERS     # Number of agents per game (should match NUM_PLAYERS)
 AGENT_INITIAL_BALANCE = 1500  # Starting balance for each game
-TREASURY_AGENT_ID = "agnt_83a25f7c-90c9-4fb0-ac42-b3d594bc6235"
 
 def print_startup_config():
     """Print startup configuration for debugging"""
@@ -51,6 +50,7 @@ def print_startup_config():
     print(f"{Fore.GREEN}Maintenance Interval: {MAINTENANCE_INTERVAL}s{Style.RESET_ALL}")
     print(f"{Fore.GREEN}Max Turns: {MAX_TURNS}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}Action Delay: {ACTION_DELAY_SECONDS}s{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}Treasury Agent ID: {TREASURY_AGENT_ID}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}============================================{Style.RESET_ALL}")
 
 # 1. Colorama setup & Global placeholders
@@ -72,6 +72,7 @@ TLEDGER_API_KEY = os.getenv("TLEDGER_API_KEY")
 TLEDGER_API_SECRET = os.getenv("TLEDGER_API_SECRET")
 TLEDGER_PROJECT_ID = os.getenv("TLEDGER_PROJECT_ID")
 TLEDGER_BASE_URL = os.getenv("TLEDGER_BASE_URL")
+TREASURY_AGENT_ID = os.getenv("TREASURY_AGENT_ID")
 
 # 3. ConnectionManager class definition
 class ConnectionManager:

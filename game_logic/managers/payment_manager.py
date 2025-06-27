@@ -136,7 +136,7 @@ class PaymentManager(BaseManager):
             payment_result = await self.gc.tpay_agent.create_payment(
                 agent_id=payer.agent_tpay_id,
                 receiving_agent_id=recipient.agent_tpay_id,
-                amount=int(amount * 10 ** 6),
+                amount=amount,
                 currency=utils.GAME_TOKEN_SYMBOL,
                 settlement_network="solana",
                 func_stack_hashes=func_stack_hashes,
@@ -257,7 +257,7 @@ class PaymentManager(BaseManager):
             payment_result = await self.gc.tpay_agent.create_payment(
                 agent_id=payer.agent_tpay_id,
                 receiving_agent_id=self.gc.treasury_agent_id,
-                amount=int(amount * 10 ** 6),
+                amount=amount,
                 currency=utils.GAME_TOKEN_SYMBOL,
                 settlement_network="solana",
                 func_stack_hashes=func_stack_hashes,
@@ -373,7 +373,7 @@ class PaymentManager(BaseManager):
             payment_result = await self.gc.tpay_agent.create_payment(
                 agent_id=self.gc.treasury_agent_id,
                 receiving_agent_id=recipient.agent_tpay_id,
-                amount=int(amount * 10 ** 6),
+                amount=amount,
                 currency=utils.GAME_TOKEN_SYMBOL,
                 settlement_network="solana",
                 func_stack_hashes=func_stack_hashes,

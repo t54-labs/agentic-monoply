@@ -40,7 +40,7 @@ MAINTENANCE_INTERVAL = 30  # Seconds between game count maintenance checks
 # Agent management configuration
 AGENTS_PER_GAME = NUM_PLAYERS     # Number of agents per game (should match NUM_PLAYERS)
 AGENT_INITIAL_BALANCE = 1500  # Starting balance for each game
-TREASURY_AGENT_ID = "agnt_d755a309-682b-49b7-b997-956efef2b591"
+TREASURY_AGENT_ID = "agnt_83a25f7c-90c9-4fb0-ac42-b3d594bc6235"
 
 def print_startup_config():
     """Print startup configuration for debugging"""
@@ -158,6 +158,7 @@ class AgentManager:
                         
                         # Create OpenAI agent instance
                         agent_instance = OpenAIAgent(
+                            agent_uid=agent_dict['agent_uid'],
                             player_id=-1,  # Will be set when joining a game
                             name=agent_dict['name']
                         )
@@ -850,7 +851,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
 
     try:
         gc = GameControllerV2(game_uid=game_uid, ws_manager=connection_manager_param, 
-                            game_db_id=game_db_id, participants=available_agents, treasury_agent_id="agnt_d755a309-682b-49b7-b997-956efef2b591")
+                            game_db_id=game_db_id, participants=available_agents, treasury_agent_id=TREASURY_AGENT_ID)
         
         # Set the game controller reference in the thread-safe instance if available
         if game_uid in game_instances:
@@ -877,7 +878,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
             else:
                 print(f"{Fore.RED}[Agent Error] Could not find agent instance for {agent_data['agent_uid']}{Style.RESET_ALL}")
                 # Fallback: create new agent instance
-                agent_instance = OpenAIAgent(player_id=i, name=agent_data['name'])
+                agent_instance = OpenAIAgent(player_id=i, name=agent_data['name'], agent_uid=agent_data['agent_uid'])
                 agents.append(agent_instance)
         
         await gc.send_event_to_frontend({"type": "init_log", "message": f"Initialized {len(agents)} persistent agents for G:{game_uid}."})
@@ -1701,32 +1702,33 @@ async def create_default_agents_api():
                 except Exception as tpay_error:
                     print(f"{Fore.RED}[TPay] Error creating account for {agent_data['name']}: {tpay_error}{Style.RESET_ALL}")
                 
-                # Create agent record in database (even if tpay failed)
-                agent_values = {
-                    "agent_uid": agent_uid,
-                    "name": agent_data['name'],
-                    "personality_prompt": agent_data['personality'],
-                    "memory_data": {},
-                    "preferences": {},
-                    "total_games_played": 0,
-                    "total_wins": 0,
-                    "tpay_account_id": tpay_account_id,  # Will be None if tpay creation failed
-                    "status": "active"
-                }
-                
-                stmt = insert(agents_table).values(agent_values).returning(agents_table.c.id)
-                result = session.execute(stmt)
-                agent_id = result.scalar_one_or_none()
-                
-                if agent_id:
-                    created_agents.append({
-                        "id": agent_id,
+                if tpay_account_id:
+                    # Create agent record in database (even if tpay failed)
+                    agent_values = {
                         "agent_uid": agent_uid,
                         "name": agent_data['name'],
-                        "personality": agent_data['personality'],
-                        "tpay_account_id": tpay_account_id,
-                        "tpay_status": "created" if tpay_account_id else "failed"
-                    })
+                        "personality_prompt": agent_data['personality'],
+                        "memory_data": {},
+                        "preferences": {},
+                        "total_games_played": 0,
+                        "total_wins": 0,
+                        "tpay_account_id": tpay_account_id,  # Will be None if tpay creation failed
+                        "status": "active"
+                    }
+                    
+                    stmt = insert(agents_table).values(agent_values).returning(agents_table.c.id)
+                    result = session.execute(stmt)
+                    agent_id = result.scalar_one_or_none()
+                    
+                    if agent_id:
+                        created_agents.append({
+                            "id": agent_id,
+                            "agent_uid": agent_uid,
+                            "name": agent_data['name'],
+                            "personality": agent_data['personality'],
+                            "tpay_account_id": tpay_account_id,
+                            "tpay_status": "created" if tpay_account_id else "failed"
+                        })
             
             session.commit()
         

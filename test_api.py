@@ -298,32 +298,32 @@ def main():
         time.sleep(2)  # 等待创建完成
         agents = api_tester.test_get_agents()  # 重新获取代理列表
     
-    # 测试配置更新
-    if config:
-        test_config = {
-            "concurrent_games": 1,
-            "auto_restart": True,
-            "maintenance_interval": 60
-        }
-        api_tester.test_update_config(test_config)
+    # # 测试配置更新
+    # if config:
+    #     test_config = {
+    #         "concurrent_games": 1,
+    #         "auto_restart": True,
+    #         "maintenance_interval": 60
+    #     }
+    #     api_tester.test_update_config(test_config)
     
-    # 测试创建游戏令牌
-    if agents and agents.get('agents'):
-        token_data = {
-            "game_token": "AMNP",
-            "initial_balance": 1500.0,
-            "network": "solana"
-        }
-        api_tester.test_create_game_tokens(token_data)
+    # # 测试创建游戏令牌
+    # if agents and agents.get('agents'):
+    #     token_data = {
+    #         "game_token": "AMNP",
+    #         "initial_balance": 1500.0,
+    #         "network": "solana"
+    #     }
+    #     api_tester.test_create_game_tokens(token_data)
     
-    # 测试重置代理余额
-    if agents and agents.get('agents'):
-        first_agent = agents['agents'][0]
-        balance_data = {
-            "game_token": "AMNP",
-            "new_balance": 2000.0
-        }
-        api_tester.test_reset_agent_balance(first_agent['id'], balance_data)
+    # # 测试重置代理余额
+    # if agents and agents.get('agents'):
+    #     first_agent = agents['agents'][0]
+    #     balance_data = {
+    #         "game_token": "AMNP",
+    #         "new_balance": 2000.0
+    #     }
+    #     api_tester.test_reset_agent_balance(first_agent['id'], balance_data)
     
     # # 创建新游戏
     # api_tester.test_create_game()

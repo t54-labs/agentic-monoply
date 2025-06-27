@@ -46,8 +46,8 @@ class Player:
                 # Use synchronous tpay SDK to get real-time balance
                 balance = tpay.get_agent_asset_balance(agent_id=self.agent_tpay_id, network="solana", asset=utils.GAME_TOKEN_SYMBOL)
                 if balance is not None:
-                    # Update local cache with real value
-                    self._money = float(balance / 10 ** 6)
+                    # Update local cache with real value (no division needed - TPay returns direct amount)
+                    self._money = balance
                     return self._money
                 else:
                     print(f"[Player] Warning: Could not get tpay balance for agent {self.agent_tpay_id}, using cached value ${self._money}")

@@ -957,6 +957,9 @@ class GameControllerV2:
             } if self.auction_in_progress else None
         }
         
+        # Debug log for balance issues
+        self.log_event(f"[DEBUG BALANCE] P{player_id} ({player.name}) - Agent sees balance: ${player.money}, TPay ID: {player.agent_tpay_id}", "debug_balance")
+        
         # Build board squares information
         for i, square_obj in enumerate(self.board.squares):
             sq_info = {

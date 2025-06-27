@@ -182,12 +182,12 @@ class GameControllerV2:
         return await self.payment_manager.create_tpay_payment_player_to_player(payer, recipient, amount, reason, agent_decision_context)
         
     async def _create_tpay_payment_player_to_system(self, payer: Player, amount: float, reason: str, 
-                                             event_description: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                                             event_description: Optional[str] = None) -> bool:
         """Delegate to PaymentManager"""
         return await self.payment_manager.create_tpay_payment_player_to_system(payer, amount, reason, event_description)
         
     async def _create_tpay_payment_system_to_player(self, recipient: Player, amount: float, reason: str,
-                                             event_description: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                                             event_description: Optional[str] = None) -> bool:
         """Delegate to PaymentManager"""
         return await self.payment_manager.create_tpay_payment_system_to_player(recipient, amount, reason, event_description)
         
@@ -271,21 +271,17 @@ class GameControllerV2:
         self.log_event(f"{player.name} passed GO!")
         
         # Create TPay payment from system to player
-        payment_result = await self._create_tpay_payment_system_to_player(
+        payment_success = await self._create_tpay_payment_system_to_player(
             recipient=player,
             amount=float(go_salary),
             reason="GO salary",
             event_description=f"{player.name} passed GO and collects ${go_salary} salary"
         )
         
-        if payment_result:
-            payment_success = await self._wait_for_payment_completion(payment_result)
-            if payment_success:
-                self.log_event(f"{player.name} collected ${go_salary} for passing GO")
-            else:
-                self.log_event(f"[Error] {player.name} GO salary payment failed")
+        if payment_success:
+            self.log_event(f"{player.name} collected ${go_salary} for passing GO")
         else:
-            self.log_event(f"[Error] {player.name} GO salary payment could not be initiated")
+            self.log_event(f"[Error] {player.name} GO salary payment failed")
         
     async def land_on_square(self, player: Player) -> None:
         """Handle landing on square with full logic matching original GameController"""
@@ -402,24 +398,18 @@ class GameControllerV2:
         self.log_event(f"{player.name} has to pay ${amount_due} for {tax_sq.name}.")
         
         # Use TPay for tax payment to system
-        payment_result = await self._create_tpay_payment_player_to_system(
+        payment_success = await self._create_tpay_payment_player_to_system(
             payer=player,
             amount=float(amount_due),
             reason=f"tax - {tax_sq.name}",
             event_description=f"{player.name} paid ${amount_due} tax on {tax_sq.name}"
         )
         
-        if payment_result:
-            payment_success = await self._wait_for_payment_completion(payment_result)
-            
-            if payment_success:
-                self.log_event(f"{player.name} successfully paid ${amount_due} tax.")
-                self._resolve_current_action_segment()
-            else:
-                self.log_event(f"{player.name} failed to pay ${amount_due} tax - payment failed.")
-                self._check_and_handle_bankruptcy(player, debt_to_creditor=amount_due, creditor=None)
+        if payment_success:
+            self.log_event(f"{player.name} successfully paid ${amount_due} tax.")
+            self._resolve_current_action_segment()
         else:
-            self.log_event(f"{player.name} failed to pay ${amount_due} tax - payment could not be initiated.")
+            self.log_event(f"{player.name} failed to pay ${amount_due} tax.")
             self._check_and_handle_bankruptcy(player, debt_to_creditor=amount_due, creditor=None)
             
     def _handle_special_square_landing(self, player: Player, special_sq: BaseSquare) -> None:
@@ -461,22 +451,17 @@ class GameControllerV2:
         # --- Simple Effects (resolve immediately) ---
         if action_type == "receive_money":
             # Use TPay for bank reward payment to player
-            payment_result = await self._create_tpay_payment_system_to_player(
+            payment_success = await self._create_tpay_payment_system_to_player(
                 recipient=player,
                 amount=float(value),
                 reason="card reward",
                 event_description=f"{player.name} received ${value} from card: {description}"
             )
             
-            if payment_result:
-                payment_success = await self._wait_for_payment_completion(payment_result)
-                
-                if payment_success:
-                    self.log_event(f"{player.name} received ${value}.")
-                else:
-                    self.log_event(f"{player.name} failed to receive ${value} - payment failed.")
+            if payment_success:
+                self.log_event(f"{player.name} received ${value}.")
             else:
-                self.log_event(f"{player.name} failed to receive ${value} - payment could not be initiated.")
+                self.log_event(f"{player.name} failed to receive ${value}.")
                 
             self._resolve_current_action_segment()
         elif action_type == "get_out_of_jail_card":
@@ -491,24 +476,18 @@ class GameControllerV2:
         # --- Effects involving Payment (might lead to bankruptcy decision) ---
         elif action_type == "pay_money":
             # Use TPay for card penalty payment to system
-            payment_result = await self._create_tpay_payment_player_to_system(
+            payment_success = await self._create_tpay_payment_player_to_system(
                 payer=player,
                 amount=float(value),
                 reason=f"card penalty - {description}",
                 event_description=f"{player.name} paid ${value} from card: {description}"
             )
             
-            if payment_result:
-                payment_success = await self._wait_for_payment_completion(payment_result)
-                
-                if payment_success:
-                    self.log_event(f"{player.name} successfully paid ${value} card penalty.")
-                    self._resolve_current_action_segment()
-                else:
-                    self.log_event(f"{player.name} failed to pay ${value} card penalty - payment failed.")
-                    self._check_and_handle_bankruptcy(player, debt_to_creditor=value, creditor=None)
+            if payment_success:
+                self.log_event(f"{player.name} successfully paid ${value} card penalty.")
+                self._resolve_current_action_segment()
             else:
-                self.log_event(f"{player.name} failed to pay ${value} card penalty - payment could not be initiated.")
+                self.log_event(f"{player.name} failed to pay ${value} card penalty.")
                 self._check_and_handle_bankruptcy(player, debt_to_creditor=value, creditor=None)
         elif action_type == "street_repairs":
             house_cost, hotel_cost = value 
@@ -521,24 +500,18 @@ class GameControllerV2:
                 self.log_event(f"{player.name} needs to pay ${total_repair_cost} for street repairs.")
                 
                 # Use TPay for street repairs payment to system
-                payment_result = await self._create_tpay_payment_player_to_system(
+                payment_success = await self._create_tpay_payment_player_to_system(
                     payer=player,
                     amount=float(total_repair_cost),
                     reason="street repairs",
                     event_description=f"{player.name} paid ${total_repair_cost} for street repairs"
                 )
                 
-                if payment_result:
-                    payment_success = await self._wait_for_payment_completion(payment_result)
-                    
-                    if payment_success:
-                        self.log_event(f"{player.name} successfully paid ${total_repair_cost} for street repairs.")
-                        self._resolve_current_action_segment()
-                    else:
-                        self.log_event(f"{player.name} failed to pay ${total_repair_cost} for street repairs - payment failed.")
-                        self._check_and_handle_bankruptcy(player, debt_to_creditor=total_repair_cost, creditor=None)
+                if payment_success:
+                    self.log_event(f"{player.name} successfully paid ${total_repair_cost} for street repairs.")
+                    self._resolve_current_action_segment()
                 else:
-                    self.log_event(f"{player.name} failed to pay ${total_repair_cost} for street repairs - payment could not be initiated.")
+                    self.log_event(f"{player.name} failed to pay ${total_repair_cost} for street repairs.")
                     self._check_and_handle_bankruptcy(player, debt_to_creditor=total_repair_cost, creditor=None)
             else:
                 self.log_event(f"{player.name} has no properties with buildings for street repairs.")

@@ -128,36 +128,30 @@ class JailManager(BaseManager):
                 return {"success": False, "message": f"{player.name} cannot afford ${bail_amount} bail"}
         
         # Execute TPay payment for bail
-        payment_result = await self.gc.payment_manager.create_tpay_payment_player_to_system(
+        payment_success = await self.gc.payment_manager.create_tpay_payment_player_to_system(
             payer=player,
             amount=float(bail_amount),
             reason="jail bail",
             event_description=f"{player.name} paid ${bail_amount} bail to get out of jail"
         )
         
-        if payment_result:
-            payment_success = await self.gc.payment_manager._wait_for_payment_completion(payment_result)
+        if payment_success:
+            # Release from jail
+            player.leave_jail()
+            self.log_event(f"{player.name} paid ${bail_amount} bail and is released from jail", "jail_event")
             
-            if payment_success:
-                # Release from jail
-                player.leave_jail()
-                self.log_event(f"{player.name} paid ${bail_amount} bail and is released from jail", "jail_event")
-                
-                # Player can now roll dice for normal movement
-                self.gc._resolve_current_action_segment()
-                
-                return {
-                    "success": True,
-                    "message": f"{player.name} paid bail and is free!",
-                    "amount_paid": bail_amount,
-                    "released": True
-                }
-            else:
-                self.log_event(f"{player.name} bail payment failed", "error_jail")
-                return {"success": False, "message": "Bail payment failed"}
+            # Player can now roll dice for normal movement
+            self.gc._resolve_current_action_segment()
+            
+            return {
+                "success": True,
+                "message": f"{player.name} paid bail and is free!",
+                "amount_paid": bail_amount,
+                "released": True
+            }
         else:
-            self.log_event(f"{player.name} bail payment could not be initiated", "error_jail")
-            return {"success": False, "message": "Bail payment could not be initiated"}
+            self.log_event(f"{player.name} bail payment failed", "error_jail")
+            return {"success": False, "message": "Bail payment failed"}
     
     def use_card_to_get_out_of_jail(self, player_id: int, params: Dict[str, Any]) -> Dict[str, Any]:
         """

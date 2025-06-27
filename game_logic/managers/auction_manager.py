@@ -77,28 +77,20 @@ class AuctionManager(BaseManager):
             self.log_event(f"Auction for {prop_name} won by {winner.name} for ${price_paid}.", "auction_event")
             
             # Use TPay for auction payment to system
-            payment_result = await self.gc.payment_manager.create_tpay_payment_player_to_system(
+            payment_success = await self.gc.payment_manager.create_tpay_payment_player_to_system(
                 payer=winner,
                 amount=float(price_paid),
                 reason=f"auction payment - {prop_name}",
                 event_description=f"{winner.name} won auction for {prop_name} at ${price_paid}"
             )
             
-            if payment_result:
-                payment_success = await self.gc.payment_manager._wait_for_payment_completion(payment_result)
-                
-                if payment_success:
-                    property_square.owner_id = winner.player_id
-                    winner.add_property_id(prop_id)
-                    self.log_event(f"{winner.name} now owns {prop_name}.", "auction_event")
-                else:
-                    self.log_event(f"{winner.name} failed to pay for {prop_name} - auction payment failed.", "error_auction")
-                    # Handle bankruptcy if needed
-                    self.gc.bankruptcy_manager.check_and_handle_bankruptcy(winner, debt_to_creditor=price_paid, creditor=None)
-                    if isinstance(property_square, PurchasableSquare): 
-                        property_square.owner_id = None
+            if payment_success:
+                property_square.owner_id = winner.player_id
+                winner.add_property_id(prop_id)
+                self.log_event(f"{winner.name} now owns {prop_name}.", "auction_event")
             else:
-                self.log_event(f"{winner.name} failed to pay for {prop_name} - auction payment could not be initiated.", "error_auction")
+                self.log_event(f"{winner.name} failed to pay for {prop_name} - auction payment failed.", "error_auction")
+                # Handle bankruptcy if needed
                 self.gc.bankruptcy_manager.check_and_handle_bankruptcy(winner, debt_to_creditor=price_paid, creditor=None)
                 if isinstance(property_square, PurchasableSquare): 
                     property_square.owner_id = None 

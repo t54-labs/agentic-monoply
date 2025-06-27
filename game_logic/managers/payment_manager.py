@@ -165,7 +165,7 @@ class PaymentManager(BaseManager):
             return False
     
     async def create_tpay_payment_player_to_system(self, payer: Player, amount: float, reason: str, 
-                                                  event_description: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                                                  event_description: Optional[str] = None) -> bool:
         """
         Create a TPay payment from a player to the system/treasury.
         
@@ -176,7 +176,7 @@ class PaymentManager(BaseManager):
             event_description: Optional description of the event
             
         Returns:
-            Optional[Dict[str, Any]]: Payment result or None if failed
+            bool: True if payment was successful, False otherwise
         """
         self.log_event(f"Initiating system payment: {payer.name} -> Treasury ${amount} ({reason})", "debug_payment")
         
@@ -247,7 +247,7 @@ class PaymentManager(BaseManager):
         # Check if payer has sufficient funds
         if payer.money < amount:
             self.log_event(f"{payer.name} has insufficient funds for ${amount} system payment", "error_payment")
-            return None
+            return False
             
         try:
             # Get function stack hashes
@@ -272,22 +272,21 @@ class PaymentManager(BaseManager):
                 payment_success = await self._wait_for_payment_completion(payment_result)
                 
                 if payment_success:
-                    # Update player balance from TPay
                     self.log_event(f"System payment completed: {payer.name} -> Treasury ${amount}", "success_payment")
-                    return payment_result
+                    return True
                 else:
                     self.log_event(f"System payment failed to complete: {payer.name} -> Treasury ${amount}", "error_payment")
-                    return None
+                    return False
             else:
                 self.log_event(f"System payment creation failed: {payer.name} -> Treasury ${amount}", "error_payment")
-                return None
+                return False
                 
         except Exception as e:
             self.log_event(f"System payment exception: {payer.name} -> Treasury ${amount} - {str(e)}", "error_payment")
-            return None
+            return False
     
     async def create_tpay_payment_system_to_player(self, recipient: Player, amount: float, reason: str,
-                                                  event_description: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                                                  event_description: Optional[str] = None) -> bool:
         """
         Create a TPay payment from the system/treasury to a player.
         
@@ -298,7 +297,7 @@ class PaymentManager(BaseManager):
             event_description: Optional description of the event
             
         Returns:
-            Optional[Dict[str, Any]]: Payment result or None if failed
+            bool: True if payment was successful, False otherwise
         """
         self.log_event(f"Initiating system payment: Treasury -> {recipient.name} ${amount} ({reason})", "debug_payment")
         
@@ -389,19 +388,18 @@ class PaymentManager(BaseManager):
                 payment_success = await self._wait_for_payment_completion(payment_result)
                 
                 if payment_success:
-                    # Update player balance from TPay
                     self.log_event(f"System payment completed: Treasury -> {recipient.name} ${amount}", "success_payment")
-                    return payment_result
+                    return True
                 else:
                     self.log_event(f"System payment failed to complete: Treasury -> {recipient.name} ${amount}", "error_payment")
-                    return None
+                    return False
             else:
                 self.log_event(f"System payment creation failed: Treasury -> {recipient.name} ${amount}", "error_payment")
-                return None
+                return False
                 
         except Exception as e:
             self.log_event(f"System payment exception: Treasury -> {recipient.name} ${amount} - {str(e)}", "error_payment")
-            return None
+            return False
     
     async def _wait_for_payment_completion(self, payment_result: Dict[str, Any], timeout_seconds: int = 30) -> bool:
         """
@@ -575,7 +573,7 @@ class PaymentManager(BaseManager):
                 payment_success = await self.create_tpay_payment_player_to_player(
                     payer=other_player,
                     recipient=player,
-                    amount=int(amount_each * 10 ** 6),
+                    amount=float(amount_each),
                     reason=f"card effect payment to {player.name}",
                     agent_decision_context={
                         "card_effect": "collect_from_players",
@@ -631,7 +629,7 @@ class PaymentManager(BaseManager):
                 payment_success = await self.create_tpay_payment_player_to_player(
                     payer=player,
                     recipient=other_player,
-                    amount=int(amount_each * 10 ** 6),
+                    amount=float(amount_each),
                     reason=f"card effect payment to {other_player.name}",
                     agent_decision_context={
                         "card_effect": "pay_players",

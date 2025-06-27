@@ -84,19 +84,13 @@ class PropertyManager(BaseManager):
         )
         
         if payment_success:
-            payment_completed = await self.gc.payment_manager._wait_for_payment_completion(payment_success)
+            # Build the house
+            property_square.num_houses += 1
             
-            if payment_completed:
-                # Build the house
-                property_square.num_houses += 1
-                
-                self.log_event(f"{player.name} built house on {property_square.name} (now has {property_square.num_houses} houses)", "success_property")
-                return True
-            else:
-                self.log_event(f"Payment failed for house construction on {property_square.name}", "error_property")
-                return False
+            self.log_event(f"{player.name} built house on {property_square.name} (now has {property_square.num_houses} houses)", "success_property")
+            return True
         else:
-            self.log_event(f"Payment could not be initiated for house construction on {property_square.name}", "error_property")
+            self.log_event(f"Payment failed for house construction on {property_square.name}", "error_property")
             return False
     
     async def sell_house_on_property(self, player_id: int, property_id: int) -> bool:
@@ -160,22 +154,10 @@ class PropertyManager(BaseManager):
         )
         
         if payment_success:
-            payment_completed = await self.gc.payment_manager._wait_for_payment_completion(payment_success)
-            
-            if payment_completed:
-                
-                self.log_event(f"{player.name} sold {building_type} from {property_square.name} for ${sale_price}", "success_property")
-                return True
-            else:
-                self.log_event(f"Payment failed for {building_type} sale from {property_square.name}", "error_property")
-                # Revert the building change
-                if building_type == "hotel":
-                    property_square.num_houses = 5
-                else:
-                    property_square.num_houses += 1
-                return False
+            self.log_event(f"{player.name} sold {building_type} from {property_square.name} for ${sale_price}", "success_property")
+            return True
         else:
-            self.log_event(f"Payment could not be initiated for {building_type} sale from {property_square.name}", "error_property")
+            self.log_event(f"Payment failed for {building_type} sale from {property_square.name}", "error_property")
             # Revert the building change
             if building_type == "hotel":
                 property_square.num_houses = 5
@@ -233,19 +215,13 @@ class PropertyManager(BaseManager):
         )
         
         if payment_success:
-            payment_completed = await self.gc.payment_manager._wait_for_payment_completion(payment_success)
+            # Mortgage the property
+            property_square.is_mortgaged = True
             
-            if payment_completed:
-                # Mortgage the property
-                property_square.is_mortgaged = True
-                
-                self.log_event(f"{player.name} mortgaged {property_square.name} for ${mortgage_amount}", "success_property")
-                return True
-            else:
-                self.log_event(f"Payment failed for mortgaging {property_square.name}", "error_property")
-                return False
+            self.log_event(f"{player.name} mortgaged {property_square.name} for ${mortgage_amount}", "success_property")
+            return True
         else:
-            self.log_event(f"Payment could not be initiated for mortgaging {property_square.name}", "error_property")
+            self.log_event(f"Payment failed for mortgaging {property_square.name}", "error_property")
             return False
     
     async def unmortgage_property_for_player(self, player_id: int, property_id: int) -> bool:
@@ -299,19 +275,13 @@ class PropertyManager(BaseManager):
         )
         
         if payment_success:
-            payment_completed = await self.gc.payment_manager._wait_for_payment_completion(payment_success)
+            # Unmortgage the property
+            property_square.is_mortgaged = False
             
-            if payment_completed:
-                # Unmortgage the property
-                property_square.is_mortgaged = False
-                
-                self.log_event(f"{player.name} unmortgaged {property_square.name} for ${unmortgage_cost}", "success_property")
-                return True
-            else:
-                self.log_event(f"Payment failed for unmortgaging {property_square.name}", "error_property")
-                return False
+            self.log_event(f"{player.name} unmortgaged {property_square.name} for ${unmortgage_cost}", "success_property")
+            return True
         else:
-            self.log_event(f"Payment could not be initiated for unmortgaging {property_square.name}", "error_property")
+            self.log_event(f"Payment failed for unmortgaging {property_square.name}", "error_property")
             return False
     
     async def execute_buy_property_decision(self, player_id: int, property_id_to_buy: int) -> bool:
@@ -353,20 +323,14 @@ class PropertyManager(BaseManager):
         )
         
         if payment_success:
-            payment_completed = await self.gc.payment_manager._wait_for_payment_completion(payment_success)
+            # Complete the purchase
+            property_square.owner_id = player_id
+            player.add_property_id(property_id_to_buy)
             
-            if payment_completed:
-                # Complete the purchase
-                property_square.owner_id = player_id
-                player.add_property_id(property_id_to_buy)
-                
-                self.log_event(f"{player.name} successfully bought {property_square.name} for ${property_square.price}", "success_property")
-                return True
-            else:
-                self.log_event(f"Payment failed for buying {property_square.name}", "error_property")
-                return False
+            self.log_event(f"{player.name} successfully bought {property_square.name} for ${property_square.price}", "success_property")
+            return True
         else:
-            self.log_event(f"Payment could not be initiated for buying {property_square.name}", "error_property")
+            self.log_event(f"Payment failed for buying {property_square.name}", "error_property")
             return False
     
     def calculate_rent(self, property_square: PurchasableSquare, dice_roll: Optional[int] = None) -> int:
@@ -459,17 +423,11 @@ class PropertyManager(BaseManager):
         )
         
         if payment_success:
-            payment_completed = await self.gc.payment_manager._wait_for_payment_completion(payment_success)
+            # Build the hotel (set num_houses to 5 to represent hotel)
+            property_square.num_houses = 5
             
-            if payment_completed:
-                # Build the hotel (set num_houses to 5 to represent hotel)
-                property_square.num_houses = 5
-                
-                self.log_event(f"{player.name} built hotel on {property_square.name}", "success_property")
-                return True
-            else:
-                self.log_event(f"Payment failed for hotel construction on {property_square.name}", "error_property")
-                return False
+            self.log_event(f"{player.name} built hotel on {property_square.name}", "success_property")
+            return True
         else:
-            self.log_event(f"Payment could not be initiated for hotel construction on {property_square.name}", "error_property")
+            self.log_event(f"Payment failed for hotel construction on {property_square.name}", "error_property")
             return False 

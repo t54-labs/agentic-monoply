@@ -35,7 +35,7 @@ from sqlalchemy import insert, update, select, func
 from sqlalchemy.orm import Session 
 
 # Game simulation configuration
-CONCURRENT_GAMES_COUNT = 1  # Number of games to run simultaneously
+CONCURRENT_GAMES_COUNT = 10  # Number of games to run simultaneously
 AUTO_RESTART_GAMES = True  # Whether to start new games when current ones finish
 GAME_COUNTER = 0  # Global counter for unique game numbering
 MAINTENANCE_INTERVAL = 30  # Seconds between game count maintenance checks
@@ -522,6 +522,16 @@ class ThreadSafeGameInstance:
                                 message.get('player_name', ''),
                                 message.get('event_data', {})
                             )
+                    elif message.get('type') == 'action_error_notification':
+                        # Handle action error notification for Telegram
+                        try:
+                            from telegram_notifier import get_telegram_notifier
+                            telegram_notifier = get_telegram_notifier()
+                            if telegram_notifier and telegram_notifier.enabled:
+                                error_data = message.get('data', {})
+                                await telegram_notifier.notify_action_error(error_data)
+                        except Exception as e:
+                            print(f"{Fore.RED}[Game Thread] Error sending action error notification: {e}{Style.RESET_ALL}")
                     else:
                         # Send regular message via connection manager in main thread
                         await self.connection_manager.broadcast_to_game(self.game_uid, message)
@@ -1139,6 +1149,82 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 if not current_acting_player.is_bankrupt: 
                     player_state_data_after_action = gc.get_game_state_for_agent(current_acting_player.player_id)
                     await gc.send_event_to_frontend({"type": "player_state_update", "data": player_state_data_after_action})
+
+                # Print detailed error information and send Telegram notification for action errors
+                if action_result.get("status") == "error":
+                    # Print detailed error information to console
+                    print(f"{Fore.RED}╭{'─' * 80}╮{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│ 🚨 ACTION EXECUTION FAILED {' ' * 49}│{Style.RESET_ALL}")
+                    print(f"{Fore.RED}├{'─' * 80}┤{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│ 🎮 Game ID:      {game_uid:<61}│{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│ 🔄 Turn:         {gc.turn_count:<61}│{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│ 🤖 Player:       {current_acting_player.name} (P{active_player_id}){' ' * (61 - len(current_acting_player.name) - len(str(active_player_id)) - 4)}│{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│ 💰 Player Money: ${current_acting_player.money:<60}│{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│ 📍 Position:     {current_acting_player.position:<61}│{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│ 🎯 Action:       {chosen_tool_name:<61}│{Style.RESET_ALL}")
+                    print(f"{Fore.RED}├{'─' * 80}┤{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│ 📋 Parameters:                                                                │{Style.RESET_ALL}")
+                    
+                    # Format parameters nicely
+                    params_str = str(params) if params else "{}"
+                    if len(params_str) > 74:
+                        params_str = params_str[:71] + "..."
+                    print(f"{Fore.RED}│   {params_str:<75}│{Style.RESET_ALL}")
+                    
+                    print(f"{Fore.RED}├{'─' * 80}┤{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│ ❌ Error Message:                                                            │{Style.RESET_ALL}")
+                    
+                    # Format error message with word wrapping
+                    error_message = action_result.get('message', 'Unknown error')
+                    error_lines = []
+                    words = error_message.split()
+                    current_line = ""
+                    
+                    for word in words:
+                        if len(current_line + word + " ") <= 75:
+                            current_line += word + " "
+                        else:
+                            if current_line:
+                                error_lines.append(current_line.strip())
+                            current_line = word + " "
+                    
+                    if current_line:
+                        error_lines.append(current_line.strip())
+                    
+                    for line in error_lines:
+                        print(f"{Fore.RED}│   {line:<75}│{Style.RESET_ALL}")
+                    
+                    # Add game state information if available
+                    print(f"{Fore.RED}├{'─' * 80}┤{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│ 🎲 Game State:                                                               │{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│   Pending Decision: {gc.pending_decision_type or 'None':<51}│{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│   Dice Processed:   {str(gc.dice_roll_outcome_processed):<51}│{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│   In Jail:          {str(current_acting_player.in_jail):<51}│{Style.RESET_ALL}")
+                    print(f"{Fore.RED}│   Auction Active:   {str(gc.auction_in_progress):<51}│{Style.RESET_ALL}")
+                    print(f"{Fore.RED}╰{'─' * 80}╯{Style.RESET_ALL}")
+                    
+                    # Also log to the game controller for frontend visibility
+                    gc.log_event(f"[ACTION ERROR] P{active_player_id} ({current_acting_player.name}) - {chosen_tool_name}: {error_message}", "error_log")
+                    
+                    try:
+                        from telegram_notifier import get_telegram_notifier
+                        telegram_notifier = get_telegram_notifier()
+                        if telegram_notifier and telegram_notifier.enabled:
+                            error_data = {
+                                'game_uid': game_uid,
+                                'player_name': current_acting_player.name,
+                                'action_name': chosen_tool_name,
+                                'error_message': action_result.get('message', 'Unknown error'),
+                                'turn_number': gc.turn_count
+                            }
+                            # Use the threaded game instance to send message safely
+                            if game_uid in game_instances:
+                                game_instances[game_uid].send_message_safely({
+                                    'type': 'action_error_notification',
+                                    'data': error_data
+                                })
+                    except Exception as notify_error:
+                        print(f"{Fore.YELLOW}[Telegram] Failed to send action error notification: {notify_error}{Style.RESET_ALL}")
 
                 if action_result.get("status") == "error" or current_acting_player.is_bankrupt : player_turn_segment_active = False; break 
                 

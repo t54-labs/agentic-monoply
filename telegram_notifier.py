@@ -631,6 +631,38 @@ Thank you for participating! 🎮
         
         return await self.send_message(message)
     
+    async def notify_action_error(self, error_data: Dict[str, Any]) -> bool:
+        """Notify when an agent action fails during gameplay"""
+        if not self.enabled:
+            return False
+        
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        
+        game_uid = error_data.get('game_uid', 'unknown')
+        player_name = error_data.get('player_name', 'unknown player')
+        action_name = error_data.get('action_name', 'unknown action')
+        error_message = error_data.get('error_message', 'unknown error')
+        turn_number = error_data.get('turn_number', '?')
+        
+        # Truncate long error messages
+        if len(error_message) > 100:
+            error_message = error_message[:97] + "..."
+        
+        message = f"""
+⚠️ <b>Agent Action Failed</b>
+
+🎮 Game: <code>{game_uid}</code>
+🤖 Player: <b>{player_name}</b>
+🎯 Action: <code>{action_name}</code>
+🔄 Turn: {turn_number}
+
+📝 Error: {error_message}
+
+⏰ Time: {timestamp}
+        """.strip()
+        
+        return await self.send_message(message, disable_notification=True)  # Silent notification
+    
     async def notify_server_status(self, status_data: Dict[str, Any]) -> bool:
         """Notify about server status updates"""
         if not self.enabled:

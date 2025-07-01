@@ -18,20 +18,31 @@ def tool_roll_dice(gc: Any, player_id: int) -> Dict[str, Any]:
     """Player rolls the dice to take their main turn action (move, etc.)."""
     player = gc.players[player_id]
     try:
-        if player.is_bankrupt: return {"status": "failure", "message": "Bankrupt."}
+        if player.is_bankrupt: 
+            return {"status": "failure", "message": "Bankrupt."}
+            
         is_main_turn_player = (gc.current_player_index == player_id)
+        
         if not (is_main_turn_player and gc.pending_decision_type is None and not gc.auction_in_progress):
-             return {"status": "failure", "message": "Not in state for main turn roll."}
-        if not gc.dice_roll_outcome_processed: return {"status": "failure", "message": "Dice outcome pending."}
-        if player.in_jail: return {"status": "failure", "message": "In jail; use jail roll tool."}
+            return {"status": "failure", "message": "Not in state for main turn roll."}
+            
+        if not gc.dice_roll_outcome_processed: 
+            return {"status": "failure", "message": "Dice outcome pending."}
+            
+        if player.in_jail: 
+            return {"status": "failure", "message": "In jail; use jail roll tool."}
+            
         dice_roll = gc.roll_dice()
         went_to_jail = (gc.doubles_streak == 3 and player.in_jail)
         msg = f"Rolled {dice_roll}."
         if went_to_jail: msg += " Went to jail (3x doubles)."
         result = {"status": "success", "message": msg, "dice_roll": dice_roll, "went_to_jail": went_to_jail}
+        
         _log_agent_action(gc, player_id, "tool_roll_dice", {}, result)
         return result
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e: 
+        gc.log_event(f"[ERROR] tool_roll_dice P{player_id}: {type(e).__name__}: {str(e)}", "error_log")
+        return {"status": "error", "message": str(e)}
 
 @tradar_verifier
 def tool_end_turn(gc: Any, player_id: int) -> Dict[str, Any]:
@@ -73,15 +84,49 @@ def tool_buy_property(gc: Any, player_id: int, property_id: Optional[int] = None
             # No event loop running, we can use asyncio.run
             success = asyncio.run(gc.execute_buy_property_decision(player_id, target_property_id))
         
-        status_msg = "OK" if success else "FAIL"
-        if not success:
-            # Try to get a more specific reason if buy failed due to funds (GC method would log it)
-            if player.money < square_to_buy.price: # Re-check, though GC method does it.
+        if success:
+            # Purchase successful - clear pending decision and send success notification
+            gc._resolve_current_action_segment()
+            
+            # Send special event notification for successful purchase
+            if hasattr(gc, '_threaded_game_instance') and gc._threaded_game_instance:
+                gc._threaded_game_instance.send_message_safely({
+                    'type': 'special_event_notification',
+                    'game_uid': gc.game_uid,
+                    'event_type': 'property_buy',
+                    'player_name': player.name,
+                    'event_data': {
+                        'property_name': square_to_buy.name,
+                        'amount': square_to_buy.price
+                    }
+                })
+            
+            result = {"status": "success", "message": f"Buy {square_to_buy.name}: OK."}
+        else:
+            # Purchase failed - send failure notification but don't clear pending decision yet
+            status_msg = "FAIL"
+            if player.money < square_to_buy.price:
                 status_msg += " (Insufficient funds likely)"
             else:
                 status_msg += " (Reasons in GC log or property already owned/invalid state)"
-
-        result = {"status": "success" if success else "failure", "message": f"Buy {square_to_buy.name}: {status_msg}."}
+            
+            # Send special event notification for failed purchase
+            if hasattr(gc, '_threaded_game_instance') and gc._threaded_game_instance:
+                gc._threaded_game_instance.send_message_safely({
+                    'type': 'special_event_notification',
+                    'game_uid': gc.game_uid,
+                    'event_type': 'property_buy_failed',
+                    'player_name': player.name,
+                    'event_data': {
+                        'property_name': square_to_buy.name,
+                        'property_price': square_to_buy.price,
+                        'player_money': player.money,
+                        'reason': status_msg
+                    }
+                })
+            
+            result = {"status": "failure", "message": f"Buy {square_to_buy.name}: {status_msg}."}
+        
         _log_agent_action(gc, player_id, "tool_buy_property", {"property_id": target_property_id}, result)
         return result
     except Exception as e: 

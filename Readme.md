@@ -1,3 +1,99 @@
+# 🎮 Agentic Monopoly Platform
+
+An advanced AI-driven Monopoly simulation platform featuring autonomous agents, real-time blockchain payments, and comprehensive game analytics.
+
+## ✨ Core Features
+
+- 🤖 **AI Agent Gameplay**: Multiple OpenAI-powered agents with distinct personalities and strategies
+- 🌐 **Real-time WebSocket Interface**: Live game viewing with dynamic board updates  
+- 💰 **Blockchain Payment Integration**: TPay SDK for secure, auditable transactions
+- 📊 **Comprehensive Analytics**: Detailed game statistics and player performance tracking
+- 🎯 **Advanced Game Logic**: Full Monopoly ruleset with auctions, trades, property management
+- 📱 **Telegram Notifications**: Real-time game monitoring and status alerts
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Python 3.8+
+- PostgreSQL database
+- OpenAI API key
+- TPay/TLedger account (for payments)
+- Telegram Bot (optional, for notifications)
+
+### Installation
+
+1. **Clone the repository**
+   ```bash
+   git clone <repository-url>
+   cd monopoly
+   ```
+
+2. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configure environment variables**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your actual configuration values
+   ```
+
+4. **Set up Telegram notifications (optional)**
+   ```bash
+   # Follow the detailed guide in TELEGRAM_SETUP.md
+   # Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to your .env file
+   ```
+
+5. **Initialize the database**
+   ```bash
+   python -c "from database import create_db_and_tables; create_db_and_tables()"
+   ```
+
+6. **Create AI agents**
+   ```bash
+   # Use the admin API to create default agents
+   curl -X POST http://localhost:8000/api/admin/agents/create_defaults
+   ```
+
+7. **Start the server**
+   ```bash
+   python server.py
+   ```
+
+8. **Test Telegram notifications (optional)**
+   ```bash
+   python test_telegram_notifications.py
+   ```
+
+### Access Points
+
+- **Main Server**: http://localhost:8000
+- **Game Interface**: http://localhost:3000 (frontend)
+- **Admin Panel**: http://localhost:8000/docs
+- **Telegram Notifications**: Configured chat/group
+
+## 📱 Telegram Monitoring
+
+The platform includes comprehensive Telegram Bot integration for real-time monitoring:
+
+### Notification Types
+- 🚀 **Server Events**: Startup, shutdown, maintenance alerts
+- 🎮 **Game Events**: Game start/end, player rankings, turn summaries  
+- ⚡ **Special Events**: Property purchases, jail events, bankruptcies, trades
+- 🚨 **Error Alerts**: Critical system errors with context details
+
+### Setup Guide
+Detailed setup instructions available in [`TELEGRAM_SETUP.md`](TELEGRAM_SETUP.md)
+
+### Testing
+Run the notification test suite:
+```bash
+python test_telegram_notifications.py
+```
+
+## 🎯 Key Components
+
 # Agentic Monopoly: A Multi-Agent Economic Simulation Platform
 
 [![Core Unit Tests](https://github.com/t54-labs/agentic-monoply/actions/workflows/monopoly-tests.yml/badge.svg)](https://github.com/t54-labs/agentic-monoply/actions/workflows/monopoly-tests.yml)

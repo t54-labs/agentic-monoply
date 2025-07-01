@@ -129,19 +129,54 @@ class GameControllerV2:
     # ======= Core Game Methods (Delegate to Managers) =======
     
     def log_event(self, event_message: str, event_type: str = "game_log_event") -> None:
-        """Log events (preserved from original for now)"""
-        print(f"G_UID:{self.game_uid} - T{self.turn_count} - P{self.current_player_index if hasattr(self, 'current_player_index') else 'N/A'}: {event_message}") 
-        self.game_log.append(event_message)
-        if self.ws_manager:
-            message_to_send = {"type": event_type, "message": event_message, "game_uid": self.game_uid, "turn": self.turn_count}
-            if hasattr(self, 'loop') and self.loop and self.loop.is_running():
-                try:
-                    asyncio.run_coroutine_threadsafe(self.send_event_to_frontend(message_to_send), self.loop)
-                except Exception as e: 
-                    print(f"[WS Send Error G:{self.game_uid}] Failed to schedule send_event_to_frontend via run_coroutine_threadsafe: {e} - Msg: {event_message}")
-            else:
-                print(f"[WS Send Critical G:{self.game_uid}] No running event loop available in GC.log_event for threadsafe call. WS message for '{event_message}' will NOT be sent.")
+        """Log game event with timestamp - Thread-safe version"""
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        formatted_message = f"[{timestamp}] {event_message}"
         
+        # Always add to game log first - this is the most important part
+        self.game_log.append(formatted_message)
+        
+        # Try to send via WebSocket, but don't let failures break logging
+        try:
+            if hasattr(self, '_threaded_game_instance') and self._threaded_game_instance:
+                # Use thread-safe message sending for threaded games
+                ws_message = {
+                    "type": event_type,
+                    "message": formatted_message,
+                    "timestamp": timestamp,
+                    "game_id": self.game_uid
+                }
+                self._threaded_game_instance.send_message_safely(ws_message)
+        except Exception:
+            # Silently ignore WebSocket errors - the message is already in game_log
+            pass
+    
+    async def notify_special_event(self, event_type: str, player_name: str, event_data: Dict[str, Any] = None):
+        """Notify special game events (buy property, go to jail, trade, etc.)"""
+        try:
+            # Get game event handler and send notification
+            if hasattr(self, '_threaded_game_instance') and self._threaded_game_instance:
+                # In threaded game instance, we need to send via message queue
+                notification_message = {
+                    'type': 'special_event_notification',
+                    'event_type': event_type,
+                    'player_name': player_name,
+                    'game_uid': self.game_uid,
+                    'event_data': event_data or {}
+                }
+                self._threaded_game_instance.send_message_safely(notification_message)
+            else:
+                # Directly call event handler
+                from game_event_handler import get_game_event_handler
+                event_handler = get_game_event_handler()
+                if event_handler:
+                    combined_event_data = (event_data or {}).copy()
+                    combined_event_data['game_uid'] = self.game_uid
+                    await event_handler.handle_special_event(self.game_uid, event_type, player_name, combined_event_data)
+        except Exception as e:
+            self.log_event(f"[Warning] Failed to send special event notification: {e}", "warning_log")
+
     async def send_event_to_frontend(self, message_data: Dict[str, Any]):
         """Send events to frontend - Thread-safe via message queue"""
         if "game_id" not in message_data:
@@ -658,6 +693,32 @@ class GameControllerV2:
         self.log_event(f"{player.name} is going to jail!")
         player.go_to_jail()
         self.doubles_streak = 0 
+        
+        # Send jail event notification - fixed for thread safety
+        try:
+            # Check if we have a threaded game instance reference for safe communication
+            if hasattr(self, '_threaded_game_instance') and self._threaded_game_instance:
+                # Use thread-safe message sending
+                notification_message = {
+                    'type': 'special_event_notification',
+                    'game_uid': self.game_uid,
+                    'event_type': 'jail',
+                    'player_name': player.name,
+                    'event_data': {}
+                }
+                self._threaded_game_instance.send_message_safely(notification_message)
+            else:
+                # Fallback for non-threaded environments
+                try:
+                    loop = asyncio.get_running_loop()
+                    if loop.is_running():
+                        asyncio.create_task(self.notify_special_event('jail', player.name))
+                except (RuntimeError, AttributeError):
+                    # If no event loop is running or we're in wrong thread, just log
+                    self.log_event(f"[Info] {player.name} went to jail (notification skipped - no async context)")
+        except Exception as e:
+            self.log_event(f"[Warning] Failed to send jail notification for {player.name}: {e}")
+        
         self._resolve_current_action_segment()
 
     # ======= Placeholder Methods (To be completed) =======
@@ -666,11 +727,16 @@ class GameControllerV2:
                    test_mode_trade_details: Optional[Dict[str, Any]] = None,
                    test_mode_auction_property_id: Optional[int] = None) -> None:
         """Start game with comprehensive setup matching original GameController"""
+        import datetime
+        
         self.log_event(f"GameControllerV2.start_game() called. Game starting with {len(self.players)} players.")
         if not self.players:
             self.log_event("[Error] No players initialized. Cannot start game.", "error_log")
             self.game_over = True
             return
+        
+        # Record game start time for duration tracking
+        self.start_time = datetime.datetime.now()
         
         # Initialize game state
         self.current_player_index = random.randrange(len(self.players))

@@ -45,13 +45,13 @@ class StateManager(BaseManager):
         Advance to the next player's turn.
         """
         # Skip bankrupt players
-        original_index = self.current_player_index
+        original_index = self.gc.current_player_index
         attempts = 0
-        max_attempts = len(self.players)
+        max_attempts = len(self.gc.players)
         
         while attempts < max_attempts:
-            self.gc.current_player_index = (self.gc.current_player_index + 1) % len(self.players)
-            current_player = self.get_current_player()
+            self.gc.current_player_index = (self.gc.current_player_index + 1) % len(self.gc.players)
+            current_player = self.gc.get_current_player()
             
             if not current_player.is_bankrupt:
                 break
@@ -68,12 +68,12 @@ class StateManager(BaseManager):
         self.gc.dice_roll_outcome_processed = True
         self.clear_pending_decision()
         
-        # Increment turn count only when returning to the first player
-        if self.current_player_index <= original_index:
+        # Increment turn count only when returning to the first player (completing a round)
+        if self.gc.current_player_index <= original_index:
             self.gc.turn_count += 1
             
-        new_player = self.get_current_player()
-        self.log_event(f"Turn advanced to {new_player.name} (P{self.current_player_index}). Turn: {self.gc.turn_count}", "turn_advance")
+        new_player = self.gc.get_current_player()
+        self.log_event(f"Turn advanced to {new_player.name} (P{self.gc.current_player_index}). Turn: {self.gc.turn_count}", "turn_advance")
         
         # Handle start-of-turn conditions
         self._handle_turn_start_conditions(new_player)

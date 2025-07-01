@@ -26,6 +26,9 @@ from colorama import init, Fore as ColoramaFore, Style as ColoramaStyle
 # Import utils for tpay operations
 import utils
 
+# Import game event handler for notifications
+from game_event_handler import initialize_game_event_handler, get_game_event_handler
+
 # 2. Database and SQLAlchemy imports
 from database import create_db_and_tables, engine, games_table, players_table, game_turns_table, agent_actions_table, agents_table
 from sqlalchemy import insert, update, select, func
@@ -73,6 +76,10 @@ TLEDGER_API_SECRET = os.getenv("TLEDGER_API_SECRET")
 TLEDGER_PROJECT_ID = os.getenv("TLEDGER_PROJECT_ID")
 TLEDGER_BASE_URL = os.getenv("TLEDGER_BASE_URL")
 TREASURY_AGENT_ID = os.getenv("TREASURY_AGENT_ID")
+
+# Telegram configuration
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # 3. ConnectionManager class definition
 class ConnectionManager:
@@ -190,7 +197,7 @@ class AgentManager:
             for agent in selected_agents:
                 if agent in self.available_agents:
                     self.available_agents.remove(agent)
-                    print(f"{Fore.CYAN}[Agent Manager] Reserved agent {agent['name']} for new game{Style.RESET_ALL}")
+                    # print(f"{Fore.CYAN}[Agent Manager] Reserved agent {agent['name']} for new game{Style.RESET_ALL}")
             
             return selected_agents
     
@@ -198,13 +205,27 @@ class AgentManager:
         """Assign agents to a specific game (agents should already be removed from available pool)"""
         with self._lock:
             for agent in agents:
+                # Double-check agent status before assigning to game
+                try:
+                    with Session(engine) as session:
+                        stmt = select(agents_table.c.status).where(agents_table.c.agent_uid == agent['agent_uid'])
+                        current_status = session.execute(stmt).scalar_one_or_none()
+                        
+                        if current_status == 'inactive':
+                            print(f"{Fore.YELLOW}[Agent Manager] Agent {agent['name']} is inactive - skipping assignment to game {game_uid}{Style.RESET_ALL}")
+                            continue
+                            
+                except Exception as e:
+                    print(f"{Fore.RED}[Agent Manager] Error checking agent status for {agent['agent_uid']}: {e}{Style.RESET_ALL}")
+                    # Continue with assignment if we can't check status
+                
                 self.agents_in_game[agent['agent_uid']] = game_uid
                 # Update status in database
                 self._update_agent_status(agent['agent_uid'], 'in_game')
                 print(f"{Fore.GREEN}[Agent Manager] Assigned agent {agent['name']} to game {game_uid}{Style.RESET_ALL}")
     
     def release_agents_from_game(self, game_uid: str):
-        """Release agents back to available pool when game ends"""
+        """Release agents back to available pool when game ends, but only if they are still active"""
         with self._lock:
             agents_to_release = [agent_uid for agent_uid, g_uid in self.agents_in_game.items() if g_uid == game_uid]
             
@@ -212,7 +233,7 @@ class AgentManager:
                 # Remove from in_game mapping
                 del self.agents_in_game[agent_uid]
                 
-                # Find agent data and add back to available pool
+                # Check agent's current status in database before releasing
                 try:
                     with Session(engine) as session:
                         stmt = select(agents_table).where(agents_table.c.agent_uid == agent_uid)
@@ -220,24 +241,24 @@ class AgentManager:
                         agent_row = result.fetchone()
                         
                         if agent_row:
-                            agent_dict = {
-                                'id': agent_row.id,
-                                'agent_uid': agent_row.agent_uid,
-                                'name': agent_row.name,
-                                'personality_prompt': agent_row.personality_prompt,
-                                'memory_data': agent_row.memory_data or {},
-                                'preferences': agent_row.preferences or {},
-                                'total_games_played': agent_row.total_games_played,
-                                'total_wins': agent_row.total_wins,
-                                'tpay_account_id': agent_row.tpay_account_id,
-                                'status': 'active'
-                            }
-                            self.available_agents.append(agent_dict)
-                            
-                            # Update status in database
-                            self._update_agent_status(agent_uid, 'active')
-                            
-                            print(f"{Fore.GREEN}[Agent Manager] Released agent {agent_dict['name']} back to available pool{Style.RESET_ALL}")
+                            # Only add back to available pool if agent is still active in database
+                            if agent_row.status == 'active':
+                                agent_dict = {
+                                    'id': agent_row.id,
+                                    'agent_uid': agent_row.agent_uid,
+                                    'name': agent_row.name,
+                                    'personality_prompt': agent_row.personality_prompt,
+                                    'memory_data': agent_row.memory_data or {},
+                                    'preferences': agent_row.preferences or {},
+                                    'total_games_played': agent_row.total_games_played,
+                                    'total_wins': agent_row.total_wins,
+                                    'tpay_account_id': agent_row.tpay_account_id,
+                                    'status': agent_row.status  # Use actual database status
+                                }
+                                self.available_agents.append(agent_dict)
+                                print(f"{Fore.GREEN}[Agent Manager] Released agent {agent_dict['name']} back to available pool{Style.RESET_ALL}")
+                            else:
+                                print(f"{Fore.YELLOW}[Agent Manager] Agent {agent_row.name} has status '{agent_row.status}' - not adding back to available pool{Style.RESET_ALL}")
                             
                 except Exception as e:
                     print(f"{Fore.RED}[Agent Manager] Error releasing agent {agent_uid}: {e}{Style.RESET_ALL}")
@@ -309,6 +330,9 @@ class ThreadSafeGameInstance:
         if self.running:
             print(f"{Fore.YELLOW}[Game Thread] Game {self.game_uid} is already running{Style.RESET_ALL}")
             return
+        
+        # Set running flag BEFORE starting threads to avoid race condition
+        self.running = True
             
         # Start message queue processor in main thread
         self._start_message_queue_processor()
@@ -322,7 +346,7 @@ class ThreadSafeGameInstance:
         # Create new event loop for this thread
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        self.running = True
+        # running is already set to True in start() method
         
         try:
             print(f"{Fore.CYAN}[Game Thread] Running game {self.game_uid} in thread {threading.current_thread().ident}{Style.RESET_ALL}")
@@ -342,7 +366,7 @@ class ThreadSafeGameInstance:
             print(f"  - Thread ID: {threading.current_thread().ident}")
             print(f"  - Loop running: {self.loop and not self.loop.is_closed() if self.loop else 'No loop'}")
         finally:
-            self.running = False
+            self.running = False  # Set to False when game truly ends
             
             print(f"{Fore.YELLOW}[Game Thread] Cleaning up game {self.game_uid}...{Style.RESET_ALL}")
             
@@ -365,7 +389,7 @@ class ThreadSafeGameInstance:
                 except Exception as e:
                     print(f"{Fore.RED}[Game Thread] Error closing loop for {self.game_uid}: {e}{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}[Game Thread] Game {self.game_uid} thread finished{Style.RESET_ALL}")
-            
+    
     async def _run_game_async(self):
         """Run game logic asynchronously in separate thread's event loop"""
         # Run the original start_monopoly_game_instance logic here
@@ -470,8 +494,20 @@ class ThreadSafeGameInstance:
                     # Get message from async queue with timeout
                     message = await asyncio.wait_for(self._message_queue.get(), timeout=1.0)
                     
-                    # Send message via connection manager in main thread
-                    await self.connection_manager.broadcast_to_game(self.game_uid, message)
+                    # Check if this is a special event notification
+                    if message.get('type') == 'special_event_notification':
+                        # Handle special event notification
+                        event_handler = get_game_event_handler()
+                        if event_handler:
+                            await event_handler.handle_special_event(
+                                message.get('game_uid', self.game_uid),
+                                message.get('event_type', ''),
+                                message.get('player_name', ''),
+                                message.get('event_data', {})
+                            )
+                    else:
+                        # Send regular message via connection manager in main thread
+                        await self.connection_manager.broadcast_to_game(self.game_uid, message)
                     
                     # Mark task as done
                     self._message_queue.task_done()
@@ -929,6 +965,10 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
 
         gc.start_game() # This sets turn_count to 1 and determines starting player
         
+        # Send game start notification
+        event_handler = get_game_event_handler()
+        await event_handler.handle_game_start(gc.game_uid, gc, MAX_TURNS)
+        
         # Update lobby again after gc.start_game() to reflect "in_progress" and correct turn 1 info if needed
         # Or rely on the first player_state_update from the game loop to trigger a more general game_update to lobby
         # For simplicity now, we could send a game_status_update here.
@@ -1090,8 +1130,14 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                     if action_result.get("status") == "success":
                         if active_player_id == current_main_turn_player_id: roll_action_taken_this_main_turn_segment = True
                         if not action_result.get("went_to_jail", False):
-                            dice_val = action_result.get("dice_roll", gc.dice)
-                            if dice_val and sum(dice_val) > 0 : await gc._move_player(current_acting_player, sum(dice_val))
+                            dice_val = action_result.get("dice_roll")
+                            if dice_val and sum(dice_val) > 0 : 
+                                await gc._move_player(current_acting_player, sum(dice_val))
+                                print(f"{Fore.CYAN}[DEBUG MOVE] {current_acting_player.name} moved {sum(dice_val)} steps from dice {dice_val} to position {current_acting_player.position}{Style.RESET_ALL}")
+                            elif not dice_val:
+                                gc.log_event(f"[E] No dice_roll in action_result for P{active_player_id}. Ending segment.", "error_log")
+                                gc._resolve_current_action_segment()
+                                player_turn_segment_active = False
                             else: 
                                 gc.log_event(f"[E] Invalid dice {dice_val} from roll_dice tool for P{active_player_id}. Ending segment.", "error_log")
                                 gc._resolve_current_action_segment() # Resolve to avoid stuck state
@@ -1099,7 +1145,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                     # After roll & move, GC state (pending_decision, dice_roll_outcome_processed) is updated by land_on_square.
                     # If a new decision is pending for *this* player (e.g., buy), loop continues.
                     # If landing is resolved and no new decision for this player, then segment ends.
-                    if gc.pending_decision_type is None and gc.dice_roll_outcome_processed: player_turn_segment_active = False
+                    if gc.pending_decision_type is None and gc.dice_roll_outcome_processed: player_turn_segment_active = False                                
                 
                 elif chosen_tool_name == "tool_buy_property":
                      # If buy succeeds, GC resolves the segment. If fails (funds), GC keeps pending_decision.
@@ -1183,6 +1229,9 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
             main_turn_player_for_next_step = gc.players[gc.current_player_index]
             call_next_turn_flag = False
 
+            # Track turn actions during this segment
+            current_turn_actions = []
+
             # Don't advance turn if we're in the middle of trade negotiations or other cross-player decisions
             if gc.pending_decision_type in ["respond_to_trade_offer", "propose_new_trade_after_rejection"]:
                 # Trade negotiations are happening - don't advance main turn yet
@@ -1213,6 +1262,24 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 gc.log_event(f"Calling gc.next_turn() for G_UID:{game_uid}. Previous GC turn: {gc.turn_count}, Previous Main PIdx: {current_main_turn_player_id}", "debug_next_turn")
                 gc.next_turn() # This will increment gc.turn_count and set new current_player_index
                 gc.log_event(f"gc.next_turn() called. New GC turn: {gc.turn_count}, New Main PIdx: {gc.current_player_index}", "debug_next_turn")
+                
+                # Send turn end notification
+                event_handler = get_game_event_handler()
+                
+                # Record dice roll action if it happened - all dice rolls are treated the same for turn summary
+                if roll_action_taken_this_main_turn_segment:
+                    current_turn_actions.append({
+                        'type': 'roll',
+                        'player_name': gc.players[current_main_turn_player_id].name,
+                        'dice': gc.dice,
+                        'description': f"🎲 {gc.players[current_main_turn_player_id].name} rolled ({gc.dice[0]}, {gc.dice[1]})"
+                    })
+                
+                # Note: All other important events (property purchases, failures, trades, etc.) 
+                # are tracked through special_event_notifications sent in real-time during the turn
+                # This turn_actions only contains basic dice roll information for turn summary
+                
+                await event_handler.handle_turn_end(gc.game_uid, gc, gc.turn_count - 1, current_main_turn_player_id, current_turn_actions)
             elif gc.auction_in_progress: 
                 await gc.send_event_to_frontend({"type":"auction_log", "message":f"Auction for propId {gc.auction_property_id if gc.auction_property_id is not None else 'N/A'} continues..."})
         
@@ -1229,9 +1296,9 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 break 
             
             # Add random delay between turns (5-10 seconds)
-            turn_delay = random.uniform(5.0, 10.0)
-            print(f"{Fore.CYAN}[Turn Delay] Waiting {turn_delay:.1f} seconds before next turn for G_UID:{game_uid}...{Style.RESET_ALL}")
-            await asyncio.sleep(turn_delay)
+            # turn_delay = random.uniform(5.0, 10.0)
+            # print(f"{Fore.CYAN}[Turn Delay] Waiting {turn_delay:.1f} seconds before next turn for G_UID:{game_uid}...{Style.RESET_ALL}")
+            # await asyncio.sleep(turn_delay)
         
         # --- End of main while loop ---
         print(f"{Fore.CYAN}Main game loop for G_UID: {game_uid} has ended. Game Over: {gc.game_over if gc else 'N/A'}, Loop Turns: {loop_turn_count}{Style.RESET_ALL}")
@@ -1240,6 +1307,11 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
             await gc.send_event_to_frontend({"type": "game_summary_data", "summary": final_summary_str})
             await gc.send_event_to_frontend({"type": "game_end_log", "message":f"Monopoly Game Instance {game_uid} Finished."})
             print(f"Game instance {game_uid} final summary sent.")
+            
+            # Send game end notification
+            event_handler = get_game_event_handler()
+            start_time = getattr(gc, 'start_time', datetime.datetime.now()) if hasattr(gc, 'start_time') else datetime.datetime.now()
+            await event_handler.handle_game_end(gc.game_uid, gc, loop_turn_count, MAX_TURNS, start_time)
             
             # Update agent statistics and release them back to available pool
             try:
@@ -1275,7 +1347,12 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
     except Exception as game_logic_e:
         traceback.print_exc()
         print(f"{Fore.RED}[FATAL GAME LOGIC ERROR] for G_UID:{game_uid}: {game_logic_e}{Style.RESET_ALL}")
-        if game_db_id: 
+        
+        # Send critical error notification
+        event_handler = get_game_event_handler()
+        await event_handler.handle_critical_error(game_uid, game_logic_e, gc)
+        
+        if game_db_id:
             try:
                 with Session(engine) as session:
                     stmt_crash = update(games_table).where(games_table.c.id == game_db_id).values(
@@ -1331,6 +1408,30 @@ async def lifespan(app_instance: FastAPI):
     print("Initializing Agent Manager...")
     await agent_manager.initialize_agents_from_database()
     
+    # Initialize game event handler and Telegram notifications
+    print("Initializing Game Event Handler...")
+    from telegram_notifier import initialize_telegram_notifier, get_telegram_notifier
+    initialize_telegram_notifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+    event_handler = initialize_game_event_handler()
+    
+    # Register Telegram command handlers
+    telegram_notifier = get_telegram_notifier()
+    if telegram_notifier and telegram_notifier.enabled:
+        print("Registering Telegram command handlers...")
+        telegram_notifier.register_command_handler('end_game', telegram_end_game_command_handler)
+        telegram_notifier.register_command_handler('get_status', telegram_get_status_command_handler)
+        
+        # Start Telegram bot listening for commands
+        print("Starting Telegram bot command listening...")
+        try:
+            asyncio.create_task(telegram_notifier.start_listening())
+            print(f"{Fore.GREEN}✅ Telegram bot is now listening for admin commands{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}⚠️ Failed to start Telegram bot listening: {e}{Style.RESET_ALL}")
+    
+    # Send server startup notification
+    await event_handler.handle_server_startup(len(agent_manager.available_agents))
+    
     # Check if we have enough agents to start games
     if len(agent_manager.available_agents) < AGENTS_PER_GAME:
         print(f"{Fore.YELLOW}[Warning] Not enough agents in database to start games. Need at least {AGENTS_PER_GAME}, have {len(agent_manager.available_agents)}{Style.RESET_ALL}")
@@ -1353,6 +1454,31 @@ async def lifespan(app_instance: FastAPI):
     yield # Server is running
     
     print("FastAPI server shutting down (via lifespan)...")
+    
+    # Send server shutdown notification BEFORE stopping Telegram bot
+    try:
+        event_handler = get_game_event_handler()
+        active_games_count = len([g for g in game_instances.values() if g.is_running()]) if game_instances else 0
+        # Add timeout to prevent blocking shutdown
+        await asyncio.wait_for(
+            event_handler.handle_server_shutdown(active_games_count),
+            timeout=5.0  # 5 seconds timeout
+        )
+        print(f"{Fore.GREEN}✅ Server shutdown notification sent{Style.RESET_ALL}")
+    except asyncio.TimeoutError:
+        print(f"{Fore.YELLOW}⚠️ Server shutdown notification timeout after 5 seconds{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.YELLOW}⚠️ Error sending server shutdown notification: {e}{Style.RESET_ALL}")
+    
+    # Stop Telegram bot listening AFTER sending shutdown notification
+    telegram_notifier = get_telegram_notifier()
+    if telegram_notifier and telegram_notifier.enabled:
+        print("Stopping Telegram bot listening...")
+        try:
+            await telegram_notifier.stop_listening()
+            print(f"{Fore.GREEN}✅ Telegram bot stopped listening{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}⚠️ Error stopping Telegram bot: {e}{Style.RESET_ALL}")
     
     # Cancel maintenance task first
     if maintenance_task and not maintenance_task.done():
@@ -1869,6 +1995,121 @@ async def reset_agent_game_balance_api(agent_id: int, request: Request):
     except Exception as e:
         print(f"{Fore.RED}[API E] Error resetting agent balance: {e}{Style.RESET_ALL}")
         raise HTTPException(status_code=500, detail="Failed to reset agent balance")
+
+async def telegram_end_game_command_handler(game_id: str) -> Dict[str, Any]:
+    """Handle Telegram end game command"""
+    from telegram_notifier import get_telegram_notifier
+    
+    try:
+        print(f"{Fore.YELLOW}[Telegram Command] Received end game command for: {game_id}{Style.RESET_ALL}")
+        
+        # Find the game instance
+        game_instance = game_instances.get(game_id)
+        if not game_instance:
+            return {
+                'success': False,
+                'error': f'Game {game_id} not found or not active'
+            }
+        
+        # Get game controller to access agents
+        game_controller = game_instance.game_controller
+        if not game_controller:
+            return {
+                'success': False,
+                'error': f'Game {game_id} has no active controller'
+            }
+        
+        # Get the agents for this game
+        agents_in_game = []
+        for agent_uid, g_uid in agent_manager.agents_in_game.items():
+            if g_uid == game_id:
+                agents_in_game.append(agent_uid)
+        
+        # Set game_over flag to end the game gracefully
+        game_controller.game_over = True
+        print(f"{Fore.GREEN}[Telegram Command] Set game_over flag for {game_id}{Style.RESET_ALL}")
+        
+        # Set all agents in this game to inactive
+        agents_affected = 0
+        try:
+            with Session(engine) as session:
+                for agent_uid in agents_in_game:
+                    stmt = update(agents_table).where(
+                        agents_table.c.agent_uid == agent_uid
+                    ).values(
+                        status='inactive',
+                        last_active=func.now()
+                    )
+                    session.execute(stmt)
+                    agents_affected += 1
+                    print(f"{Fore.CYAN}[Telegram Command] Set agent {agent_uid} to inactive{Style.RESET_ALL}")
+                
+                session.commit()
+                
+        except Exception as db_error:
+            print(f"{Fore.RED}[Telegram Command] Database error updating agents: {db_error}{Style.RESET_ALL}")
+        
+        # Send game termination notification
+        try:
+            telegram_notifier = get_telegram_notifier()
+            if telegram_notifier and telegram_notifier.enabled:
+                await telegram_notifier.send_message(
+                    f"🛑 <b>Game manually terminated</b>\n\n"
+                    f"🆔 Game ID: <code>{game_id}</code>\n"
+                    f"🤖 Agents affected: {agents_affected}\n"
+                    f"⏰ Time: {datetime.datetime.now().strftime('%H:%M:%S')}\n\n"
+                    f"✅ Game terminated by admin command"
+                )
+        except Exception as notify_error:
+            print(f"{Fore.YELLOW}[Telegram Command] Failed to send termination notification: {notify_error}{Style.RESET_ALL}")
+        
+        return {
+            'success': True,
+            'agents_affected': agents_affected,
+            'message': f'Game {game_id} terminated successfully'
+        }
+        
+    except Exception as e:
+        print(f"{Fore.RED}[Telegram Command] Error ending game {game_id}: {e}{Style.RESET_ALL}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+async def telegram_get_status_command_handler() -> Dict[str, Any]:
+    """Handle Telegram status command"""
+    try:
+        if not global_app_instance:
+            return {
+                'active_games': 0,
+                'total_thread_games': 0,
+                'available_agents': 0,
+                'error': 'App instance not available'
+            }
+        
+        # Get current game status
+        status = get_game_status(global_app_instance)
+        
+        # Get agent status
+        agent_status = agent_manager.get_status()
+        
+        return {
+            'active_games': status.get('active_games', 0),
+            'total_thread_games': status.get('total_thread_games', 0),
+            'available_agents': agent_status.get('available_agents_count', 0),
+            'agents_in_game': agent_status.get('agents_in_game_count', 0),
+            'concurrent_games_target': CONCURRENT_GAMES_COUNT,
+            'auto_restart_enabled': AUTO_RESTART_GAMES
+        }
+        
+    except Exception as e:
+        print(f"{Fore.RED}[Telegram Command] Error getting status: {e}{Style.RESET_ALL}")
+        return {
+            'active_games': 0,
+            'total_thread_games': 0,
+            'available_agents': 0,
+            'error': str(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn

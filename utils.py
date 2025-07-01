@@ -119,7 +119,6 @@ def generate_random_agents(count: int = 4) -> List[Dict[str, str]]:
         List containing agent information, each agent has name and personality fields
     """
     try:
-        # 从环境变量获取 OpenAI API key
         openai_api_key = os.getenv("OPENAI_API_KEY")
         if not openai_api_key:
             logger.error("OPENAI_API_KEY not found in environment variables")

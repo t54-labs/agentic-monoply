@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session # For DB operations if preferred
 # --- Game Configuration ---
 NUM_PLAYERS = 4 # As per requirement, 4 AI agents
 PLAYER_NAMES = ["Player A", "Player B", "Player C", "Player D"] # Optional, will use defaults if None or not enough
-MAX_TURNS = 200  # Max turns before game ends automatically
+MAX_TURNS = 500  # Max turns before game ends automatically
 ACTION_DELAY_SECONDS = 2.0 # Delay between agent actions - Increased from 0.5
 MAX_ACTIONS_PER_SEGMENT = 10 # Max actions an agent can take in a single turn segment before yielding/ending
 

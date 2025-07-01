@@ -17,6 +17,7 @@ import sys
 
 # 配置
 BASE_URL = "http://localhost:8000"
+# BASE_URL = "https://agentic-monopoly-a8125b787674.herokuapp.com/"
 WS_BASE_URL = "ws://localhost:8000"
 
 class APITester:
@@ -126,8 +127,8 @@ class APITester:
     def test_create_default_agents(self):
         """测试创建默认代理"""
         try:
-            response = self.session.post(f"{self.base_url}/api/admin/agents/create_defaults")
-            self.print_result("/api/admin/agents/create_defaults", "POST", response)
+            response = self.session.post(f"{self.base_url}/api/admin/agents/create_random")
+            self.print_result("/api/admin/agents/create_random", "POST", response)
             return response.json() if response.status_code == 200 else None
         except Exception as e:
             print(f"❌ 测试创建默认代理失败: {e}")

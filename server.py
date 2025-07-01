@@ -137,20 +137,23 @@ class AgentManager:
         self._lock = threading.RLock()  # Thread-safe lock for agent operations
         
     async def initialize_agents_from_database(self):
-        """Load all active agents from database and create their instances"""
+        """Load all active agents from database and create their instances (safe for repeated calls)"""
         try:
             with Session(engine) as session:
                 # Get all active agents from database
                 stmt = select(agents_table).where(agents_table.c.status == 'active')
                 result = session.execute(stmt)
                 agents_data = result.fetchall()
-                # shuffle agents_data
-                random.shuffle(agents_data)
                 
                 print(f"{Fore.GREEN}[Agent Manager] Found {len(agents_data)} active agents in database{Style.RESET_ALL}")
                 
+                new_agents_count = 0
+                updated_agents_count = 0
+                
                 with self._lock:  # Thread-safe initialization
                     for agent_row in agents_data:
+                        agent_uid = agent_row.agent_uid
+                        
                         agent_dict = {
                             'id': agent_row.id,
                             'agent_uid': agent_row.agent_uid,
@@ -164,21 +167,35 @@ class AgentManager:
                             'status': agent_row.status
                         }
                         
-                        # Create OpenAI agent instance
-                        agent_instance = OpenAIAgent(
-                            agent_uid=agent_dict['agent_uid'],
-                            player_id=-1,  # Will be set when joining a game
-                            name=agent_dict['name']
-                        )
+                        # Create agent instance only if it doesn't exist
+                        if agent_uid not in self.agent_instances:
+                            agent_instance = OpenAIAgent(
+                                agent_uid=agent_dict['agent_uid'],
+                                player_id=-1,  # Will be set when joining a game
+                                name=agent_dict['name']
+                            )
+                            self.agent_instances[agent_uid] = agent_instance
+                            new_agents_count += 1
                         
-                        # Store agent instance
-                        self.agent_instances[agent_dict['agent_uid']] = agent_instance
+                        # Check if agent is already in available pool or in game
+                        agent_already_available = any(a['agent_uid'] == agent_uid for a in self.available_agents)
+                        agent_in_game = agent_uid in self.agents_in_game
                         
-                        # Add to available agents if not in game
-                        if agent_dict['status'] == 'active':
+                        # Only add to available pool if:
+                        # 1. Agent is active in database
+                        # 2. Agent is not already in available pool 
+                        # 3. Agent is not currently in a game
+                        if (agent_dict['status'] == 'active' and 
+                            not agent_already_available and 
+                            not agent_in_game):
                             self.available_agents.append(agent_dict)
+                            updated_agents_count += 1
+                        elif agent_in_game:
+                            print(f"{Fore.CYAN}[Agent Manager] Agent {agent_dict['name']} is in game {self.agents_in_game[agent_uid]} - not adding to available pool{Style.RESET_ALL}")
+                        elif agent_already_available:
+                            print(f"{Fore.CYAN}[Agent Manager] Agent {agent_dict['name']} already in available pool - skipping{Style.RESET_ALL}")
                 
-                print(f"{Fore.GREEN}[Agent Manager] Initialized {len(self.available_agents)} available agents{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}[Agent Manager] Initialization complete: {new_agents_count} new instances, {updated_agents_count} added to available pool, {len(self.available_agents)} total available{Style.RESET_ALL}")
                 
         except Exception as e:
             print(f"{Fore.RED}[Agent Manager] Error initializing agents: {e}{Style.RESET_ALL}")
@@ -1788,30 +1805,40 @@ async def update_config_api(request: Request):
         print(f"{Fore.RED}[API E] Error updating config: {e}{Style.RESET_ALL}")
         raise HTTPException(status_code=500, detail="Failed to update configuration")
 
-@app.post("/api/admin/agents/create_defaults")
-async def create_default_agents_api():
-    """Create default agents for testing"""
+@app.post("/api/admin/agents/create_random")
+async def create_random_agents_api(request: Request):
+    """Create random agents using GPT-4o mini (generates 4 random agents each time)"""
     try:
-        default_agents = [
-            {"name": "Wall Street Wolf", "personality": "Aggressive trader focused on quick profits and hostile takeovers"},
-            {"name": "Warren Wisdom", "personality": "Conservative long-term strategist who thinks decades ahead"},
-            {"name": "Smooth Talker Sally", "personality": "Charismatic negotiator who can convince anyone of anything"},
-            {"name": "Casino Charlie", "personality": "High-risk high-reward gambler who lives for the thrill"},
-            # {"name": "Professor Numbers", "personality": "Data-driven analytical genius who calculates every probability"},
-            # {"name": "Vulture Victor", "personality": "Opportunistic scavenger who swoops in on distressed assets"},
-            # {"name": "Friendship Frank", "personality": "Collaborative deal-maker who believes everyone can win"},
-            # {"name": "Zen Master Min", "personality": "Minimalist philosopher focused only on essential moves"}
-        ]
+        agent_count = 4
+        print(f"{Fore.CYAN}[API] Generating {agent_count} random agents using GPT-4o mini...{Style.RESET_ALL}")
+        
+        random_agents = utils.generate_random_agents(agent_count)
         
         created_agents = []
+        skipped_agents = []
+        
         with Session(engine) as session:
-            for agent_data in default_agents:
+            for agent_data in random_agents:
+                # Check if agent with the same name already exists
+                existing_agent_stmt = select(agents_table).where(agents_table.c.name == agent_data['name'])
+                existing_agent = session.execute(existing_agent_stmt).fetchone()
+                
+                if existing_agent:
+                    print(f"{Fore.YELLOW}[Agent Creation] Skipping '{agent_data['name']}' - agent with this name already exists{Style.RESET_ALL}")
+                    skipped_agents.append({
+                        "name": agent_data['name'],
+                        "reason": "Agent with this name already exists",
+                        "existing_id": existing_agent.id,
+                        "existing_status": existing_agent.status
+                    })
+                    continue
+                
                 agent_uid = f"agent_{agent_data['name'].lower().replace(' ', '_')}_{uuid.uuid4().hex[:6]}"
                 
                 # Create tpay account for this agent
                 tpay_account_id = None
                 try:
-                    print(f"{Fore.CYAN}[TPay] Creating account for agent: {agent_data['name']}{Style.RESET_ALL}")
+                    print(f"{Fore.CYAN}[TPay] Creating account for agent: {agent_data['name']} {Style.RESET_ALL}")
                     
                     tpay_agent_data = tpay.create_agent(
                         name=agent_data['name'],
@@ -1866,15 +1893,23 @@ async def create_default_agents_api():
         
         return {
             "success": True,
-            "message": f"Created {len(created_agents)} agents ({successful_tpay} with tpay accounts)",
-            "agents": created_agents,
+            "message": f"Created {len(created_agents)} random agents ({successful_tpay} with tpay accounts), skipped {len(skipped_agents)} existing agents",
+            "created_agents": created_agents,
+            "skipped_agents": skipped_agents,
             "tpay_success_count": successful_tpay,
-            "tpay_total_count": len(created_agents)
+            "tpay_total_count": len(created_agents),
+            "total_processed": len(random_agents),
+            "summary": {
+                "created": len(created_agents),
+                "skipped": len(skipped_agents),
+                "with_tpay": successful_tpay,
+                "without_tpay": len(created_agents) - successful_tpay
+            }
         }
     
     except Exception as e:
-        print(f"{Fore.RED}[API E] Error creating default agents: {e}{Style.RESET_ALL}")
-        raise HTTPException(status_code=500, detail="Failed to create default agents")
+        print(f"{Fore.RED}[API E] Error creating random agents: {e}{Style.RESET_ALL}")
+        raise HTTPException(status_code=500, detail="Failed to create random agents")
 
 @app.get("/api/admin/agents")
 async def get_agents_api():

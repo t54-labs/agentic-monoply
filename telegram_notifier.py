@@ -149,6 +149,14 @@ class TelegramNotifier:
                 await self._handle_end_game_command(game_id, update)
                 return
             
+            # Start new agents command
+            start_agents_pattern = r'^start\s+new\s+agents?$'
+            match = re.match(start_agents_pattern, message_text.lower())
+            
+            if match:
+                await self._handle_start_new_agents_command(update)
+                return
+            
             # Help command
             if message_text.lower() in ['help', '/help']:
                 await self._handle_help_command(update)
@@ -205,14 +213,19 @@ class TelegramNotifier:
 🤖 <b>Monopoly Bot Commands</b>
 
 🛑 <code>end GAME_ID</code> - End a specific game
+🎯 <code>start new agents</code> - Create 4 random AI agents
 📊 <code>status</code> - Show server status
 ❓ <code>help</code> - Show this help message
 
 <b>Examples:</b>
 • <code>end monopoly_game_1_abc123</code>
 • <code>end + monopoly_game_2_def456</code>
+• <code>start new agents</code>
 
-⚠️ <b>Note:</b> Ending a game will immediately stop it and set all agents to inactive.
+⚠️ <b>Notes:</b>
+• Ending a game will immediately stop it and set all agents to inactive
+• Creating agents uses GPT-4o mini to generate unique personalities
+• New agents will be available for matchmaking in future games
         """.strip()
         
         await self._reply_to_message(update, help_msg)
@@ -244,6 +257,126 @@ class TelegramNotifier:
                 await self._reply_to_message(update, error_msg)
         else:
             await self._reply_to_message(update, "❌ Status command handler not registered")
+    
+    async def _handle_start_new_agents_command(self, update: Update):
+        """Handle start new agents command"""
+        if 'start_new_agents' in self.command_handlers:
+            try:
+                # Send initial response to let user know we're processing
+                await self._reply_to_message(update, "🎯 <b>Starting random agent creation...</b>\n\n⏳ Generating new agents using GPT-4o mini, please wait...")
+                
+                # Call the command handler
+                result = await self.command_handlers['start_new_agents']()
+                
+                # Debug: Print result structure
+                print(f"[Telegram Debug] Command handler result: {result}")
+                
+                if result.get('success'):
+                    created_agents = result.get('created_agents', [])
+                    skipped_agents = result.get('skipped_agents', [])
+                    successful_tpay = result.get('successful_tpay', 0)
+                    
+                    # Type checking to prevent errors
+                    if not isinstance(created_agents, list):
+                        print(f"[Telegram Warning] created_agents is not a list: {type(created_agents)} = {created_agents}")
+                        created_agents = []
+                    
+                    if not isinstance(skipped_agents, list):
+                        print(f"[Telegram Warning] skipped_agents is not a list: {type(skipped_agents)} = {skipped_agents}")
+                        skipped_agents = []
+                    
+                    if len(created_agents) > 0:
+                        # Format created agents list
+                        created_list = []
+                        for agent in created_agents:
+                            name = agent.get('name', 'Unknown')
+                            personality = agent.get('personality', 'No description')
+                            tpay_status = "💰" if agent.get('tpay_account_id') else "❌"
+                            
+                            # Truncate personality if too long
+                            if len(personality) > 60:
+                                personality = personality[:57] + "..."
+                            
+                            created_list.append(f"🤖 <b>{name}</b> {tpay_status}\n   <i>{personality}</i>")
+                        
+                        created_text = "\n\n".join(created_list)
+                        
+                        # Format skipped agents if any
+                        skipped_text = ""
+                        if skipped_agents:
+                            skipped_list = []
+                            for agent in skipped_agents:
+                                name = agent.get('name', 'Unknown')
+                                reason = agent.get('reason', 'Unknown reason')
+                                skipped_list.append(f"⚠️ <b>{name}</b> - {reason}")
+                            skipped_text = f"\n\n<b>Skipped Agents:</b>\n" + "\n".join(skipped_list)
+                        
+                        # Success message with detailed info
+                        reply_msg = f"""
+🎯 <b>Random Agents Created Successfully!</b>
+
+📊 <b>Summary:</b>
+✅ Created: {len(created_agents)} agents
+💰 With TPay: {successful_tpay} agents
+⚠️ Skipped: {len(skipped_agents)} agents
+
+🤖 <b>New Agents:</b>
+{created_text}{skipped_text}
+
+⏰ Time: {datetime.now().strftime('%H:%M:%S')}
+
+🎮 The new agents are now available for matchmaking in games.
+                        """.strip()
+                    else:
+                        # Format skipped agents when no agents were created
+                        skipped_text = ""
+                        if skipped_agents:
+                            skipped_list = []
+                            for agent in skipped_agents:
+                                name = agent.get('name', 'Unknown')
+                                reason = agent.get('reason', 'Unknown reason')
+                                skipped_list.append(f"⚠️ <b>{name}</b> - {reason}")
+                            skipped_text = f"\n\n<b>Skipped Agents:</b>\n" + "\n".join(skipped_list)
+                        
+                        # No agents created
+                        reply_msg = f"""
+⚠️ <b>No New Agents Created</b>
+
+📊 <b>Summary:</b>
+✅ Created: 0 agents
+⚠️ Skipped: {len(skipped_agents)} agents (duplicate names){skipped_text}
+
+💡 All generated agent names already exist in the database.
+Try again later for different randomly generated names.
+
+⏰ Time: {datetime.now().strftime('%H:%M:%S')}
+                        """.strip()
+                else:
+                    error_reason = result.get('error', 'Unknown error')
+                    reply_msg = f"""
+❌ <b>Failed to create random agents</b>
+
+📝 Reason: {error_reason}
+⏰ Time: {datetime.now().strftime('%H:%M:%S')}
+
+🛠️ Please check server logs for more details.
+                    """.strip()
+                    
+                await self._reply_to_message(update, reply_msg)
+                
+            except Exception as e:
+                traceback.print_exc()
+                error_msg = f"""
+❌ <b>Error creating random agents</b>
+
+🚨 Error: {str(e)}
+⏰ Time: {datetime.now().strftime('%H:%M:%S')}
+
+🛠️ Please check server logs for more details.
+                """.strip()
+                await self._reply_to_message(update, error_msg)
+        else:
+            await self._reply_to_message(update, "❌ Start new agents command handler not registered")
     
     async def _reply_to_message(self, update: Update, message: str):
         """Reply to a message"""

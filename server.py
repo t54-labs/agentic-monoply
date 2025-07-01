@@ -1437,6 +1437,7 @@ async def lifespan(app_instance: FastAPI):
         print("Registering Telegram command handlers...")
         telegram_notifier.register_command_handler('end_game', telegram_end_game_command_handler)
         telegram_notifier.register_command_handler('get_status', telegram_get_status_command_handler)
+        telegram_notifier.register_command_handler('start_new_agents', telegram_create_random_agents_command_handler)
         
         # Start Telegram bot listening for commands
         print("Starting Telegram bot command listening...")
@@ -2143,6 +2144,115 @@ async def telegram_get_status_command_handler() -> Dict[str, Any]:
             'active_games': 0,
             'total_thread_games': 0,
             'available_agents': 0,
+            'error': str(e)
+        }
+
+async def telegram_create_random_agents_command_handler() -> Dict[str, Any]:
+    """Handle Telegram create random agents command"""
+    from telegram_notifier import get_telegram_notifier
+    
+    try:
+        print(f"{Fore.YELLOW}[Telegram Command] Received create random agents command{Style.RESET_ALL}")
+        
+        agent_count = 4
+        print(f"{Fore.CYAN}[Telegram Command] Generating {agent_count} random agents using GPT-4o mini...{Style.RESET_ALL}")
+        
+        # Use the same logic as the API endpoint
+        random_agents = utils.generate_random_agents(agent_count)
+        
+        created_agents = []
+        skipped_agents = []
+        
+        with Session(engine) as session:
+            for agent_data in random_agents:
+                # Check if agent with the same name already exists
+                existing_agent_stmt = select(agents_table).where(agents_table.c.name == agent_data['name'])
+                existing_agent = session.execute(existing_agent_stmt).fetchone()
+                
+                if existing_agent:
+                    print(f"{Fore.YELLOW}[Telegram Command] Skipping '{agent_data['name']}' - agent with this name already exists{Style.RESET_ALL}")
+                    skipped_agents.append({
+                        "name": agent_data['name'],
+                        "reason": "Agent with this name already exists",
+                        "existing_id": existing_agent.id,
+                        "existing_status": existing_agent.status
+                    })
+                    continue
+                
+                agent_uid = f"agent_{agent_data['name'].lower().replace(' ', '_')}_{uuid.uuid4().hex[:6]}"
+                
+                # Create tpay account for this agent
+                tpay_account_id = None
+                try:
+                    print(f"{Fore.CYAN}[Telegram Command] Creating TPay account for agent: {agent_data['name']}{Style.RESET_ALL}")
+                    
+                    tpay_agent_data = tpay.create_agent(
+                        name=agent_data['name'],
+                        description=f"Monopoly AI agent: {agent_data['personality']}",
+                        agent_daily_limit=10000.0,  # High limit for monopoly transactions
+                        agent_type="autonomous_agent"
+                    )
+                    
+                    if tpay_agent_data and 'id' in tpay_agent_data:
+                        tpay_account_id = tpay_agent_data['id']
+                        print(f"{Fore.GREEN}[Telegram Command] Successfully created TPay account for {agent_data['name']} with ID: {tpay_account_id}{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}[Telegram Command] Failed to create TPay account for {agent_data['name']} - no ID returned{Style.RESET_ALL}")
+                        
+                except Exception as tpay_error:
+                    print(f"{Fore.RED}[Telegram Command] Error creating TPay account for {agent_data['name']}: {tpay_error}{Style.RESET_ALL}")
+                
+                if tpay_account_id:
+                    # Create agent record in database
+                    agent_values = {
+                        "agent_uid": agent_uid,
+                        "name": agent_data['name'],
+                        "personality_prompt": agent_data['personality'],
+                        "memory_data": {},
+                        "preferences": {},
+                        "total_games_played": 0,
+                        "total_wins": 0,
+                        "tpay_account_id": tpay_account_id,
+                        "status": "active"
+                    }
+                    
+                    stmt = insert(agents_table).values(agent_values).returning(agents_table.c.id)
+                    result = session.execute(stmt)
+                    agent_id = result.scalar_one_or_none()
+                    
+                    if agent_id:
+                        created_agents.append({
+                            "id": agent_id,
+                            "agent_uid": agent_uid,
+                            "name": agent_data['name'],
+                            "personality": agent_data['personality'][:50] + "..." if len(agent_data['personality']) > 50 else agent_data['personality'],
+                            "tpay_account_id": tpay_account_id,
+                            "tpay_status": "created" if tpay_account_id else "failed"
+                        })
+            
+            session.commit()
+        
+        # Reload agents in agent manager
+        await agent_manager.initialize_agents_from_database()
+        
+        successful_tpay = len([a for a in created_agents if a['tpay_account_id']])
+        
+        # Note: Telegram message sending is handled by the telegram_notifier's _handle_start_new_agents_command
+        
+        return {
+            'success': True,
+            'created_agents': created_agents,
+            'skipped_agents': skipped_agents,
+            'successful_tpay': successful_tpay,
+            'message': f'Created {len(created_agents)} random agents ({successful_tpay} with TPay accounts), skipped {len(skipped_agents)} existing agents'
+        }
+        
+    except Exception as e:
+        print(f"{Fore.RED}[Telegram Command] Error creating random agents: {e}{Style.RESET_ALL}")
+        
+        # Note: Error notification is handled by the telegram_notifier's _handle_start_new_agents_command
+        return {
+            'success': False,
             'error': str(e)
         }
 

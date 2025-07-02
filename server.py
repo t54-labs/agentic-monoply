@@ -743,7 +743,7 @@ async def maintain_game_count(app_instance: Optional[FastAPI] = None):
         # Start new games if needed (based on actual running games, not tasks)
         games_needed = CONCURRENT_GAMES_COUNT - len(active_thread_games)
         if games_needed > 0 and AUTO_RESTART_GAMES:
-            print(f"{Fore.CYAN}[Game Manager] Need to start {games_needed} new games (active: {len(active_thread_games)}/{CONCURRENT_GAMES_COUNT}){Style.RESET_ALL}")
+            # print(f"{Fore.CYAN}[Game Manager] Need to start {games_needed} new games (active: {len(active_thread_games)}/{CONCURRENT_GAMES_COUNT}){Style.RESET_ALL}")
             
             # Check if we have enough available agents
             available_agent_count = len(agent_manager.available_agents)

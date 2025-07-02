@@ -242,7 +242,7 @@ class AgentManager:
                 print(f"{Fore.GREEN}[Agent Manager] Assigned agent {agent['name']} to game {game_uid}{Style.RESET_ALL}")
     
     def release_agents_from_game(self, game_uid: str):
-        """Release agents back to available pool when game ends, but only if they are still active"""
+        """Release agents back to available pool when game ends"""
         with self._lock:
             agents_to_release = [agent_uid for agent_uid, g_uid in self.agents_in_game.items() if g_uid == game_uid]
             
@@ -250,7 +250,7 @@ class AgentManager:
                 # Remove from in_game mapping
                 del self.agents_in_game[agent_uid]
                 
-                # Check agent's current status in database before releasing
+                # Get agent's information from database and reset status to active
                 try:
                     with Session(engine) as session:
                         stmt = select(agents_table).where(agents_table.c.agent_uid == agent_uid)
@@ -258,8 +258,19 @@ class AgentManager:
                         agent_row = result.fetchone()
                         
                         if agent_row:
-                            # Only add back to available pool if agent is still active in database
-                            if agent_row.status == 'active':
+                            # First, update agent status back to 'active'
+                            if agent_row.status in ['in_game', 'active']:
+                                # Update status to active if currently in_game or already active
+                                update_stmt = update(agents_table).where(
+                                    agents_table.c.agent_uid == agent_uid
+                                ).values(
+                                    status='active',
+                                    last_active=func.now()
+                                )
+                                session.execute(update_stmt)
+                                session.commit()
+                                
+                                # Now add back to available pool
                                 agent_dict = {
                                     'id': agent_row.id,
                                     'agent_uid': agent_row.agent_uid,
@@ -270,12 +281,14 @@ class AgentManager:
                                     'total_games_played': agent_row.total_games_played,
                                     'total_wins': agent_row.total_wins,
                                     'tpay_account_id': agent_row.tpay_account_id,
-                                    'status': agent_row.status  # Use actual database status
+                                    'status': 'active'  # Set to active since we just updated it
                                 }
                                 self.available_agents.append(agent_dict)
-                                print(f"{Fore.GREEN}[Agent Manager] Released agent {agent_dict['name']} back to available pool{Style.RESET_ALL}")
+                                print(f"{Fore.GREEN}[Agent Manager] Released agent {agent_dict['name']} back to available pool (status: {agent_row.status} -> active){Style.RESET_ALL}")
                             else:
                                 print(f"{Fore.YELLOW}[Agent Manager] Agent {agent_row.name} has status '{agent_row.status}' - not adding back to available pool{Style.RESET_ALL}")
+                        else:
+                            print(f"{Fore.RED}[Agent Manager] Agent {agent_uid} not found in database{Style.RESET_ALL}")
                             
                 except Exception as e:
                     print(f"{Fore.RED}[Agent Manager] Error releasing agent {agent_uid}: {e}{Style.RESET_ALL}")

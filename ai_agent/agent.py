@@ -303,6 +303,44 @@ class OpenAIAgent(BaseAgent):
         for i, action_name in enumerate(available_actions):
             prompt += f"{i+1}. {action_name}\n"
         
+        # Add detailed tool descriptions to prevent parameter confusion
+        prompt += "\n--- Tool Parameter Specifications ---\n"
+        prompt += "IMPORTANT: Use EXACT parameter names as specified below:\n\n"
+        
+        tool_descriptions = {
+            "tool_roll_dice": "Parameters: {} (no parameters needed)",
+            "tool_end_turn": "Parameters: {} (no parameters needed)",
+            "tool_buy_property": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",
+            "tool_pass_on_buying_property": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",
+            "tool_build_house": "Parameters: {\"property_id\": <integer>} (builds ONE house on the specified property)",
+            "tool_sell_house": "Parameters: {\"property_id\": <integer>} (sells ONE house from the specified property)",
+            "tool_mortgage_property": "Parameters: {\"property_id\": <integer>}",
+            "tool_unmortgage_property": "Parameters: {\"property_id\": <integer>}",
+            "tool_pay_bail": "Parameters: {} (no parameters needed)",
+            "tool_use_get_out_of_jail_card": "Parameters: {} (no parameters needed)",
+            "tool_roll_for_doubles_to_get_out_of_jail": "Parameters: {} (no parameters needed)",
+            "tool_bid_on_auction": "Parameters: {\"bid_amount\": <integer>}",
+            "tool_pass_auction_bid": "Parameters: {} (no parameters needed)",
+            "tool_withdraw_from_auction": "Parameters: {} (no parameters needed)",
+            "tool_propose_trade": "Parameters: {\"recipient_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"message\": \"<optional string>\"}",
+            "tool_accept_trade": "Parameters: {\"trade_id\": <integer>} (optional, auto-filled if pending)",
+            "tool_reject_trade": "Parameters: {\"trade_id\": <integer>} (optional, auto-filled if pending)",
+            "tool_propose_counter_offer": "Parameters: {\"trade_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"counter_message\": \"<optional string>\"}",
+            "tool_end_trade_negotiation": "Parameters: {} (no parameters needed)",
+            "tool_pay_mortgage_interest_fee": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",
+            "tool_unmortgage_property_immediately": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",
+            "tool_confirm_asset_liquidation_actions_done": "Parameters: {} (no parameters needed)",
+            "tool_do_nothing": "Parameters: {\"reason\": \"<optional string>\"}",
+            "tool_wait": "Parameters: {} (no parameters needed)",
+            "tool_resign_game": "Parameters: {} (no parameters needed)"
+        }
+        
+        for action_name in available_actions:
+            if action_name in tool_descriptions:
+                prompt += f"• {action_name}: {tool_descriptions[action_name]}\n"
+            else:
+                prompt += f"• {action_name}: Parameters: {{}} (unknown tool, use no parameters)\n"
+        
         prompt += "\nINSTRUCTIONS FOR YOUR RESPONSE:\n"
         prompt += "1. First, briefly write your step-by-step thinking process or strategy TO YOURSELF (this part will be logged but not parsed by the game)."
         prompt += "2. After your thoughts, on A NEW LINE, provide your chosen action as a single JSON object."

@@ -162,7 +162,16 @@ class TelegramNotifier:
                 await self._handle_help_command(update)
                 return
             
-            # Status command
+            # Status with game ID command
+            status_game_pattern = r'^status\s*\+?\s*(.+)$'
+            match = re.match(status_game_pattern, message_text.lower())
+            
+            if match:
+                game_id = match.group(1).strip()
+                await self._handle_game_status_command(game_id, update)
+                return
+            
+            # General status command
             if message_text.lower() in ['status', '/status']:
                 await self._handle_status_command(update)
                 return
@@ -215,14 +224,18 @@ class TelegramNotifier:
 🛑 <code>end GAME_ID</code> - End a specific game
 🎯 <code>start new agents</code> - Create 4 random AI agents
 📊 <code>status</code> - Show server status
+📋 <code>status + GAME_ID</code> - Show specific game status
 ❓ <code>help</code> - Show this help message
 
 <b>Examples:</b>
+• <code>status monopoly_game_1_abc123</code>
+• <code>status + monopoly_game_2_def456</code>
 • <code>end monopoly_game_1_abc123</code>
 • <code>end + monopoly_game_2_def456</code>
 • <code>start new agents</code>
 
 ⚠️ <b>Notes:</b>
+• Game status shows player money, positions, properties, and jail status
 • Ending a game will immediately stop it and set all agents to inactive
 • Creating agents uses GPT-4o mini to generate unique personalities
 • New agents will be available for matchmaking in future games
@@ -257,6 +270,98 @@ class TelegramNotifier:
                 await self._reply_to_message(update, error_msg)
         else:
             await self._reply_to_message(update, "❌ Status command handler not registered")
+    
+    async def _handle_game_status_command(self, game_id: str, update: Update):
+        """Handle game status command for a specific game"""
+        if 'get_game_status' in self.command_handlers:
+            try:
+                game_status = await self.command_handlers['get_game_status'](game_id)
+                
+                if not game_status.get('success'):
+                    error_msg = f"❌ {game_status.get('error', 'Game not found or error retrieving status')}"
+                    await self._reply_to_message(update, error_msg)
+                    return
+                
+                data = game_status.get('data', {})
+                
+                # Game basic info
+                game_info = data.get('game_info', {})
+                turn_count = game_info.get('turn_count', 0)
+                game_over = game_info.get('game_over', False)
+                current_player_idx = game_info.get('current_player_index', 0)
+                
+                # Players info
+                players = data.get('players', [])
+                
+                # Format players information
+                player_lines = []
+                for i, player in enumerate(players):
+                    name = player.get('name', f'Player {i}')
+                    money = player.get('money', 0)
+                    position = player.get('position', 0)
+                    in_jail = player.get('in_jail', False)
+                    is_bankrupt = player.get('is_bankrupt', False)
+                    
+                    # Status emoji
+                    if is_bankrupt:
+                        status_emoji = "💸"
+                    elif in_jail:
+                        status_emoji = "🏭"
+                    elif i == current_player_idx:
+                        status_emoji = "🎯"
+                    else:
+                        status_emoji = "🤖"
+                    
+                    # Properties owned
+                    owned_properties = player.get('owned_properties', [])
+                    properties_text = ""
+                    if owned_properties:
+                        prop_names = [prop.get('name', 'Unknown') for prop in owned_properties[:3]]
+                        properties_text = f"\n   🏠 Properties: {', '.join(prop_names)}"
+                        if len(owned_properties) > 3:
+                            properties_text += f" (+{len(owned_properties) - 3} more)"
+                    
+                    # Format player line
+                    player_line = f"{status_emoji} <b>{name}</b>"
+                    if is_bankrupt:
+                        player_line += " - <s>Bankrupt</s>"
+                    else:
+                        player_line += f" - 💵${money:,}"
+                        if in_jail:
+                            player_line += " (In Jail)"
+                        else:
+                            player_line += f" (Pos: {position})"
+                    
+                    player_line += properties_text
+                    player_lines.append(player_line)
+                
+                players_text = "\n\n".join(player_lines) if player_lines else "<i>No players found</i>"
+                
+                # Game status text
+                status_text = "🏁 Game Over" if game_over else "🎮 In Progress"
+                
+                status_msg = f"""
+📋 <b>Game Status: {game_id}</b>
+
+🎯 Status: {status_text}
+🔄 Turn: {turn_count}
+⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+👥 <b>Players:</b>
+{players_text}
+
+💡 Use <code>status</code> for server status
+                """.strip()
+                
+                await self._reply_to_message(update, status_msg)
+                
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                error_msg = f"❌ Error getting game status: {str(e)}"
+                await self._reply_to_message(update, error_msg)
+        else:
+            await self._reply_to_message(update, "❌ Game status command handler not registered")
     
     async def _handle_start_new_agents_command(self, update: Update):
         """Handle start new agents command"""

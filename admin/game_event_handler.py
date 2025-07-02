@@ -4,7 +4,7 @@ import datetime
 from typing import Dict, List, Any, Optional
 import traceback
 
-from telegram_notifier import get_telegram_notifier, TelegramNotifier
+from .telegram_notifier import get_telegram_notifier, TelegramNotifier
 
 
 class GameEventHandler:
@@ -227,7 +227,7 @@ class GameEventHandler:
             })
             
             # send different notifications based on event type
-            if event_type in ['jail', 'bankruptcy', 'property_buy', 'property_buy_failed', 'property_sell', 'trade', 'auction']:
+            if event_type in ['jail', 'bankruptcy', 'property_buy', 'property_buy_failed', 'property_sell', 'trade', 'auction', 'rent_payment', 'go_salary', 'doubles_bonus_turn', 'card_drawn', 'income_tax']:
                 # these important events are sent immediately
                 message = self._format_special_event_message(event_info)
                 if message:
@@ -266,6 +266,26 @@ class GameEventHandler:
             property_name = event_info.get('property_name', 'unknown property')
             amount = event_info.get('amount', 0)
             return f"🏛️ <b>{player_name}</b> won the auction for <i>{property_name}</i> at 💵${amount}\n🎮 Game: <code>{game_uid}</code>"
+        elif event_type == 'rent_payment':
+            property_name = event_info.get('property_name', 'unknown property')
+            amount = event_info.get('amount', 0)
+            owner_name = event_info.get('owner_name', 'unknown owner')
+            return f"🏡 <b>{player_name}</b> paid rent 💵${amount} to <b>{owner_name}</b> for <i>{property_name}</i>\n🎮 Game: <code>{game_uid}</code>"
+        elif event_type == 'go_salary':
+            amount = event_info.get('amount', 200)
+            return f"💰 <b>{player_name}</b> passed GO and collected 💵${amount} salary\n🎮 Game: <code>{game_uid}</code>"
+        elif event_type == 'doubles_bonus_turn':
+            dice = event_info.get('dice', [0, 0])
+            streak = event_info.get('streak', 1)
+            return f"🎲 <b>{player_name}</b> rolled doubles ({dice[0]}, {dice[1]}) and gets bonus turn! (Streak: {streak})\n🎮 Game: <code>{game_uid}</code>"
+        elif event_type == 'card_drawn':
+            card_type = event_info.get('card_type', 'unknown')
+            card_description = event_info.get('card_description', 'unknown card')
+            return f"🃏 <b>{player_name}</b> drew {card_type} card: <i>{card_description}</i>\n🎮 Game: <code>{game_uid}</code>"
+        elif event_type == 'income_tax':
+            amount = event_info.get('amount', 0)
+            tax_type = event_info.get('tax_type', 'Income Tax')
+            return f"📊 <b>{player_name}</b> paid {tax_type} 💸${amount}\n🎮 Game: <code>{game_uid}</code>"
         
         return ""
     

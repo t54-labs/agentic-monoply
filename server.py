@@ -27,7 +27,7 @@ from colorama import init, Fore as ColoramaFore, Style as ColoramaStyle
 import utils
 
 # Import game event handler for notifications
-from game_event_handler import initialize_game_event_handler, get_game_event_handler
+from admin.game_event_handler import initialize_game_event_handler, get_game_event_handler
 
 # 2. Database and SQLAlchemy imports
 from database import create_db_and_tables, engine, games_table, players_table, game_turns_table, agent_actions_table, agents_table
@@ -525,7 +525,7 @@ class ThreadSafeGameInstance:
                     elif message.get('type') == 'action_error_notification':
                         # Handle action error notification for Telegram
                         try:
-                            from telegram_notifier import get_telegram_notifier
+                            from admin import get_telegram_notifier
                             telegram_notifier = get_telegram_notifier()
                             if telegram_notifier and telegram_notifier.enabled:
                                 error_data = message.get('data', {})
@@ -1207,7 +1207,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                     gc.log_event(f"[ACTION ERROR] P{active_player_id} ({current_acting_player.name}) - {chosen_tool_name}: {error_message}", "error_log")
                     
                     try:
-                        from telegram_notifier import get_telegram_notifier
+                        from admin import get_telegram_notifier
                         telegram_notifier = get_telegram_notifier()
                         if telegram_notifier and telegram_notifier.enabled:
                             error_data = {
@@ -1352,6 +1352,20 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                                               gc.doubles_streak < 3 and gc.doubles_streak > 0)
                     if rolled_doubles_for_bonus:
                         await gc.send_event_to_frontend({"type": "bonus_turn", "player_id": main_turn_player_for_next_step.player_id, "streak": gc.doubles_streak})
+                        
+                        # Send doubles bonus turn notification
+                        if game_uid in game_instances:
+                            game_instances[game_uid].send_message_safely({
+                                'type': 'special_event_notification',
+                                'game_uid': game_uid,
+                                'event_type': 'doubles_bonus_turn',
+                                'player_name': main_turn_player_for_next_step.name,
+                                'event_data': {
+                                    'dice': list(gc.dice),
+                                    'streak': gc.doubles_streak
+                                }
+                            })
+                        
                         gc._clear_pending_decision(); gc.dice_roll_outcome_processed = True; 
                         roll_action_taken_this_main_turn_segment = False 
                         if main_turn_player_for_next_step.pending_mortgaged_properties_to_handle: 
@@ -1513,7 +1527,7 @@ async def lifespan(app_instance: FastAPI):
     
     # Initialize game event handler and Telegram notifications
     print("Initializing Game Event Handler...")
-    from telegram_notifier import initialize_telegram_notifier, get_telegram_notifier
+    from admin import initialize_telegram_notifier, get_telegram_notifier
     initialize_telegram_notifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
     event_handler = initialize_game_event_handler()
     
@@ -1523,6 +1537,7 @@ async def lifespan(app_instance: FastAPI):
         print("Registering Telegram command handlers...")
         telegram_notifier.register_command_handler('end_game', telegram_end_game_command_handler)
         telegram_notifier.register_command_handler('get_status', telegram_get_status_command_handler)
+        telegram_notifier.register_command_handler('get_game_status', telegram_get_game_status_command_handler)
         telegram_notifier.register_command_handler('start_new_agents', telegram_create_random_agents_command_handler)
         
         # Start Telegram bot listening for commands
@@ -2118,229 +2133,13 @@ async def reset_agent_game_balance_api(agent_id: int, request: Request):
         print(f"{Fore.RED}[API E] Error resetting agent balance: {e}{Style.RESET_ALL}")
         raise HTTPException(status_code=500, detail="Failed to reset agent balance")
 
-async def telegram_end_game_command_handler(game_id: str) -> Dict[str, Any]:
-    """Handle Telegram end game command"""
-    from telegram_notifier import get_telegram_notifier
-    
-    try:
-        print(f"{Fore.YELLOW}[Telegram Command] Received end game command for: {game_id}{Style.RESET_ALL}")
-        
-        # Find the game instance
-        game_instance = game_instances.get(game_id)
-        if not game_instance:
-            return {
-                'success': False,
-                'error': f'Game {game_id} not found or not active'
-            }
-        
-        # Get game controller to access agents
-        game_controller = game_instance.game_controller
-        if not game_controller:
-            return {
-                'success': False,
-                'error': f'Game {game_id} has no active controller'
-            }
-        
-        # Get the agents for this game
-        agents_in_game = []
-        for agent_uid, g_uid in agent_manager.agents_in_game.items():
-            if g_uid == game_id:
-                agents_in_game.append(agent_uid)
-        
-        # Set game_over flag to end the game gracefully
-        game_controller.game_over = True
-        print(f"{Fore.GREEN}[Telegram Command] Set game_over flag for {game_id}{Style.RESET_ALL}")
-        
-        # Set all agents in this game to inactive
-        agents_affected = 0
-        try:
-            with Session(engine) as session:
-                for agent_uid in agents_in_game:
-                    stmt = update(agents_table).where(
-                        agents_table.c.agent_uid == agent_uid
-                    ).values(
-                        status='inactive',
-                        last_active=func.now()
-                    )
-                    session.execute(stmt)
-                    agents_affected += 1
-                    print(f"{Fore.CYAN}[Telegram Command] Set agent {agent_uid} to inactive{Style.RESET_ALL}")
-                
-                session.commit()
-                
-        except Exception as db_error:
-            print(f"{Fore.RED}[Telegram Command] Database error updating agents: {db_error}{Style.RESET_ALL}")
-        
-        # Send game termination notification
-        try:
-            telegram_notifier = get_telegram_notifier()
-            if telegram_notifier and telegram_notifier.enabled:
-                await telegram_notifier.send_message(
-                    f"🛑 <b>Game manually terminated</b>\n\n"
-                    f"🆔 Game ID: <code>{game_id}</code>\n"
-                    f"🤖 Agents affected: {agents_affected}\n"
-                    f"⏰ Time: {datetime.datetime.now().strftime('%H:%M:%S')}\n\n"
-                    f"✅ Game terminated by admin command"
-                )
-        except Exception as notify_error:
-            print(f"{Fore.YELLOW}[Telegram Command] Failed to send termination notification: {notify_error}{Style.RESET_ALL}")
-        
-        return {
-            'success': True,
-            'agents_affected': agents_affected,
-            'message': f'Game {game_id} terminated successfully'
-        }
-        
-    except Exception as e:
-        print(f"{Fore.RED}[Telegram Command] Error ending game {game_id}: {e}{Style.RESET_ALL}")
-        return {
-            'success': False,
-            'error': str(e)
-        }
-
-async def telegram_get_status_command_handler() -> Dict[str, Any]:
-    """Handle Telegram status command"""
-    try:
-        if not global_app_instance:
-            return {
-                'active_games': 0,
-                'total_thread_games': 0,
-                'available_agents': 0,
-                'error': 'App instance not available'
-            }
-        
-        # Get current game status
-        status = get_game_status(global_app_instance)
-        
-        # Get agent status
-        agent_status = agent_manager.get_status()
-        
-        return {
-            'active_games': status.get('active_games', 0),
-            'total_thread_games': status.get('total_thread_games', 0),
-            'available_agents': agent_status.get('available_agents_count', 0),
-            'agents_in_game': agent_status.get('agents_in_game_count', 0),
-            'concurrent_games_target': CONCURRENT_GAMES_COUNT,
-            'auto_restart_enabled': AUTO_RESTART_GAMES
-        }
-        
-    except Exception as e:
-        print(f"{Fore.RED}[Telegram Command] Error getting status: {e}{Style.RESET_ALL}")
-        return {
-            'active_games': 0,
-            'total_thread_games': 0,
-            'available_agents': 0,
-            'error': str(e)
-        }
-
-async def telegram_create_random_agents_command_handler() -> Dict[str, Any]:
-    """Handle Telegram create random agents command"""
-    from telegram_notifier import get_telegram_notifier
-    
-    try:
-        print(f"{Fore.YELLOW}[Telegram Command] Received create random agents command{Style.RESET_ALL}")
-        
-        agent_count = 4
-        print(f"{Fore.CYAN}[Telegram Command] Generating {agent_count} random agents using GPT-4o mini...{Style.RESET_ALL}")
-        
-        # Use the same logic as the API endpoint
-        random_agents = utils.generate_random_agents(agent_count)
-        
-        created_agents = []
-        skipped_agents = []
-        
-        with Session(engine) as session:
-            for agent_data in random_agents:
-                # Check if agent with the same name already exists
-                existing_agent_stmt = select(agents_table).where(agents_table.c.name == agent_data['name'])
-                existing_agent = session.execute(existing_agent_stmt).fetchone()
-                
-                if existing_agent:
-                    print(f"{Fore.YELLOW}[Telegram Command] Skipping '{agent_data['name']}' - agent with this name already exists{Style.RESET_ALL}")
-                    skipped_agents.append({
-                        "name": agent_data['name'],
-                        "reason": "Agent with this name already exists",
-                        "existing_id": existing_agent.id,
-                        "existing_status": existing_agent.status
-                    })
-                    continue
-                
-                agent_uid = f"agent_{agent_data['name'].lower().replace(' ', '_')}_{uuid.uuid4().hex[:6]}"
-                
-                # Create tpay account for this agent
-                tpay_account_id = None
-                try:
-                    print(f"{Fore.CYAN}[Telegram Command] Creating TPay account for agent: {agent_data['name']}{Style.RESET_ALL}")
-                    
-                    tpay_agent_data = tpay.create_agent(
-                        name=agent_data['name'],
-                        description=f"Monopoly AI agent: {agent_data['personality']}",
-                        agent_daily_limit=10000.0,  # High limit for monopoly transactions
-                        agent_type="autonomous_agent"
-                    )
-                    
-                    if tpay_agent_data and 'id' in tpay_agent_data:
-                        tpay_account_id = tpay_agent_data['id']
-                        print(f"{Fore.GREEN}[Telegram Command] Successfully created TPay account for {agent_data['name']} with ID: {tpay_account_id}{Style.RESET_ALL}")
-                    else:
-                        print(f"{Fore.RED}[Telegram Command] Failed to create TPay account for {agent_data['name']} - no ID returned{Style.RESET_ALL}")
-                        
-                except Exception as tpay_error:
-                    print(f"{Fore.RED}[Telegram Command] Error creating TPay account for {agent_data['name']}: {tpay_error}{Style.RESET_ALL}")
-                
-                if tpay_account_id:
-                    # Create agent record in database
-                    agent_values = {
-                        "agent_uid": agent_uid,
-                        "name": agent_data['name'],
-                        "personality_prompt": agent_data['personality'],
-                        "memory_data": {},
-                        "preferences": {},
-                        "total_games_played": 0,
-                        "total_wins": 0,
-                        "tpay_account_id": tpay_account_id,
-                        "status": "active"
-                    }
-                    
-                    stmt = insert(agents_table).values(agent_values).returning(agents_table.c.id)
-                    result = session.execute(stmt)
-                    agent_id = result.scalar_one_or_none()
-                    
-                    if agent_id:
-                        created_agents.append({
-                            "id": agent_id,
-                            "agent_uid": agent_uid,
-                            "name": agent_data['name'],
-                            "personality": agent_data['personality'][:50] + "..." if len(agent_data['personality']) > 50 else agent_data['personality'],
-                            "tpay_account_id": tpay_account_id,
-                            "tpay_status": "created" if tpay_account_id else "failed"
-                        })
-            
-            session.commit()
-        
-        # Reload agents in agent manager
-        await agent_manager.initialize_agents_from_database()
-        
-        successful_tpay = len([a for a in created_agents if a['tpay_account_id']])
-        
-        # Note: Telegram message sending is handled by the telegram_notifier's _handle_start_new_agents_command
-        
-        return {
-            'success': True,
-            'created_agents': created_agents,
-            'skipped_agents': skipped_agents,
-            'successful_tpay': successful_tpay,
-            'message': f'Created {len(created_agents)} random agents ({successful_tpay} with TPay accounts), skipped {len(skipped_agents)} existing agents'
-        }
-        
-    except Exception as e:
-        print(f"{Fore.RED}[Telegram Command] Error creating random agents: {e}{Style.RESET_ALL}")
-        
-        # Note: Error notification is handled by the telegram_notifier's _handle_start_new_agents_command
-        return {
-            'success': False,
-            'error': str(e)
-        }
+# Import Telegram command handlers from separate module
+from admin import (
+    telegram_end_game_command_handler,
+    telegram_get_status_command_handler,
+    telegram_get_game_status_command_handler,
+    telegram_create_random_agents_command_handler
+)
 
 if __name__ == "__main__":
     import uvicorn

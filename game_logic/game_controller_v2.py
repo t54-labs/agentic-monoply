@@ -24,6 +24,8 @@ from .managers import (
     AuctionManager, JailManager, BankruptcyManager
 )
 
+from admin.game_event_handler import get_game_event_handler
+
 MAX_TRADE_REJECTIONS = 5
 
 
@@ -168,7 +170,7 @@ class GameControllerV2:
                 self._threaded_game_instance.send_message_safely(notification_message)
             else:
                 # Directly call event handler
-                from game_event_handler import get_game_event_handler
+                from admin.game_event_handler import get_game_event_handler
                 event_handler = get_game_event_handler()
                 if event_handler:
                     combined_event_data = (event_data or {}).copy()
@@ -315,6 +317,11 @@ class GameControllerV2:
         
         if payment_success:
             self.log_event(f"{player.name} collected ${go_salary} for passing GO")
+            
+            # Send GO salary event notification
+            await self.notify_special_event('go_salary', player.name, {
+                'amount': go_salary
+            })
         else:
             self.log_event(f"[Error] {player.name} GO salary payment failed")
         
@@ -399,6 +406,14 @@ class GameControllerV2:
                 
                 if payment_success:
                     self.log_event(f"{player.name} successfully paid ${rent_amount} rent to {owner.name}.")
+                    
+                    # Send rent payment event notification
+                    await self.notify_special_event('rent_payment', player.name, {
+                        'property_name': square.name,
+                        'amount': rent_amount,
+                        'owner_name': owner.name
+                    })
+                    
                     self._resolve_current_action_segment()
                 else:
                     self.log_event(f"{player.name} failed to pay ${rent_amount} rent - payment failed or could not be initiated.")
@@ -414,14 +429,24 @@ class GameControllerV2:
     async def _handle_action_square_landing(self, player: Player, action_sq: ActionSquare) -> None:
         """Handle landing on Community Chest or Chance square"""
         card = None
+        card_type = ""
+        
         if action_sq.square_type == SquareType.COMMUNITY_CHEST:
             card = self.board.draw_community_chest_card()
+            card_type = "Community Chest"
             self.log_event(f"{player.name} drew a Community Chest card: {card[0]}")
         elif action_sq.square_type == SquareType.CHANCE:
             card = self.board.draw_chance_card()
+            card_type = "Chance"
             self.log_event(f"{player.name} drew a Chance card: {card[0]}")
         
         if card:
+            # Send card drawn notification
+            await self.notify_special_event('card_drawn', player.name, {
+                'card_type': card_type,
+                'card_description': card[0]
+            })
+            
             await self._handle_card_effect(player, card)
         else:
             self.log_event(f"[Error] Landed on ActionSquare {action_sq.name} but no card drawn.")
@@ -442,6 +467,40 @@ class GameControllerV2:
         
         if payment_success:
             self.log_event(f"{player.name} successfully paid ${amount_due} tax.")
+            
+            # Send income tax event notification
+            try:
+                # Check if we have a threaded game instance reference for safe communication
+                if hasattr(self, '_threaded_game_instance') and self._threaded_game_instance:
+                    # Use thread-safe message sending
+                    notification_message = {
+                        'type': 'special_event_notification',
+                        'game_uid': self.game_uid,
+                        'event_type': 'income_tax',
+                        'player_name': player.name,
+                        'event_data': {
+                            'amount': amount_due,
+                            'tax_type': tax_sq.name,
+                            'position': tax_sq.square_id
+                        }
+                    }
+                    self._threaded_game_instance.send_message_safely(notification_message)
+                else:
+                    # Fallback for non-threaded environments
+                    try:
+                        loop = asyncio.get_running_loop()
+                        if loop.is_running():
+                            asyncio.create_task(self.notify_special_event('income_tax', player.name, {
+                                'amount': amount_due,
+                                'tax_type': tax_sq.name,
+                                'position': tax_sq.square_id
+                            }))
+                    except (RuntimeError, AttributeError):
+                        # If no event loop is running or we're in wrong thread, just log
+                        self.log_event(f"[Info] {player.name} paid {tax_sq.name} ${amount_due} (notification skipped - no async context)")
+            except Exception as e:
+                self.log_event(f"[Warning] Failed to send income tax notification for {player.name}: {e}")
+            
             self._resolve_current_action_segment()
         else:
             self.log_event(f"{player.name} failed to pay ${amount_due} tax.")

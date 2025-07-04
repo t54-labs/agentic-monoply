@@ -545,6 +545,7 @@ class ThreadSafeGameInstance:
                                 await telegram_notifier.notify_action_error(error_data)
                         except Exception as e:
                             print(f"{Fore.RED}[Game Thread] Error sending action error notification: {e}{Style.RESET_ALL}")
+                    elif message.get('type') == 'property_landing_notification':
                         # Handle property landing notification for Telegram
                         try:
                             from admin import get_telegram_notifier

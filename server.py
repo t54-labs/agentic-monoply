@@ -545,6 +545,17 @@ class ThreadSafeGameInstance:
                                 await telegram_notifier.notify_action_error(error_data)
                         except Exception as e:
                             print(f"{Fore.RED}[Game Thread] Error sending action error notification: {e}{Style.RESET_ALL}")
+                        # Handle property landing notification for Telegram
+                        try:
+                            from admin import get_telegram_notifier
+                            telegram_notifier = get_telegram_notifier()
+                            if telegram_notifier and telegram_notifier.enabled:
+                                landing_message = message.get('message', '')
+                                if landing_message:
+                                    await telegram_notifier.send_message(landing_message)
+                                    print(f"{Fore.GREEN}📱 [Property Landing] Telegram notification sent successfully{Style.RESET_ALL}")
+                        except Exception as e:
+                            print(f"{Fore.RED}[Game Thread] Error sending property landing notification: {e}{Style.RESET_ALL}")
                     else:
                         # Send regular message via connection manager in main thread
                         await self.connection_manager.broadcast_to_game(self.game_uid, message)
@@ -1035,8 +1046,13 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
         action_sequence_this_gc_turn = 0 
         last_gc_turn_for_action_seq = gc.turn_count
         if last_gc_turn_for_action_seq == 0: last_gc_turn_for_action_seq = 1
+        
+        # Track turn actions for the ENTIRE turn (not just segments)
+        current_turn_actions = []
 
         print(f"{Fore.CYAN}Starting main game loop for G_UID: {game_uid}...{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}🎯 [GAME START] Initial turn: {gc.turn_count}, Player: {gc.players[gc.current_player_index].name} (P{gc.current_player_index}){Style.RESET_ALL}")
+        
         while not gc.game_over and loop_turn_count < MAX_TURNS:
             loop_turn_count += 1 # This is outer loop/safety counter, not gc.turn_count
             # gc.turn_count is advanced by gc.next_turn()
@@ -1049,6 +1065,9 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
             if gc.turn_count != last_gc_turn_for_action_seq: # If GC turn has advanced
                 action_sequence_this_gc_turn = 0
                 last_gc_turn_for_action_seq = gc.turn_count
+                # Reset turn actions when a new turn starts (new player)
+                current_turn_actions = []
+                print(f"{Fore.CYAN}🔄 [NEW TURN] Turn {gc.turn_count} started, reset actions for player {gc.current_player_index}{Style.RESET_ALL}")
             
             print(f"{Fore.CYAN}[DEBUG] About to determine active player...{Style.RESET_ALL}")
             
@@ -1117,13 +1136,19 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
             if active_player_id == current_main_turn_player_id and gc.pending_decision_type is None:
                  roll_action_taken_this_main_turn_segment = False
             
+            # DEBUG: Add detailed state logging before entering inner loop
+            print(f"{Fore.CYAN}[DEBUG] Player segment state: active={player_turn_segment_active}, bankrupt={current_acting_player.is_bankrupt}, game_over={gc.game_over}, action_count={action_this_segment_count}, max_actions={MAX_ACTIONS_PER_SEGMENT}{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}[DEBUG] Game state: pending_decision={gc.pending_decision_type}, dice_processed={gc.dice_roll_outcome_processed}, auction={gc.auction_in_progress}{Style.RESET_ALL}")
+            
             while player_turn_segment_active and not current_acting_player.is_bankrupt and not gc.game_over and action_this_segment_count < MAX_ACTIONS_PER_SEGMENT:
                 action_this_segment_count += 1
                 action_sequence_this_gc_turn += 1
                 gc.log_event(f"Loop {loop_turn_count}, SegAct {action_this_segment_count}, P{active_player_id} ({current_acting_player.name}) Turn. GC.Pend: {gc.pending_decision_type}, GC.DiceDone: {gc.dice_roll_outcome_processed}", "debug_loop")
                 available_actions = gc.get_available_actions(active_player_id)
                 gc.log_event(f"P{active_player_id} AvailActions: {available_actions}", "debug_loop")
+                print(f"{Fore.CYAN}[DEBUG] Available actions for P{active_player_id}: {available_actions}{Style.RESET_ALL}")
                 if not available_actions: 
+                    print(f"{Fore.YELLOW}[DEBUG] No actions available - ending segment{Style.RESET_ALL}")
                     await gc.send_event_to_frontend({"type":"warning_log", "message":f"[W] No actions for P{active_player_id} ({current_acting_player.name}). Pend:'{gc.pending_decision_type}', SegEnd."})
                     player_turn_segment_active = False; break 
                 game_state_for_agent = gc.get_game_state_for_agent(active_player_id)
@@ -1243,13 +1268,111 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 
                 # --- Player action segment termination logic --- 
                 if chosen_tool_name == "tool_roll_dice":
+                    print(f"{Fore.YELLOW}🎲 [ROLL DEBUG] Processing tool_roll_dice for {current_acting_player.name} (P{active_player_id}){Style.RESET_ALL}")
+                    print(f"{Fore.YELLOW}  Status: {action_result.get('status')}, Active={active_player_id}, Main={current_main_turn_player_id}, Turn={gc.turn_count}{Style.RESET_ALL}")
+                    
                     if action_result.get("status") == "success":
-                        if active_player_id == current_main_turn_player_id: roll_action_taken_this_main_turn_segment = True
-                        if not action_result.get("went_to_jail", False):
+                        dice_val = action_result.get("dice_roll")
+                        print(f"{Fore.YELLOW}  Dice result: {dice_val}{Style.RESET_ALL}")
+                        
+                        if active_player_id == current_main_turn_player_id: 
+                            roll_action_taken_this_main_turn_segment = True
+                            
+                            # Record dice roll action for turn summary
+                            if dice_val:
+                                current_turn_actions.append({
+                                    'type': 'roll',
+                                    'player_name': current_acting_player.name,
+                                    'dice': dice_val,
+                                    'description': f"🎲 {current_acting_player.name} rolled ({dice_val[0]}, {dice_val[1]})"
+                                })
+                                print(f"{Fore.BLUE}✅ [DICE ROLL] Recorded dice action for player {current_acting_player.name} (P{active_player_id}) in turn {gc.turn_count}: {dice_val}{Style.RESET_ALL}")
+                                print(f"{Fore.BLUE}📊 [DICE ROLL] Total actions in current turn: {len(current_turn_actions)}{Style.RESET_ALL}")
+                            else:
+                                print(f"{Fore.RED}❌ [DICE ROLL] No dice_val in action_result for {current_acting_player.name}{Style.RESET_ALL}")
+                        else:
+                            print(f"{Fore.YELLOW}⚠️ [DICE ROLL] Not recording - not main player (active={active_player_id}, main={current_main_turn_player_id}){Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}❌ [DICE ROLL] Action failed with status: {action_result.get('status')}{Style.RESET_ALL}")
+                        
+                    if not action_result.get("went_to_jail", False):
                             dice_val = action_result.get("dice_roll")
                             if dice_val and sum(dice_val) > 0 : 
                                 await gc._move_player(current_acting_player, sum(dice_val))
                                 print(f"{Fore.CYAN}[DEBUG MOVE] {current_acting_player.name} moved {sum(dice_val)} steps from dice {dice_val} to position {current_acting_player.position}{Style.RESET_ALL}")
+                                
+                                # 🔥 Add Telegram notification: Check player landing position property info
+                                try:
+                                    # Get the square where player landed
+                                    landed_square = gc.board.get_square(current_acting_player.position)
+                                    square_name = landed_square.name
+                                    
+                                    # Check if it's a purchasable property
+                                    from game_logic.board import PropertySquare, RailroadSquare, UtilitySquare
+                                    if isinstance(landed_square, (PropertySquare, RailroadSquare, UtilitySquare)):
+                                        # This is a purchasable property
+                                        owner_info = "Unowned (Available for purchase)"
+                                        is_own_property = False
+                                        
+                                        if landed_square.owner_id is not None:
+                                            if landed_square.owner_id == current_acting_player.player_id:
+                                                owner_info = f"Own property"
+                                                is_own_property = True
+                                            else:
+                                                owner_name = gc.players[landed_square.owner_id].name
+                                                owner_info = f"Owned by {owner_name}"
+                                                is_own_property = False
+                                        
+                                        # Send Telegram notification
+                                        try:
+                                            from admin import get_telegram_notifier
+                                            telegram_notifier = get_telegram_notifier()
+                                            if telegram_notifier and telegram_notifier.enabled:
+                                                # Construct notification message
+                                                property_status_msg = (
+                                                    f"🎯 **Player Landing Analysis** 🎯\n\n"
+                                                    f"🎮 Game: {game_uid}\n"
+                                                    f"🎲 Turn: {gc.turn_count}\n"
+                                                    f"👤 Player: {current_acting_player.name}\n"
+                                                    f"🎯 Dice: ({dice_val[0]}, {dice_val[1]})\n"
+                                                    f"📍 Landing Position: {square_name} (Position {current_acting_player.position})\n"
+                                                    f"🏠 Property Status: {owner_info}\n"
+                                                    f"🔧 Can Build: {'✅ Yes' if is_own_property else '❌ No'}\n\n"
+                                                )
+                                                
+                                                # If it's own property, add extra reminder about build house tool usage
+                                                if is_own_property:
+                                                    property_status_msg += (
+                                                        f"⚠️ **Important Reminder**: Player landed on their own property!\n"
+                                                        f"📋 Watch for correct usage of `build house` tool\n"
+                                                    )
+                                                    
+                                                    # Check property details
+                                                    if isinstance(landed_square, PropertySquare):
+                                                        property_status_msg += (
+                                                            f"🏘️ Current Houses: {landed_square.num_houses}\n"
+                                                            f"🏨 Max Houses: 5 (5th is hotel)\n"
+                                                        )
+                                                
+                                                # Use thread-safe way to send notification
+                                                if game_uid in game_instances:
+                                                    game_instances[game_uid].send_message_safely({
+                                                        'type': 'property_landing_notification',
+                                                        'game_uid': game_uid,
+                                                        'player_name': current_acting_player.name,
+                                                        'message': property_status_msg
+                                                    })
+                                                    print(f"{Fore.GREEN}📱 [Telegram] Property landing notification sent: {current_acting_player.name} landed on {square_name}{Style.RESET_ALL}")
+                                        except Exception as telegram_error:
+                                            print(f"{Fore.YELLOW}📱 [Telegram] Failed to send property landing notification: {telegram_error}{Style.RESET_ALL}")
+                                    
+                                    else:
+                                        # Not a property, but can be logged (optional)
+                                        print(f"{Fore.CYAN}📍 [Property Check] {current_acting_player.name} landed on {square_name} (non-property square){Style.RESET_ALL}")
+                                        
+                                except Exception as property_check_error:
+                                    print(f"{Fore.RED}📍 [Property Check] Error checking landing property info: {property_check_error}{Style.RESET_ALL}")
+                                    
                             elif not dice_val:
                                 gc.log_event(f"[E] No dice_roll in action_result for P{active_player_id}. Ending segment.", "error_log")
                                 gc._resolve_current_action_segment()
@@ -1331,6 +1454,8 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 if player_turn_segment_active and not gc.game_over and ACTION_DELAY_SECONDS > 0: await asyncio.sleep(ACTION_DELAY_SECONDS)
             
             # --- End of inner while loop (player_turn_segment_active) ---
+            # DEBUG: Log why the inner loop ended
+            print(f"{Fore.YELLOW}[DEBUG] Inner loop ended. Reasons: segment_active={player_turn_segment_active}, bankrupt={current_acting_player.is_bankrupt}, game_over={gc.game_over}, action_count={action_this_segment_count}, max_actions={MAX_ACTIONS_PER_SEGMENT}{Style.RESET_ALL}")
             if gc.game_over: break # Break outer while loop if game over
         
             # --- Outer while loop: Max turns check & Game Over check ---
@@ -1345,17 +1470,22 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
             main_turn_player_for_next_step = gc.players[gc.current_player_index]
             call_next_turn_flag = False
 
-            # Track turn actions during this segment
-            current_turn_actions = []
+            # DEBUG: Log the decision logic for advancing turns
+            print(f"{Fore.MAGENTA}🔍 [TURN LOGIC] Turn advance analysis for G:{game_uid} Loop:{loop_turn_count} GC_Turn:{gc.turn_count}{Style.RESET_ALL}")
+            print(f"{Fore.MAGENTA}    📊 State: pending_decision='{gc.pending_decision_type}', auction={gc.auction_in_progress}, dice_processed={gc.dice_roll_outcome_processed}{Style.RESET_ALL}")
+            print(f"{Fore.MAGENTA}    👤 Players: active_player={active_player_id}, main_player={main_turn_player_for_next_step.player_id}, main_bankrupt={main_turn_player_for_next_step.is_bankrupt}{Style.RESET_ALL}")
+            print(f"{Fore.MAGENTA}    🎲 Dice: rolled_in_segment={roll_action_taken_this_main_turn_segment}, dice={gc.dice}, doubles_streak={gc.doubles_streak}{Style.RESET_ALL}")
 
             # Don't advance turn if we're in the middle of trade negotiations or other cross-player decisions
             if gc.pending_decision_type in ["respond_to_trade_offer", "propose_new_trade_after_rejection"]:
                 # Trade negotiations are happening - don't advance main turn yet
                 gc.log_event(f"Trade negotiation in progress ({gc.pending_decision_type}). Not advancing main turn.", "debug_next_turn")
+                print(f"{Fore.MAGENTA}🔄 [TURN LOGIC] Trade negotiation in progress - not advancing turn{Style.RESET_ALL}")
                 call_next_turn_flag = False
             elif not gc.auction_in_progress: 
                 if main_turn_player_for_next_step.is_bankrupt: 
                     gc.log_event(f"Main turn P{main_turn_player_for_next_step.player_id} ({main_turn_player_for_next_step.name}) is bankrupt. Advancing turn.", "debug_next_turn")
+                    print(f"{Fore.MAGENTA}💀 [TURN LOGIC] Main player is bankrupt - advancing turn{Style.RESET_ALL}")
                     call_next_turn_flag = True
                 elif active_player_id == main_turn_player_for_next_step.player_id: 
                     is_in_jail_at_segment_end = main_turn_player_for_next_step.in_jail
@@ -1363,6 +1493,8 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                                               gc.dice[0] == gc.dice[1] and gc.dice[0] != 0 and 
                                               not is_in_jail_at_segment_end and 
                                               gc.doubles_streak < 3 and gc.doubles_streak > 0)
+                    print(f"{Fore.MAGENTA}    🎯 Doubles check: rolled={roll_action_taken_this_main_turn_segment}, dice_equal={gc.dice[0] == gc.dice[1]}, not_zero={gc.dice[0] != 0}, not_in_jail={not is_in_jail_at_segment_end}, streak_valid={gc.doubles_streak < 3 and gc.doubles_streak > 0}{Style.RESET_ALL}")
+                    
                     if rolled_doubles_for_bonus:
                         await gc.send_event_to_frontend({"type": "bonus_turn", "player_id": main_turn_player_for_next_step.player_id, "streak": gc.doubles_streak})
                         
@@ -1379,38 +1511,90 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                                 }
                             })
                         
+                        # Send bonus turn continuation notification to admin
+                        try:
+                            event_handler = get_game_event_handler()
+                            if event_handler:
+                                print(f"{Fore.BLUE}🎲 [BONUS TURN] Sending bonus turn continuation notification for player {main_turn_player_for_next_step.name}{Style.RESET_ALL}")
+                                await event_handler.handle_bonus_turn_continuation(
+                                    gc.game_uid, 
+                                    gc, 
+                                    gc.turn_count, 
+                                    main_turn_player_for_next_step.player_id,
+                                    gc.dice,
+                                    gc.doubles_streak
+                                )
+                                print(f"{Fore.GREEN}✅ [BONUS TURN] Bonus turn notification sent successfully{Style.RESET_ALL}")
+                        except Exception as bonus_turn_error:
+                            print(f"{Fore.RED}❌ [BONUS TURN] Error sending bonus turn notification: {bonus_turn_error}{Style.RESET_ALL}")
+                        
                         gc._clear_pending_decision(); gc.dice_roll_outcome_processed = True; 
+                        
+                        # 🎯 For bonus turn: DON'T reset turn_phase immediately
+                        # Let player go through normal post_roll phase for property management
+                        # The bonus turn will be handled when they choose to end their turn or after property management
+                        # We just don't call next_turn() to keep them as the active player
+                        
                         roll_action_taken_this_main_turn_segment = False 
                         if main_turn_player_for_next_step.pending_mortgaged_properties_to_handle: 
                             gc._handle_received_mortgaged_property_initiation(main_turn_player_for_next_step)
-                        gc.log_event(f"Player {main_turn_player_for_next_step.name} gets a bonus turn segment due to doubles.", "debug_next_turn")
+                        gc.log_event(f"Player {main_turn_player_for_next_step.name} gets a bonus turn segment due to doubles - will continue to property management phase first.", "debug_next_turn")
+                        print(f"{Fore.MAGENTA}🎲 [TURN LOGIC] Player gets bonus turn - will complete post-roll phase first, then get another turn{Style.RESET_ALL}")
+                        call_next_turn_flag = False
                     else:
                         gc.log_event(f"End of segment for main turn player {main_turn_player_for_next_step.name} (P{active_player_id}). In jail: {is_in_jail_at_segment_end}. Proceeding to next logical turn decision.", "debug_next_turn")
+                        print(f"{Fore.MAGENTA}✅ [TURN LOGIC] Normal end of turn - advancing turn{Style.RESET_ALL}")
                         call_next_turn_flag = True
+                else:
+                    print(f"{Fore.MAGENTA}❌ [TURN LOGIC] Active player ({active_player_id}) != main player ({main_turn_player_for_next_step.player_id}) - not advancing turn{Style.RESET_ALL}")
+                    call_next_turn_flag = False
+            else:
+                print(f"{Fore.MAGENTA}🏛️ [TURN LOGIC] Auction in progress - not advancing turn{Style.RESET_ALL}")
+                call_next_turn_flag = False
+            
+            print(f"{Fore.MAGENTA}🎯 [TURN LOGIC] FINAL DECISION: call_next_turn_flag = {call_next_turn_flag}{Style.RESET_ALL}")
             
             if call_next_turn_flag:
+                print(f"{Fore.GREEN}🔄 [TURN ADVANCE] Advancing turn for {game_uid}: Player {current_main_turn_player_id} -> Next{Style.RESET_ALL}")
+                
+                # Store the previous turn number for notification
+                previous_turn_number = gc.turn_count
+                
                 gc.log_event(f"Calling gc.next_turn() for G_UID:{game_uid}. Previous GC turn: {gc.turn_count}, Previous Main PIdx: {current_main_turn_player_id}", "debug_next_turn")
                 gc.next_turn() # This will increment gc.turn_count and set new current_player_index
                 gc.log_event(f"gc.next_turn() called. New GC turn: {gc.turn_count}, New Main PIdx: {gc.current_player_index}", "debug_next_turn")
+                print(f"{Fore.GREEN}✅ [TURN ADVANCE] Turn advanced: GC Turn {gc.turn_count}, Current Player {gc.current_player_index}{Style.RESET_ALL}")
                 
-                # Send turn end notification
-                event_handler = get_game_event_handler()
-                
-                # Record dice roll action if it happened - all dice rolls are treated the same for turn summary
-                if roll_action_taken_this_main_turn_segment:
-                    current_turn_actions.append({
-                        'type': 'roll',
-                        'player_name': gc.players[current_main_turn_player_id].name,
-                        'dice': gc.dice,
-                        'description': f"🎲 {gc.players[current_main_turn_player_id].name} rolled ({gc.dice[0]}, {gc.dice[1]})"
-                    })
-                
-                # Note: All other important events (property purchases, failures, trades, etc.) 
-                # are tracked through special_event_notifications sent in real-time during the turn
-                # This turn_actions only contains basic dice roll information for turn summary
-                
-                await event_handler.handle_turn_end(gc.game_uid, gc, gc.turn_count - 1, current_main_turn_player_id, current_turn_actions)
-            elif gc.auction_in_progress: 
+                # Send turn end notification (each turn now has unique turn_count)
+                print(f"{Fore.BLUE}📢 [TURN END] Preparing turn end notification for player {current_main_turn_player_id}, turn {previous_turn_number}{Style.RESET_ALL}")
+                print(f"{Fore.BLUE}📊 [TURN END] Current turn actions: {len(current_turn_actions)} actions{Style.RESET_ALL}")
+                try:
+                    event_handler = get_game_event_handler()
+                    if event_handler is None:
+                        print(f"{Fore.RED}❌ [TURN END] Event handler is None - cannot send turn end notification{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.BLUE}✅ [TURN END] Event handler obtained successfully{Style.RESET_ALL}")
+                        
+                        print(f"{Fore.BLUE}📤 [TURN END] Sending turn end notification: Turn {previous_turn_number}, Player {gc.players[current_main_turn_player_id].name} (P{current_main_turn_player_id}), Actions: {len(current_turn_actions)}{Style.RESET_ALL}")
+                        
+                        # Debug: Show all actions being sent
+                        for i, action in enumerate(current_turn_actions):
+                            print(f"{Fore.BLUE}  Action {i+1}: {action.get('description', 'Unknown action')}{Style.RESET_ALL}")
+                        
+                        # Note: current_turn_actions is now populated throughout the turn, not just at the end
+                        # All dice rolls and important actions are already recorded
+                        
+                        await event_handler.handle_turn_end(gc.game_uid, gc, previous_turn_number, current_main_turn_player_id, current_turn_actions)
+                        print(f"{Fore.GREEN}🎉 [TURN END] Turn end notification sent successfully{Style.RESET_ALL}")
+                        
+                except Exception as turn_end_error:
+                    print(f"{Fore.RED}❌ [TURN END] Error sending turn end notification: {turn_end_error}{Style.RESET_ALL}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"{Fore.YELLOW}⏭️ [TURN SKIP] Not advancing turn (call_next_turn_flag=False){Style.RESET_ALL}")
+            
+            if gc.auction_in_progress: 
                 await gc.send_event_to_frontend({"type":"auction_log", "message":f"Auction for propId {gc.auction_property_id if gc.auction_property_id is not None else 'N/A'} continues..."})
         
             # After potential turn change or auction continuation, send updates for all players

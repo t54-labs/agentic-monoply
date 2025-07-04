@@ -38,7 +38,13 @@ class StateManager(BaseManager):
         """
         self.gc.dice_roll_outcome_processed = True
         self.clear_pending_decision()
-        self.log_event("Current action segment resolved", "debug_state")
+        
+        # 🎯 Set turn phase to post-roll after dice roll and movement are complete
+        # This allows property management actions
+        if hasattr(self.gc, 'turn_phase'):
+            self.gc.turn_phase = "post_roll"
+        
+        self.log_event("Current action segment resolved - entering post-roll phase", "debug_state")
         
     def next_turn(self) -> None:
         """
@@ -68,12 +74,15 @@ class StateManager(BaseManager):
         self.gc.dice_roll_outcome_processed = True
         self.clear_pending_decision()
         
-        # Increment turn count only when returning to the first player (completing a round)
-        if self.gc.current_player_index <= original_index:
-            self.gc.turn_count += 1
+        # 🎯 NEW TURN: Set phase to pre-roll (player must roll dice first)
+        if hasattr(self.gc, 'turn_phase'):
+            self.gc.turn_phase = "pre_roll"
+        
+        # Increment turn count for each player's turn (not just when completing a round)
+        self.gc.turn_count += 1
             
         new_player = self.gc.get_current_player()
-        self.log_event(f"Turn advanced to {new_player.name} (P{self.gc.current_player_index}). Turn: {self.gc.turn_count}", "turn_advance")
+        self.log_event(f"Turn advanced to {new_player.name} (P{self.gc.current_player_index}). Turn: {self.gc.turn_count} - PRE-ROLL phase", "turn_advance")
         
         # Handle start-of-turn conditions
         self._handle_turn_start_conditions(new_player)
@@ -90,8 +99,10 @@ class StateManager(BaseManager):
         elif player.pending_mortgaged_properties_to_handle:
             self._handle_received_mortgaged_property_initiation(player)
         else:
-            # Normal turn start - no special conditions
-            self.resolve_current_action_segment()
+            # Normal turn start - player should be in pre_roll phase, ready to roll dice
+            # DO NOT call resolve_current_action_segment() here as that would skip to post_roll!
+            # The turn_phase is already set to "pre_roll" by next_turn()
+            self.log_event(f"{player.name} starts normal turn in PRE-ROLL phase - must roll dice first", "debug_state")
             
     def _handle_received_mortgaged_property_initiation(self, player: Player) -> None:
         """

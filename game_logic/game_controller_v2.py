@@ -128,6 +128,11 @@ class GameControllerV2:
         # Set threaded game instance reference (will be set by ThreadSafeGameInstance)
         self._threaded_game_instance = None
 
+        # 🎯 NEW: Turn phase to distinguish between different states
+        # "pre_roll": Player must roll dice (start of turn)
+        # "post_roll": Player can do property management (after roll and movement)
+        self.turn_phase = "pre_roll"
+
     # ======= Core Game Methods (Delegate to Managers) =======
     
     def log_event(self, event_message: str, event_type: str = "game_log_event") -> None:
@@ -671,9 +676,9 @@ class GameControllerV2:
         """Handle paying bail to get out of jail"""
         return await self.jail_manager.pay_to_get_out_of_jail(player_id, params)
         
-    def _use_card_to_get_out_of_jail(self, player_id: int, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _use_card_to_get_out_of_jail(self, player_id: int, params: Dict[str, Any]) -> Dict[str, Any]:
         """Handle using Get Out of Jail Free card"""  
-        return self.jail_manager.use_card_to_get_out_of_jail(player_id, params)
+        return await self.jail_manager.use_card_to_get_out_of_jail(player_id, params)
         
     # ======= Auction Methods (Delegate to AuctionManager) =======
     
@@ -731,7 +736,10 @@ class GameControllerV2:
         self.dice = (random.randint(1, 6), random.randint(1, 6))
         self.log_event(f"{current_player.name} rolled {self.dice[0]} and {self.dice[1]}.")
         self.dice_roll_outcome_processed = False
-
+        
+        # 🎯 When rolling dice, we're in "processing" state - not pre_roll or post_roll
+        # This will be set to post_roll after movement and landing are processed
+        
         if self.is_double_roll():
             self.doubles_streak += 1
             self.log_event(f"Doubles! Streak: {self.doubles_streak}")
@@ -822,12 +830,15 @@ class GameControllerV2:
         self._clear_pending_decision()
         self.dice_roll_outcome_processed = True
         
+        # 🎯 Set initial turn phase to pre-roll (first player must roll dice)
+        self.turn_phase = "pre_roll"
+        
         # Check if starting player is in jail (for test mode or other reasons)
         current_player = self.get_current_player()
         if current_player.in_jail:
             self._handle_jail_turn_initiation(current_player)
             
-        self.log_event(f"Game initialized successfully. Current player: {current_player.name}. Ready for first action.")
+        self.log_event(f"Game initialized successfully. Current player: {current_player.name}. Ready for first action - PRE-ROLL phase.")
         
     def _handle_jail_turn_initiation(self, player: Player) -> None:
         """Handle jail turn initiation - delegate to JailManager"""
@@ -908,32 +919,109 @@ class GameControllerV2:
         if not actions and self.pending_decision_type is None: 
             if self.current_player_index == player_id:
                 if not player.in_jail: 
-                    if self.dice_roll_outcome_processed: 
+                    if self.turn_phase == "pre_roll":
+                        # 🎲 RULE: In Monopoly, rolling dice is MANDATORY at the start of each turn
+                        # Players cannot choose to skip rolling dice to avoid moving
                         actions.append("tool_roll_dice")
                         
+                        # 🚫 IMPORTANT: NO property management before rolling dice
+                        # Players must roll dice first, then move, then handle property management
+                        
+                        # The only exception is resign game
+                        actions.append("tool_resign_game")
+                        
+                    elif self.turn_phase == "post_roll":
+                        # 🎲 Dice has been rolled and player has moved to new position
+                        # Now player can do property management in "post-roll" phase
+                        
+                        # 🏠 Property management actions (after rolling and moving)
                         # Check if can build houses
                         can_build_on_any_property = False
+
+                        # Debug: Log player's properties for build house analysis
+                        self.log_event(f"[BUILD HOUSE DEBUG] P{player_id} ({player.name}) analysis:", "debug_build_house")
+                        self.log_event(f"  - Money: ${player.money}", "debug_build_house")
+                        self.log_event(f"  - Owns properties: {list(player.properties_owned_ids)}", "debug_build_house")
+                        self.log_event(f"  - Turn phase: {getattr(self, 'turn_phase', 'unknown')}", "debug_build_house")
+
                         for p_id_check in player.properties_owned_ids:
                             square_check = self.board.get_square(p_id_check)
-                            if isinstance(square_check, PropertySquare) and square_check.owner_id == player_id and \
-                               not square_check.is_mortgaged and square_check.num_houses < 5 and player.money >= square_check.house_price:
-                                # Check if owns all properties in the color group
-                                color_group_properties = self.board.get_properties_in_group(square_check.color_group)
-                                owns_all_in_group_unmortgaged = True
-                                for prop_square in color_group_properties:
-                                    if not (isinstance(prop_square, PropertySquare) and prop_square.owner_id == player_id and not prop_square.is_mortgaged):
-                                        owns_all_in_group_unmortgaged = False
-                                        break
-                                if owns_all_in_group_unmortgaged:
-                                    # color_group_properties contains PropertySquare objects, not IDs
-                                    min_houses_in_group = min(prop.num_houses for prop in color_group_properties if isinstance(prop, PropertySquare) and prop.owner_id == player_id)
-                                    if square_check.num_houses == min_houses_in_group: 
-                                        can_build_on_any_property = True
-                                        break
+                            
+                            if isinstance(square_check, PropertySquare):
+                                self.log_event(f"  - Checking property {square_check.name} (ID: {p_id_check}):", "debug_build_house")
+                                self.log_event(f"    * Owner: {square_check.owner_id} (me: {player_id})", "debug_build_house")
+                                self.log_event(f"    * Mortgaged: {square_check.is_mortgaged}", "debug_build_house")
+                                self.log_event(f"    * Houses: {square_check.num_houses}/5", "debug_build_house")
+                                self.log_event(f"    * House price: ${square_check.house_price}", "debug_build_house")
+                                self.log_event(f"    * Color group: {square_check.color_group.value if square_check.color_group else 'N/A'}", "debug_build_house")
+                                
+                                if square_check.owner_id == player_id and \
+                                   not square_check.is_mortgaged and \
+                                   square_check.num_houses < 5 and \
+                                   player.money >= square_check.house_price:
+                                    
+                                    # Check if owns all properties in the color group
+                                    color_group_properties = self.board.get_properties_in_group(square_check.color_group)
+                                    self.log_event(f"    * Color group has {len(color_group_properties)} properties total", "debug_build_house")
+                                    
+                                    owns_all_in_group_unmortgaged = True
+                                    owned_count = 0
+                                    mortgaged_count = 0
+                                    
+                                    for i, prop_square in enumerate(color_group_properties):
+                                        prop_name = prop_square.name if hasattr(prop_square, 'name') else f"Property_{i}"
+                                        prop_owner = prop_square.owner_id if hasattr(prop_square, 'owner_id') else None
+                                        prop_mortgaged = prop_square.is_mortgaged if hasattr(prop_square, 'is_mortgaged') else False
+                                        prop_houses = prop_square.num_houses if hasattr(prop_square, 'num_houses') else 0
+                                        
+                                        self.log_event(f"      - {prop_name}: owner={prop_owner}, mortgaged={prop_mortgaged}, houses={prop_houses}", "debug_build_house")
+                                        
+                                        if isinstance(prop_square, PropertySquare) and prop_square.owner_id == player_id:
+                                            owned_count += 1
+                                            if prop_square.is_mortgaged:
+                                                mortgaged_count += 1
+                                                
+                                        if not (isinstance(prop_square, PropertySquare) and 
+                                               prop_square.owner_id == player_id and 
+                                               not prop_square.is_mortgaged):
+                                            owns_all_in_group_unmortgaged = False
+                                    
+                                    self.log_event(f"    * Owned in group: {owned_count}/{len(color_group_properties)}", "debug_build_house")
+                                    self.log_event(f"    * Mortgaged in group: {mortgaged_count}", "debug_build_house")
+                                    self.log_event(f"    * Owns all unmortgaged: {owns_all_in_group_unmortgaged}", "debug_build_house")
+                                    
+                                    if owns_all_in_group_unmortgaged:
+                                        # Check even building rule
+                                        min_houses_in_group = min(prop.num_houses for prop in color_group_properties 
+                                                                 if isinstance(prop, PropertySquare) and prop.owner_id == player_id)
+                                        self.log_event(f"    * Min houses in group: {min_houses_in_group}", "debug_build_house")
+                                        self.log_event(f"    * This property houses: {square_check.num_houses}", "debug_build_house")
+                                        self.log_event(f"    * Can build (even rule): {square_check.num_houses == min_houses_in_group}", "debug_build_house")
+                                        
+                                        if square_check.num_houses == min_houses_in_group:
+                                            can_build_on_any_property = True
+                                            self.log_event(f"    ✅ CAN BUILD on {square_check.name}!", "debug_build_house")
+                                            break
+                                        else:
+                                            self.log_event(f"    ❌ Cannot build - must build on properties with {min_houses_in_group} houses first", "debug_build_house")
+                                    else:
+                                        if owned_count < len(color_group_properties):
+                                            self.log_event(f"    ❌ Cannot build - don't own complete color group", "debug_build_house")
+                                        elif mortgaged_count > 0:
+                                            self.log_event(f"    ❌ Cannot build - {mortgaged_count} properties mortgaged in group", "debug_build_house")
+                                        else:
+                                            self.log_event(f"    ❌ Cannot build - other ownership/mortgage issues", "debug_build_house")
+                            else:
+                                # For non-PropertySquare types (Railroad, Utility), houses cannot be built
+                                square_type = type(square_check).__name__
+                                self.log_event(f"  - Skipping {square_check.name} (ID: {p_id_check}): {square_type} cannot have houses built", "debug_build_house")
+
+                        self.log_event(f"[BUILD HOUSE DEBUG] Final result: can_build_on_any_property = {can_build_on_any_property}", "debug_build_house")
+
                         if can_build_on_any_property: 
                             actions.append("tool_build_house")
                             
-                        # Check other property actions
+                        # Other property management actions (post-roll only)
                         if any(isinstance(sq := self.board.get_square(pid), PropertySquare) and sq.owner_id == player_id and sq.num_houses > 0 for pid in player.properties_owned_ids): 
                             actions.append("tool_sell_house")
                         if any(isinstance(sq := self.board.get_square(pid), PurchasableSquare) and sq.owner_id == player_id and not sq.is_mortgaged and not (isinstance(sq, PropertySquare) and sq.num_houses > 0) for pid in player.properties_owned_ids): 
@@ -942,24 +1030,24 @@ class GameControllerV2:
                             actions.append("tool_unmortgage_property")
                         if len([p_other for p_other in self.players if not p_other.is_bankrupt and p_other.player_id != player_id]) > 0: 
                             actions.append("tool_propose_trade")
+                        
+                        # 🎲 BONUS TURN: If player rolled doubles, they can roll again after property management
+                        if self.doubles_streak > 0 and self.doubles_streak < 3:
+                            actions.append("tool_roll_dice")  # Allow another dice roll for bonus turn
+                            self.log_event(f"[Bonus Turn] {player.name} can roll dice again due to doubles (streak: {self.doubles_streak})", "debug_bonus_turn")
+                        
+                        # In post-roll phase, player can end turn (but only if no bonus turn available or they choose to skip it)
                         actions.append("tool_end_turn")
-                    elif not self.dice_roll_outcome_processed and self.pending_decision_type is None: 
-                        # Dice rolled but outcome not processed - allow asset management
-                        if any(isinstance(sq := self.board.get_square(pid), PropertySquare) and sq.owner_id == player_id and sq.num_houses > 0 for pid in player.properties_owned_ids): 
-                            actions.append("tool_sell_house")
-                        if any(isinstance(sq := self.board.get_square(pid), PurchasableSquare) and sq.owner_id == player_id and not sq.is_mortgaged and not (isinstance(sq, PropertySquare) and sq.num_houses > 0) for pid in player.properties_owned_ids): 
-                            actions.append("tool_mortgage_property")
-                        if any(isinstance(sq := self.board.get_square(pid), PurchasableSquare) and sq.owner_id == player_id and sq.is_mortgaged and player.money >= int(sq.mortgage_value*1.1) for pid in player.properties_owned_ids): 
-                            actions.append("tool_unmortgage_property")
-                        if len([p_other for p_other in self.players if not p_other.is_bankrupt and p_other.player_id != player_id]) > 0: 
-                            actions.append("tool_propose_trade")
-                        actions.append("tool_end_turn")
+                        actions.append("tool_resign_game")
+                        
                     if not actions: 
                         actions.append("tool_wait") 
-                    actions.append("tool_resign_game")
                 elif player.in_jail: 
-                    self.log_event(f"[Warning] P{player_id} ({player.name}) in jail, but no jail_options pending. Fallback.", "warning_log")
-                    actions.extend(["tool_end_turn", "tool_resign_game"]) 
+                    # 🔒 Handle jail scenario properly
+                    self.log_event(f"[Info] P{player_id} ({player.name}) in jail, triggering jail options.", "warning_log")
+                    self._set_pending_decision("jail_options", {"player_id": player_id})
+                    # Re-run get_available_actions to get jail options
+                    return self.get_available_actions(player_id)
             else: 
                 actions.append("tool_wait")
 

@@ -93,8 +93,8 @@ class GameEventHandler:
             return False
         
         # only send notification on specific turns to avoid spam
-        if not (turn_number % 5 == 0 or turn_number <= 5):
-            return True
+        # if not (turn_number % 5 == 0 or turn_number <= 5):
+        #     return True
             
         try:
             player = gc.players[player_id]
@@ -288,6 +288,33 @@ class GameEventHandler:
             return f"📊 <b>{player_name}</b> paid {tax_type} 💸${amount}\n🎮 Game: <code>{game_uid}</code>"
         
         return ""
+    
+    async def handle_bonus_turn_continuation(self, game_uid: str, gc, turn_number: int, 
+                                           player_id: int, dice: tuple, doubles_streak: int) -> bool:
+        """handle bonus turn continuation (when player rolls doubles and gets another turn)"""
+        if not self.notifier or not self.notifier.enabled:
+            return False
+            
+        try:
+            player = gc.players[player_id]
+            
+            # Create a simplified "turn continuation" notification
+            message = f"""
+🎲 <b>Bonus Turn #{doubles_streak}</b>
+
+🎯 Player: <b>{player.name}</b> rolled doubles ({dice[0]}, {dice[1]})!
+💰 Money: ${player.money}
+📍 Position: {player.position}
+🔄 Turn #{turn_number} continues...
+
+🎮 Game ID: <code>{game_uid}</code>
+            """.strip()
+            
+            await self.notifier.send_message(message, disable_notification=True)
+            return True
+        except Exception as e:
+            print(f"[GameEventHandler] Failed to send bonus turn continuation notification: {e}")
+            return False
     
     async def handle_maintenance_event(self, active_games: int, available_agents: int) -> bool:
         """handle maintenance event"""

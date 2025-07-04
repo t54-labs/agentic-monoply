@@ -296,8 +296,18 @@ def tool_use_get_out_of_jail_card(gc: Any, player_id: int, params: Dict[str, Any
              return {"status": "failure", "message": "Cannot use GOOJ card: not in correct jail decision state."}
         if not (player.has_chance_gooj_card or player.has_community_gooj_card):
             return {"status": "failure", "message": "No GOOJ card to use."}
-        # Call GC method with player_id and params
-        action_outcome = gc._use_card_to_get_out_of_jail(player_id, params) 
+        # Call async GC method with player_id and params
+        import asyncio
+        try:
+            # If we're already in an async context, use await
+            loop = asyncio.get_running_loop()
+            # We're in asyncio.to_thread, so we need to call the async method differently
+            action_outcome = asyncio.run_coroutine_threadsafe(
+                gc._use_card_to_get_out_of_jail(player_id, params), loop
+            ).result()
+        except RuntimeError:
+            # No event loop running, we can use asyncio.run
+            action_outcome = asyncio.run(gc._use_card_to_get_out_of_jail(player_id, params))
         result = {"status": action_outcome.get("status"), "message": action_outcome.get("message", "Use GOOJ card attempt processed.")}
         _log_agent_action(gc, player_id, "tool_use_get_out_of_jail_card", params, result)
         return result

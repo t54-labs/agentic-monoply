@@ -231,6 +231,123 @@ class OpenAIAgent(BaseAgent):
         if game_state.get('current_turn_player_id') != self.player_id and game_state.get('pending_decision_type') not in ["respond_to_trade_offer", "auction_bid", "propose_new_trade_after_rejection"] :
              prompt += "Warning: It appears it is NOT my main turn. I should usually 'wait' unless I have a specific decision like responding to a trade or bidding in an auction.\n"
         
+        # add strategy note for building houses
+        if "tool_build_house" in available_actions:
+            prompt += "\n🏠 IMPORTANT STRATEGY NOTE: Building houses is one of the most profitable actions in Monopoly!\n"
+            prompt += "- Houses significantly increase rent income from properties\n"
+            prompt += "- Building houses reduces the housing supply for other players\n"
+            prompt += "- You should prioritize building houses when you can afford them\n"
+            prompt += "- RULE: Houses can only be built AFTER you have rolled dice and moved this turn\n"
+            prompt += "- Building houses is done during the property management phase, not before rolling\n\n"
+        
+        # 🎯 NEW: add strategy note for trading
+        if "tool_propose_trade" in available_actions:
+            prompt += "\n🤝 CRITICAL MONOPOLY STRATEGY: TRADING FOR COLOR GROUP MONOPOLIES!\n"
+            prompt += "=== WHY TRADING IS ESSENTIAL ===\n"
+            prompt += "- Individual properties generate minimal rent\n"
+            prompt += "- MONOPOLY RULE: You can only build houses if you own ALL properties in a color group\n"
+            prompt += "- Completing color groups increases rent dramatically (2x base rent + house rental)\n"
+            prompt += "- Trading is often the ONLY way to complete color groups\n\n"
+            
+            # analyze current color group situation
+            color_group_analysis = {}
+            for prop_id in game_state.get('my_properties_owned_ids', []):
+                prop = next((sq for sq in game_state.get('board_squares',[]) if sq['id'] == prop_id), None)
+                if prop and prop.get('color_group'):
+                    color_group = prop['color_group']
+                    if color_group not in color_group_analysis:
+                        color_group_analysis[color_group] = {'owned': [], 'total_in_group': 0, 'missing': []}
+                    color_group_analysis[color_group]['owned'].append(prop)
+            
+            # calculate the completeness of each color group
+            board_squares = game_state.get('board_squares', [])
+            for color_group in color_group_analysis:
+                total_props_in_group = [sq for sq in board_squares if sq.get('color_group') == color_group and sq.get('type') == 'PROPERTY']
+                color_group_analysis[color_group]['total_in_group'] = len(total_props_in_group)
+                
+                owned_ids = [prop['id'] for prop in color_group_analysis[color_group]['owned']]
+                missing_props = [sq for sq in total_props_in_group if sq['id'] not in owned_ids]
+                color_group_analysis[color_group]['missing'] = missing_props
+            
+            # generate specific trading suggestions
+            if color_group_analysis:
+                prompt += "=== YOUR COLOR GROUP ANALYSIS ===\n"
+                trade_opportunities = []
+                
+                for color_group, analysis in color_group_analysis.items():
+                    owned_count = len(analysis['owned'])
+                    total_count = analysis['total_in_group']
+                    missing_count = len(analysis['missing'])
+                    
+                    prompt += f"• {color_group}: You own {owned_count}/{total_count} properties"
+                    
+                    if missing_count == 0:
+                        prompt += " ✅ COMPLETE MONOPOLY - BUILD HOUSES NOW!\n"
+                    elif missing_count == 1:
+                        missing_prop = analysis['missing'][0]
+                        owner_id = missing_prop.get('owner_id')
+                        if owner_id is not None and owner_id != game_state.get('my_player_id'):
+                            owner_name = "Unknown Player"
+                            for p_info in game_state.get('other_players', []):
+                                if p_info['player_id'] == owner_id:
+                                    owner_name = p_info['name']
+                                    break
+                            prompt += f" ⚠️ MISSING 1: {missing_prop['name']} (owned by {owner_name})\n"
+                            prompt += f"   🎯 HIGH PRIORITY: Trade with P{owner_id} ({owner_name}) to complete this monopoly!\n"
+                            trade_opportunities.append({
+                                'target_player': owner_id,
+                                'target_name': owner_name,
+                                'needed_property': missing_prop,
+                                'color_group': color_group,
+                                'priority': 'HIGH'
+                            })
+                        else:
+                            prompt += f" ⚠️ MISSING 1: {missing_prop['name']} (unowned)\n"
+                            prompt += f"   💰 Consider buying when you land on it!\n"
+                    else:
+                        prompt += f" ❌ MISSING {missing_count} properties\n"
+                        for missing_prop in analysis['missing']:
+                            owner_id = missing_prop.get('owner_id')
+                            if owner_id is not None and owner_id != game_state.get('my_player_id'):
+                                owner_name = "Unknown Player"
+                                for p_info in game_state.get('other_players', []):
+                                    if p_info['player_id'] == owner_id:
+                                        owner_name = p_info['name']
+                                        break
+                                prompt += f"     - {missing_prop['name']} (owned by {owner_name})\n"
+            
+                if trade_opportunities:
+                    prompt += "\n🎯 IMMEDIATE TRADE OPPORTUNITIES:\n"
+                    for opp in trade_opportunities:
+                        prompt += f"• Target P{opp['target_player']} ({opp['target_name']}) for {opp['needed_property']['name']} to complete {opp['color_group']} monopoly\n"
+                        prompt += f"  Consider offering: money, other properties, or favorable terms\n"
+                    
+                    prompt += "\n💡 TRADE STRATEGY TIPS:\n"
+                    prompt += "- Offer properties that help THEM complete a color group too (win-win)\n"
+                    prompt += "- Add money to make the deal more attractive\n"
+                    prompt += "- Be generous - completing a monopoly is worth significant money\n"
+                    prompt += "- Include a persuasive message explaining mutual benefits\n"
+                    prompt += "- Don't be afraid to overpay - monopoly rent will recover the cost quickly\n"
+        
+        # analyze other players' needs for properties
+        prompt += "\n🤝 REVERSE ANALYSIS: What other players might want from you:\n"
+        for other_player in game_state.get('other_players', []):
+            if other_player.get('is_bankrupt', False):
+                continue
+            player_id = other_player['player_id']
+            player_name = other_player['name']
+            
+            # assume other players also want to complete color group (simplified analysis)
+            prompt += f"• P{player_id} ({player_name}): {other_player.get('num_properties', 0)} properties\n"
+            prompt += f"  Consider what they might need to complete their color groups\n"
+        
+        prompt += "\n🚨 WHEN TO PROPOSE TRADES:\n"
+        prompt += "- ANYTIME you can complete a color group (even if expensive)\n"
+        prompt += "- When you land on your own property but can't build (need complete group)\n"
+        prompt += "- When other players land on properties you need\n"
+        prompt += "- During your property management phase (after rolling dice)\n"
+        prompt += "- Be persistent! Most monopoly games are won through trading\n\n"
+        
         current_pending_decision = game_state.get('pending_decision_type', 'None')
         prompt += f"Current pending decision: {current_pending_decision}\n"
         decision_context = game_state.get('pending_decision_context')
@@ -299,9 +416,13 @@ class OpenAIAgent(BaseAgent):
                      prompt += f"Your last roll to get out of jail ({decision_context.get('last_roll_dice')}) failed. You have {3 - decision_context.get('jail_turns_attempted_this_incarceration',0)} roll attempts left this incarceration.\n"
 
         prompt += f"Dice roll outcome processed by game logic: {game_state.get('dice_roll_outcome_processed')}\n"
+        
         prompt += "\nAvailable actions for you now are:\n"
         for i, action_name in enumerate(available_actions):
-            prompt += f"{i+1}. {action_name}\n"
+            if action_name == "tool_build_house":
+                prompt += f"{i+1}. {action_name} ⭐ HIGH PRIORITY - BUILD HOUSES TO INCREASE RENT! (After rolling dice)\n"
+            else:
+                prompt += f"{i+1}. {action_name}\n"
         
         # Add detailed tool descriptions to prevent parameter confusion
         prompt += "\n--- Tool Parameter Specifications ---\n"
@@ -342,50 +463,37 @@ class OpenAIAgent(BaseAgent):
                 prompt += f"• {action_name}: Parameters: {{}} (unknown tool, use no parameters)\n"
         
         prompt += "\nINSTRUCTIONS FOR YOUR RESPONSE:\n"
-        prompt += "1. First, briefly write your step-by-step thinking process or strategy TO YOURSELF (this part will be logged but not parsed by the game)."
-        prompt += "2. After your thoughts, on A NEW LINE, provide your chosen action as a single JSON object."
-        prompt += "3. The JSON object MUST have a key 'tool_name' with the exact name of the chosen action from the list above."
-        prompt += "4. If the action requires parameters (e.g., property_id, bid_amount, recipient_player_id, offered_money, requested_money, message, counter_message), include a 'parameters' key in the JSON object. The value of 'parameters' should be another JSON object containing these parameters."
-        prompt += "5. If an action takes no parameters (e.g., 'tool_roll_dice', 'tool_end_turn'), the 'parameters' key should be an empty JSON object ({})."
-        prompt += "Example for 'tool_propose_trade' with a message:"
-        prompt += "Thought: I want Baltic Avenue. Maybe Player B will accept this offer if I explain my reasoning.\n"
-        prompt += "{\"tool_name\": \"tool_propose_trade\", \"parameters\": {\"recipient_player_id\": 1, \"offered_property_ids\": [1], \"offered_money\": 50, \"requested_property_ids\": [3], \"message\": \"Baltic would complete my set! How about this deal?\"}}\n"
-        prompt += "Example for 'tool_propose_counter_offer' with a message:"
-        prompt += "Thought: Their offer is okay, but I want a bit more money and will explain why.\n"
-        prompt += "{\"tool_name\": \"tool_propose_counter_offer\", \"parameters\": {\"trade_id\": 123, \"offered_money\": 100, \"counter_message\": \"I need a bit more cash for repairs, how about this?\"}}\n"
-        prompt += "Example for 'tool_roll_dice':"
-        prompt += "Thought: I need to move."
-        prompt += "{\"tool_name\": \"tool_roll_dice\", \"parameters\": {}}\n"
-        prompt += "Respond ONLY with your thoughts (optional) followed by the JSON object on a new line. Ensure the JSON is valid."
+        prompt += "You must respond with a single JSON object containing your action and thoughts.\n"
+        prompt += "The JSON object MUST have these keys:\n"
+        prompt += "1. 'thoughts': A string containing your step-by-step thinking process and strategy\n"
+        prompt += "2. 'tool_name': The exact name of the chosen action from the available actions list\n"
+        prompt += "3. 'parameters': A JSON object containing the action parameters (use {} if no parameters needed)\n"
+        prompt += "\nExamples:\n"
+        prompt += "For 'tool_propose_trade' with thoughts and message:\n"
+        prompt += '{"thoughts": "I want Baltic Avenue to complete my brown set. Maybe Player B will accept this offer if I explain my reasoning.", "tool_name": "tool_propose_trade", "parameters": {"recipient_id": 1, "offered_property_ids": [1], "offered_money": 50, "requested_property_ids": [3], "message": "Baltic would complete my set! How about this deal?"}}\n'
+        prompt += "\nFor 'tool_roll_dice' with thoughts:\n"
+        prompt += '{"thoughts": "I need to move and see where I land. Rolling dice is mandatory at start of turn.", "tool_name": "tool_roll_dice", "parameters": {}}\n'
+        prompt += "\nFor 'tool_build_house' with thoughts:\n"
+        prompt += '{"thoughts": "I own the complete color group and have enough money. Building houses will increase rent significantly!", "tool_name": "tool_build_house", "parameters": {"property_id": 9}}\n'
+        prompt += "\nRespond ONLY with the JSON object. Ensure it contains all three required keys and is valid JSON."
 
         self.last_prompt = prompt
 
-        # For brevity, assuming this method is correctly implemented and returns system_prompt, messages
-        # It's crucial this produces a valid prompt for the LLM.
-        # Simplified example:
+        # Use the detailed prompt we built above instead of simplified version
         system_prompt = (
-            "You are an expert Monopoly player. You are playing a game of Monopoly. "
-            "Your goal is to bankrupt all other players while avoiding bankruptcy yourself. "
-            "Analyze the provided game state and choose the best action from the list of available actions. "
-            "You MUST respond with a JSON object containing two keys: \"tool_name\" and \"parameters\". "
-            "The \"tool_name\" must be one of the available_actions. "
-            "The \"parameters\" must be an object containing the parameters for that tool, or an empty object if no parameters are needed. "
-            "Include your thought process and reasoning in a key named \"thoughts\" within the JSON response, before tool_name and parameters."
+            "You are an expert Monopoly AI player. Your goal is to win by bankrupting all other players while avoiding bankruptcy yourself. "
+            "Follow the detailed game state analysis and tool parameter specifications provided. "
+            "MONOPOLY RULE SEQUENCE: 1) Roll dice (MANDATORY), 2) Move to new position, 3) Handle landing effects, 4) Then optional property management. "
+            "You CANNOT do property management (build houses, sell, mortgage) before rolling dice on your turn. "
+            "You MUST respond with a valid JSON object containing 'tool_name' and 'parameters' keys. "
+            "Use EXACT parameter names as specified in the tool descriptions."
         )
-        
-        prompt = f"""Current Game State:
-        {json.dumps(game_state, indent=2)}
-
-        Available Actions:
-        {json.dumps(available_actions, indent=2)}
-
-        Choose your action based on the rules and your strategy. Format your response as a JSON object with 'thoughts', 'tool_name', and 'parameters' keys."""
         
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ]
-        return system_prompt, messages # Returning system_prompt for potential logging, though not used by client.chat.completions.create directly
+        return system_prompt, messages
 
     def _clean_llm_json_str(self, json_str: str) -> str:
         cleaned_str = json_str
@@ -397,43 +505,56 @@ class OpenAIAgent(BaseAgent):
     @taudit_verifier
     def _extract_json_from_response(self, llm_response_content: str) -> Optional[Dict[str, Any]]:
         agent_name_logging = f"Agent {self.name} (P{self.player_id})"
-        # print(f"{agent_name_logging}: Attempting to extract JSON. Raw LLM response content (len: {len(llm_response_content)}):\n--BEGIN LLM RAW--\n{llm_response_content}\n--END LLM RAW--")
+        print(f"{agent_name_logging}: Attempting to extract JSON. Raw LLM response content (len: {len(llm_response_content)}):\n--BEGIN LLM RAW--\n{llm_response_content}\n--END LLM RAW--")
         
         self.last_agent_thoughts = ""
         self.last_parsed_action_json_str = ""
         json_action_obj = None
 
         cleaned_content = self._clean_llm_json_str(llm_response_content)
-        # print(f"{agent_name_logging}: Cleaned content for JSON parsing (len: {len(cleaned_content)}):\n--BEGIN CLEANED--\n{cleaned_content}\n--END CLEANED--")
 
-        # Attempt 1: Parse the entire cleaned content as JSON
+        # Attempt to parse the entire cleaned content as JSON (new format with thoughts inside)
         try:
             json_action_obj = json.loads(cleaned_content)
             self.last_parsed_action_json_str = cleaned_content
-            # print(f"{agent_name_logging}: Successfully parsed entire cleaned content as JSON directly.")
-        except json.JSONDecodeError as e_full:
-            # print(f"{agent_name_logging}: Failed to parse entire cleaned content directly. Error: {e_full}. Content was: '{cleaned_content[:500]}...'")
             
-            # Attempt 2: Try to find the first '{' and last '}' and parse that substring
+            # Extract thoughts from JSON if present
+            if isinstance(json_action_obj, dict) and 'thoughts' in json_action_obj:
+                self.last_agent_thoughts = json_action_obj.get('thoughts', '')
+            else:
+                self.last_agent_thoughts = "No thoughts field found in JSON response"
+                            
+        except json.JSONDecodeError as e_full:
+            print(f"{agent_name_logging}: Failed to parse cleaned content as JSON. Error: {e_full}. Content was: '{cleaned_content[:500]}...'")
+            
+            # Fallback: Try to find JSON object and parse it (legacy format support)
             try:
                 first_brace = cleaned_content.find('{')
                 last_brace = cleaned_content.rfind('}')
                 if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
                     potential_json_str = cleaned_content[first_brace : last_brace + 1]
-                    print(f"{agent_name_logging}: Fallback Attempt 2: Trying to parse substring from first {{ to last }}: '{potential_json_str[:500]}...'")
+                    print(f"{agent_name_logging}: Fallback: Trying to parse substring from first {{ to last }}: '{potential_json_str[:500]}...'")
                     json_action_obj = json.loads(potential_json_str)
                     self.last_parsed_action_json_str = potential_json_str
-                    # If this succeeds, text outside this substring might be thoughts.
-                    pre_json_text = cleaned_content[:first_brace].strip()
-                    post_json_text = cleaned_content[last_brace+1:].strip()
-                    if pre_json_text or post_json_text:
-                        self.last_agent_thoughts = f"Pre-JSON: {pre_json_text} | Post-JSON: {post_json_text}".strip(" | ")
-                    print(f"{agent_name_logging}: Successfully parsed substring as JSON.")
+                    
+                    # Check for thoughts in JSON (new format)
+                    if isinstance(json_action_obj, dict) and 'thoughts' in json_action_obj:
+                        self.last_agent_thoughts = json_action_obj.get('thoughts', '')
+                    else:
+                        # Extract pre/post JSON text as thoughts (legacy format)
+                        pre_json_text = cleaned_content[:first_brace].strip()
+                        post_json_text = cleaned_content[last_brace+1:].strip()
+                        if pre_json_text or post_json_text:
+                            self.last_agent_thoughts = f"Pre-JSON: {pre_json_text} | Post-JSON: {post_json_text}".strip(" | ")
+                        else:
+                            self.last_agent_thoughts = "JSON parsed but no thoughts field or surrounding text found"
+                    
+                    print(f"{agent_name_logging}: Successfully parsed substring as JSON (fallback).")
                 else:
-                    print(f"{agent_name_logging}: Fallback Attempt 2: Could not find valid {{...}} block.")
+                    print(f"{agent_name_logging}: Fallback: Could not find valid {{...}} block.")
                     self.last_agent_thoughts = llm_response_content # Treat all as thoughts if no JSON found
             except json.JSONDecodeError as e_substring:
-                print(f"{agent_name_logging}: Fallback Attempt 2: Failed to parse substring as JSON. Error: {e_substring}. Substring was: '{potential_json_str[:500]}...'")
+                print(f"{agent_name_logging}: Fallback: Failed to parse substring as JSON. Error: {e_substring}. Substring was: '{potential_json_str[:500]}...'")
                 self.last_agent_thoughts = llm_response_content # Treat all as thoughts
             except Exception as e_general_fallback:
                 print(f"{agent_name_logging}: Unexpected error during fallback JSON extraction: {e_general_fallback}")
@@ -442,22 +563,17 @@ class OpenAIAgent(BaseAgent):
              print(f"{agent_name_logging}: Unexpected error before or during primary JSON parsing: {e_outer}")
              self.last_agent_thoughts = llm_response_content
         
-        if json_action_obj and isinstance(json_action_obj, dict) and 'thoughts' in json_action_obj and isinstance(json_action_obj['thoughts'], str):
-            # If thoughts are successfully parsed from within the JSON, prioritize them.
-            # Concatenate if there were also pre/post thoughts from substring parsing.
-            json_thoughts = json_action_obj['thoughts']
-            if self.last_agent_thoughts and self.last_agent_thoughts != llm_response_content:
-                self.last_agent_thoughts = f"Pre/Post Text: {self.last_agent_thoughts} | JSON Thoughts: {json_thoughts}"
-            else:
-                self.last_agent_thoughts = json_thoughts
-            # print(f"{agent_name_logging}: Extracted/Combined thoughts: '{self.last_agent_thoughts}'")
-        elif json_action_obj and not self.last_agent_thoughts: # JSON parsed but no specific thoughts field or pre/post text
-             self.last_agent_thoughts = "JSON action parsed, no separate \"thoughts\" field found or pre/post text."
-        elif not json_action_obj and not self.last_agent_thoughts: # Complete failure to parse and no thoughts otherwise
+        # Final validation and logging
+        if json_action_obj and isinstance(json_action_obj, dict):
+            if not self.last_agent_thoughts or self.last_agent_thoughts == llm_response_content:
+                # If we still don't have thoughts, provide a default
+                self.last_agent_thoughts = json_action_obj.get('thoughts', 'JSON action parsed, no thoughts provided')
+        elif not json_action_obj and not self.last_agent_thoughts:
+            # Complete failure to parse and no thoughts otherwise
             self.last_agent_thoughts = llm_response_content # Default to full response if nothing else
         
-        # print(f"{agent_name_logging}: Final extracted JSON object for action: {json.dumps(json_action_obj) if json_action_obj else 'None'}")
-        # print(f"{agent_name_logging}: Final agent thoughts for DB: '{self.last_agent_thoughts[:500]}...'") # Log truncated thoughts
+        print(f"{agent_name_logging}: Final extracted JSON object: {json.dumps(json_action_obj) if json_action_obj else 'None'}")
+        print(f"{agent_name_logging}: Final agent thoughts: '{self.last_agent_thoughts[:200]}...'")
         return json_action_obj
 
     @taudit_verifier

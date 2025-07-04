@@ -140,20 +140,29 @@ class JailManager(BaseManager):
             player.leave_jail()
             self.log_event(f"{player.name} paid ${bail_amount} bail and is released from jail", "jail_event")
             
-            # Player can now roll dice for normal movement
-            self.gc._resolve_current_action_segment()
+            # 🎲 IMPORTANT: After paying bail, player must immediately roll dice and move
+            # This is a core Monopoly rule - no optional actions after getting out of jail
+            self.log_event(f"{player.name} must now roll dice and move immediately after paying bail", "jail_event")
+            
+            # Roll dice for the player
+            dice1, dice2 = self.gc.roll_dice()
+            
+            # Move player based on dice roll
+            await self.gc._move_player(player, dice1 + dice2)
             
             return {
                 "success": True,
-                "message": f"{player.name} paid bail and is free!",
+                "message": f"{player.name} paid bail, rolled ({dice1}, {dice2}), and moved!",
                 "amount_paid": bail_amount,
-                "released": True
+                "released": True,
+                "dice": [dice1, dice2],
+                "moved": True
             }
         else:
             self.log_event(f"{player.name} bail payment failed", "error_jail")
             return {"success": False, "message": "Bail payment failed"}
     
-    def use_card_to_get_out_of_jail(self, player_id: int, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def use_card_to_get_out_of_jail(self, player_id: int, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Use a Get Out of Jail Free card.
         
@@ -194,14 +203,23 @@ class JailManager(BaseManager):
         player.leave_jail()
         self.log_event(f"{player.name} used {card_type} Get Out of Jail Free card and is released", "jail_event")
         
-        # Player can now take normal turn
-        self.gc._resolve_current_action_segment()
+        # 🎲 IMPORTANT: After using GOOJ card, player must immediately roll dice and move
+        # This is a core Monopoly rule - no optional actions after getting out of jail
+        self.log_event(f"{player.name} must now roll dice and move immediately after using GOOJ card", "jail_event")
+        
+        # Roll dice for the player
+        dice1, dice2 = self.gc.roll_dice()
+        
+        # Move player based on dice roll - now properly await the async call
+        await self.gc._move_player(player, dice1 + dice2)
         
         return {
             "success": True,
-            "message": f"{player.name} used GOOJ card and is free!",
+            "message": f"{player.name} used GOOJ card, rolled ({dice1}, {dice2}), and moved!",
             "card_type": card_type,
-            "released": True
+            "released": True,
+            "dice": [dice1, dice2],
+            "moved": True
         }
     
     def _can_use_gooj_card_internal(self, player: Player) -> bool:

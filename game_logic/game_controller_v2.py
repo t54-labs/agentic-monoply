@@ -368,7 +368,18 @@ class GameControllerV2:
                                      outcome_processed=False) 
         elif square.owner_id == player.player_id:
             self.log_event(f"{player.name} landed on their own property: {square.name}.")
-            self._resolve_current_action_segment()
+            
+            # 🏠 When landing on own property, enter post-roll phase for property management
+            # Don't call _resolve_current_action_segment() as that would end the segment immediately
+            # Instead, set the state to allow property management actions
+            self.dice_roll_outcome_processed = True
+            self._clear_pending_decision()
+            
+            # 🎯 Set turn phase to post-roll to enable property management actions
+            if hasattr(self, 'turn_phase'):
+                self.turn_phase = "post_roll"
+            
+            self.log_event(f"{player.name} can now do property management (build houses, trade, etc.) or end turn", "property_management")
         elif square.owner_id is not None and not square.is_mortgaged:
             owner = self.players[square.owner_id]
             rent_amount = 0
@@ -886,7 +897,8 @@ class GameControllerV2:
 
         elif self.pending_decision_type == "propose_new_trade_after_rejection":
             if self.pending_decision_context.get("player_id") == player_id:
-                rejection_count = self.pending_decision_context.get("negotiation_rejection_count", 0)
+                rejection_count = self.pending_decision_context.get("rejection_count", 0)
+                self.log_event(f"[TRADE DEBUG] P{player_id} in propose_new_trade_after_rejection state, rejection_count: {rejection_count}, max: {MAX_TRADE_REJECTIONS}", "error_trade")
                 if rejection_count < MAX_TRADE_REJECTIONS:
                     actions.append("tool_propose_trade")
                 actions.append("tool_end_trade_negotiation")

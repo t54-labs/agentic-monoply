@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from tpay.tools import tradar_verifier
 
@@ -466,15 +466,109 @@ def tool_withdraw_from_auction(gc: Any, player_id: int) -> Dict[str, Any]:
 
 # --- Trade Tools ---
 @tradar_verifier
+def validate_and_correct_trade_property_ids(gc, proposer_id: int, recipient_id: int, 
+                                           offered_property_ids: List[int], 
+                                           requested_property_ids: List[int]) -> Tuple[bool, List[int], List[int], str]:
+    """
+    Validate and intelligently correct property IDs in trade proposals.
+    
+    Returns:
+        Tuple[success, corrected_offered_ids, corrected_requested_ids, error_message]
+    """
+    error_messages = []
+    corrected_offered = offered_property_ids.copy()
+    corrected_requested = requested_property_ids.copy()
+    
+    proposer = gc.players[proposer_id]
+    recipient = gc.players[recipient_id]
+    
+    # Validate offered properties (proposer must own them)
+    invalid_offered = []
+    for prop_id in offered_property_ids:
+        if prop_id not in proposer.properties_owned_ids:
+            invalid_offered.append(prop_id)
+    
+    if invalid_offered:
+        prop_names = []
+        for prop_id in invalid_offered:
+            try:
+                square = gc.board.get_square(prop_id)
+                prop_names.append(f"{square.name} (ID: {prop_id})")
+            except:
+                prop_names.append(f"ID: {prop_id}")
+        
+        error_messages.append(f"❌ {proposer.name} doesn't own: {', '.join(prop_names)}")
+        error_messages.append(f"✅ {proposer.name} actually owns: {[gc.board.get_square(pid).name + f' (ID: {pid})' for pid in proposer.properties_owned_ids]}")
+        
+        # Remove invalid IDs
+        corrected_offered = [pid for pid in offered_property_ids if pid in proposer.properties_owned_ids]
+    
+    # Validate requested properties (recipient must own them)
+    invalid_requested = []
+    for prop_id in requested_property_ids:
+        if prop_id not in recipient.properties_owned_ids:
+            invalid_requested.append(prop_id)
+    
+    if invalid_requested:
+        prop_names = []
+        for prop_id in invalid_requested:
+            try:
+                square = gc.board.get_square(prop_id)
+                prop_names.append(f"{square.name} (ID: {prop_id})")
+            except:
+                prop_names.append(f"ID: {prop_id}")
+        
+        error_messages.append(f"❌ {recipient.name} doesn't own: {', '.join(prop_names)}")
+        error_messages.append(f"✅ {recipient.name} actually owns: {[gc.board.get_square(pid).name + f' (ID: {pid})' for pid in recipient.properties_owned_ids]}")
+        
+        # Remove invalid IDs
+        corrected_requested = [pid for pid in requested_property_ids if pid in recipient.properties_owned_ids]
+    
+    if error_messages:
+        full_error = "PROPERTY OWNERSHIP VALIDATION FAILED:\n" + "\n".join(error_messages)
+        full_error += f"\n\n💡 SUGGESTION: Check board_squares in your game state to find correct property IDs"
+        return False, corrected_offered, corrected_requested, full_error
+    
+    return True, corrected_offered, corrected_requested, ""
+
+@tradar_verifier
 def tool_propose_trade(gc: Any, player_id: int, recipient_id: int,
                          offered_property_ids: Optional[List[int]] = None, offered_money: int = 0, offered_get_out_of_jail_free_cards: int = 0,
                          requested_property_ids: Optional[List[int]] = None, requested_money: int = 0, requested_get_out_of_jail_free_cards: int = 0,
                          message: Optional[str] = None) -> Dict[str, Any]:
     try:
-        if player_id == recipient_id: return {"status": "failure", "message": "Cannot propose trade to oneself."}
+        # 🔍 ENHANCED VALIDATION WITH INTELLIGENT ERROR MESSAGES
+        
+        if player_id == recipient_id: 
+            return {"status": "failure", "message": "Cannot propose trade to yourself. Choose a different recipient_id."}
+        
         if not (0 <= recipient_id < len(gc.players)) or gc.players[recipient_id].is_bankrupt:
-             return {"status": "failure", "message": f"Invalid or bankrupt recipient P{recipient_id}."}
+            available_recipients = [f"P{i} ({gc.players[i].name})" for i in range(len(gc.players)) if i != player_id and not gc.players[i].is_bankrupt]
+            return {"status": "failure", "message": f"Invalid or bankrupt recipient P{recipient_id}. Available recipients: {available_recipients}"}
 
+        # Normalize empty lists
+        offered_property_ids = offered_property_ids or []
+        requested_property_ids = requested_property_ids or []
+        
+        proposer = gc.players[player_id]
+        recipient = gc.players[recipient_id]
+        
+        # 🎯 NEW: Use enhanced validation function
+        is_valid, corrected_offered, corrected_requested, error_msg = validate_and_correct_trade_property_ids(
+            gc, player_id, recipient_id, offered_property_ids, requested_property_ids
+        )
+        
+        if not is_valid:
+            return {"status": "failure", "message": error_msg}
+        
+        # Validate money amounts
+        if offered_money > proposer.money:
+            return {"status": "failure", "message": f"You only have ${proposer.money}, cannot offer ${offered_money}. Reduce offered_money parameter."}
+        
+        if requested_money > recipient.money:
+            return {"status": "failure", "message": f"Recipient {recipient.name} only has ${recipient.money}, cannot pay ${requested_money}. Reduce requested_money parameter."}
+
+        # 🎯 Now call the GC method with validated parameters
         trade_id = gc.propose_trade_action(player_id, recipient_id, 
                                          offered_property_ids or [], offered_money or 0, offered_get_out_of_jail_free_cards or 0,
                                          requested_property_ids or [], requested_money or 0, requested_get_out_of_jail_free_cards or 0,
@@ -482,8 +576,10 @@ def tool_propose_trade(gc: Any, player_id: int, recipient_id: int,
                                          )
         status = "success" if trade_id is not None else "failure"
         log_message_str = f"Trade proposal to P{recipient_id} ({gc.players[recipient_id].name}): {status}."
-        if trade_id is not None: log_message_str += f" Trade ID: {trade_id}"
-        else: log_message_str += " (Proposal failed validation in GC - check logs)."
+        if trade_id is not None: 
+            log_message_str += f" Trade ID: {trade_id}"
+        else: 
+            log_message_str += " (Proposal failed validation in GC - check logs). This may be due to game state constraints."
         
         params_log = {
             "recipient_id": recipient_id,
@@ -509,7 +605,20 @@ def tool_accept_trade(gc: Any, player_id: int, trade_id: Optional[int] = None) -
         if tid is None: return {"status": "failure", "message": "Trade ID missing for accept."}
         if not (gc.pending_decision_type == "respond_to_trade_offer" and gc.pending_decision_context.get("trade_id") == tid and gc.pending_decision_context.get("player_id") == player_id):
             return {"status": "failure", "message": f"Not in state to accept trade {tid}. Pend: '{gc.pending_decision_type}', CtxP: {gc.pending_decision_context.get('player_id')}"}
-        success = gc._respond_to_trade_offer_action(player_id, tid, "accept")
+        
+        # Call async GC method properly
+        import asyncio
+        try:
+            # If we're already in an async context, use await
+            loop = asyncio.get_running_loop()
+            # We're in asyncio.to_thread, so we need to call the async method differently
+            success = asyncio.run_coroutine_threadsafe(
+                gc._respond_to_trade_offer_action(player_id, tid, "accept"), loop
+            ).result()
+        except RuntimeError:
+            # No event loop running, we can use asyncio.run
+            success = asyncio.run(gc._respond_to_trade_offer_action(player_id, tid, "accept"))
+            
         log_message_str = f"Accepted trade {tid}: {'OK' if success else 'FAIL'}."
         if not success: log_message_str += " (Conditions may have changed or transfer failed - see GC logs)"
         result = {"status": "success" if success else "failure", "message": log_message_str}
@@ -524,7 +633,20 @@ def tool_reject_trade(gc: Any, player_id: int, trade_id: Optional[int] = None) -
         if tid is None: return {"status": "failure", "message": "Trade ID missing for reject."}
         if not (gc.pending_decision_type == "respond_to_trade_offer" and gc.pending_decision_context.get("trade_id") == tid and gc.pending_decision_context.get("player_id") == player_id):
             return {"status": "failure", "message": "Not in state to reject this trade."}
-        success = gc._respond_to_trade_offer_action(player_id, tid, "reject")
+        
+        # Call async GC method properly
+        import asyncio
+        try:
+            # If we're already in an async context, use await
+            loop = asyncio.get_running_loop()
+            # We're in asyncio.to_thread, so we need to call the async method differently
+            success = asyncio.run_coroutine_threadsafe(
+                gc._respond_to_trade_offer_action(player_id, tid, "reject"), loop
+            ).result()
+        except RuntimeError:
+            # No event loop running, we can use asyncio.run
+            success = asyncio.run(gc._respond_to_trade_offer_action(player_id, tid, "reject"))
+            
         result = {"status": "success" if success else "failure", "message": f"Rejected trade {tid}: {'OK' if success else 'FAIL'}."}
         _log_agent_action(gc, player_id, "tool_reject_trade", {"trade_id": tid}, result)
         return result
@@ -543,16 +665,54 @@ def tool_propose_counter_offer(gc: Any, player_id: int, trade_id: Optional[int] 
                 gc.pending_decision_context.get("trade_id") == original_trade_id and 
                 gc.pending_decision_context.get("player_id") == player_id):
             return {"status": "failure", "message": "Not in state to counter this trade."}
+        
+        # 🎯 ADD PROPERTY VALIDATION FOR COUNTER OFFERS
+        # Get the original proposer (who will be the recipient of the counter-offer)
+        if original_trade_id not in gc.trade_offers:
+            return {"status": "failure", "message": f"Original trade {original_trade_id} not found."}
+        
+        original_offer = gc.trade_offers[original_trade_id]
+        original_proposer_id = original_offer.proposer_id  # This is who we're countering to
+        
+        # Normalize empty lists
+        offered_property_ids = offered_property_ids or []
+        requested_property_ids = requested_property_ids or []
+        
+        # Validate properties using our enhanced validation
+        is_valid, corrected_offered, corrected_requested, error_msg = validate_and_correct_trade_property_ids(
+            gc, player_id, original_proposer_id, offered_property_ids, requested_property_ids
+        )
+        
+        if not is_valid:
+            return {"status": "failure", "message": f"COUNTER-OFFER VALIDATION FAILED:\n{error_msg}"}
 
-        success = gc._respond_to_trade_offer_action(player_id, original_trade_id, "counter_offer",
+        # Call async GC method properly
+        import asyncio
+        try:
+            # If we're already in an async context, use await
+            loop = asyncio.get_running_loop()
+            # We're in asyncio.to_thread, so we need to call the async method differently
+            success = asyncio.run_coroutine_threadsafe(
+                gc._respond_to_trade_offer_action(player_id, original_trade_id, "counter",
                                                  counter_offered_prop_ids=offered_property_ids or [], 
                                                  counter_offered_money=offered_money or 0,
                                                  counter_offered_gooj_cards=offered_get_out_of_jail_free_cards or 0, 
-                                                 requested_property_ids=requested_property_ids or [],
-                                                 requested_money=requested_money or 0, 
-                                                 requested_gooj_cards=requested_get_out_of_jail_free_cards or 0,
-                                                 counter_message=counter_message
-                                                 )
+                                                 counter_requested_prop_ids=requested_property_ids or [],
+                                                 counter_requested_money=requested_money or 0, 
+                                                 counter_requested_gooj_cards=requested_get_out_of_jail_free_cards or 0,
+                                                 counter_message=counter_message), loop
+            ).result()
+        except RuntimeError:
+            # No event loop running, we can use asyncio.run
+            success = asyncio.run(gc._respond_to_trade_offer_action(player_id, original_trade_id, "counter",
+                                                 counter_offered_prop_ids=offered_property_ids or [], 
+                                                 counter_offered_money=offered_money or 0,
+                                                 counter_offered_gooj_cards=offered_get_out_of_jail_free_cards or 0, 
+                                                 counter_requested_prop_ids=requested_property_ids or [],
+                                                 counter_requested_money=requested_money or 0, 
+                                                 counter_requested_gooj_cards=requested_get_out_of_jail_free_cards or 0,
+                                                 counter_message=counter_message))
+                                                 
         log_message_str = f"Counter-offer to trade {original_trade_id}: {'OK' if success else 'FAIL'}."
         if not success: log_message_str += " (Counter proposal failed validation - see GC logs)"
         result = {"status": "success" if success else "failure", "message": log_message_str}
@@ -617,4 +777,155 @@ def tool_unmortgage_property_immediately(gc: Any, player_id: int, property_id: O
         result = {"status": "success" if success else "failure", "message": message}
         _log_agent_action(gc, player_id, "tool_unmortgage_property_immediately", {"property_id": target_property_id}, result)
         return result
-    except Exception as e: return {"status": "error", "message": str(e)} 
+    except Exception as e: return {"status": "error", "message": str(e)}
+
+# Add intelligent property name to ID conversion system
+@tradar_verifier
+def smart_property_name_to_id_converter(gc, property_names_or_ids: List[str]) -> Tuple[List[int], List[str]]:
+    """
+    Intelligently convert property names or IDs to valid property IDs.
+    
+    Args:
+        gc: Game controller instance
+        property_names_or_ids: List of property names (strings) or IDs (integers as strings)
+    
+    Returns:
+        Tuple[resolved_ids, error_messages]
+    """
+    resolved_ids = []
+    error_messages = []
+    
+    for item in property_names_or_ids:
+        if isinstance(item, int):
+            # Already an ID
+            try:
+                square = gc.board.get_square(item)
+                resolved_ids.append(item)
+            except:
+                error_messages.append(f"Invalid property ID: {item}")
+        elif isinstance(item, str):
+            if item.isdigit():
+                # String representation of ID
+                prop_id = int(item)
+                try:
+                    square = gc.board.get_square(prop_id)
+                    resolved_ids.append(prop_id)
+                except:
+                    error_messages.append(f"Invalid property ID: {prop_id}")
+            else:
+                # Property name - search for it
+                found_id = None
+                for i, square in enumerate(gc.board.squares):
+                    if hasattr(square, 'name') and square.name.lower() == item.lower():
+                        found_id = i
+                        break
+                
+                if found_id is not None:
+                    resolved_ids.append(found_id)
+                else:
+                    # Fuzzy matching for common mistakes
+                    similar_properties = []
+                    for i, square in enumerate(gc.board.squares):
+                        if hasattr(square, 'name'):
+                            # Simple fuzzy matching
+                            if (item.lower() in square.name.lower() or 
+                                square.name.lower() in item.lower()):
+                                similar_properties.append(f"{square.name} (ID: {i})")
+                    
+                    if similar_properties:
+                        error_messages.append(f"Property '{item}' not found. Did you mean: {', '.join(similar_properties[:3])}?")
+                    else:
+                        error_messages.append(f"Property '{item}' not found.")
+        else:
+            error_messages.append(f"Invalid property reference: {item} (must be name or ID)")
+    
+    return resolved_ids, error_messages 
+
+# Alternative structured trade tool to reduce parameter confusion
+@tradar_verifier
+def tool_propose_trade_structured(gc: Any, player_id: int, trade_details: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Propose a trade using structured input to reduce parameter confusion.
+    
+    Expected trade_details format:
+    {
+        "to_player": "player_name_or_id",
+        "i_give": {
+            "properties": ["property_name_1", "property_name_2"] or [id1, id2],
+            "money": 100,
+            "gooj_cards": 0
+        },
+        "i_want": {
+            "properties": ["property_name_3"],
+            "money": 50,
+            "gooj_cards": 0
+        },
+        "message": "Let's make a deal!"
+    }
+    """
+    try:
+        # Extract and validate structure
+        if not isinstance(trade_details, dict):
+            return {"status": "failure", "message": "trade_details must be a dictionary with 'to_player', 'i_give', 'i_want' keys"}
+        
+        # Find recipient
+        to_player = trade_details.get("to_player")
+        if not to_player:
+            return {"status": "failure", "message": "Missing 'to_player' in trade_details"}
+        
+        recipient_id = None
+        if isinstance(to_player, int):
+            recipient_id = to_player
+        elif isinstance(to_player, str):
+            # Try to find by name
+            for i, player in enumerate(gc.players):
+                if player.name.lower() == to_player.lower():
+                    recipient_id = i
+                    break
+            
+            # Try as ID string
+            if recipient_id is None and to_player.isdigit():
+                recipient_id = int(to_player)
+        
+        if recipient_id is None:
+            available_players = [f"P{i} ({gc.players[i].name})" for i in range(len(gc.players)) if i != player_id]
+            return {"status": "failure", "message": f"Player '{to_player}' not found. Available: {available_players}"}
+        
+        # Extract what I give
+        i_give = trade_details.get("i_give", {})
+        offered_properties = i_give.get("properties", [])
+        offered_money = i_give.get("money", 0)
+        offered_gooj = i_give.get("gooj_cards", 0)
+        
+        # Extract what I want
+        i_want = trade_details.get("i_want", {})
+        requested_properties = i_want.get("properties", [])
+        requested_money = i_want.get("money", 0)
+        requested_gooj = i_want.get("gooj_cards", 0)
+        
+        # Convert property names to IDs
+        offered_prop_ids, offer_errors = smart_property_name_to_id_converter(gc, offered_properties)
+        requested_prop_ids, request_errors = smart_property_name_to_id_converter(gc, requested_properties)
+        
+        if offer_errors or request_errors:
+            error_msg = "PROPERTY CONVERSION ERRORS:\n"
+            if offer_errors:
+                error_msg += "Offered properties: " + "; ".join(offer_errors) + "\n"
+            if request_errors:
+                error_msg += "Requested properties: " + "; ".join(request_errors)
+            return {"status": "failure", "message": error_msg}
+        
+        # Use the existing validated trade function
+        return tool_propose_trade(
+            gc, player_id, recipient_id,
+            offered_property_ids=offered_prop_ids,
+            offered_money=offered_money,
+            offered_get_out_of_jail_free_cards=offered_gooj,
+            requested_property_ids=requested_prop_ids,
+            requested_money=requested_money,
+            requested_get_out_of_jail_free_cards=requested_gooj,
+            message=trade_details.get("message")
+        )
+        
+    except Exception as e:
+        return {"status": "error", "message": f"Error in structured trade: {str(e)}"} 

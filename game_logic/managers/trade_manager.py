@@ -64,20 +64,53 @@ class TradeManager(BaseManager):
         Returns:
             Optional[int]: Trade ID if successful, None if failed
         """
+        # 🔍 DEBUG: Log trade proposal details
+        self.log_event(f"[TRADE DEBUG] Proposing trade: P{proposer_id} -> P{recipient_id}", "error_trade")
+        self.log_event(f"  Offered properties: {offered_property_ids}, money: ${offered_money}, GOOJ: {offered_gooj_cards}", "error_trade")
+        self.log_event(f"  Requested properties: {requested_property_ids}, money: ${requested_money}, GOOJ: {requested_gooj_cards}", "error_trade")
+        
+        # 🚨 Check if this is a new trade proposal after rejection - enforce same recipient rule
+        if (self.gc.pending_decision_type == "propose_new_trade_after_rejection" and 
+            hasattr(self.gc, 'pending_decision_context') and 
+            self.gc.pending_decision_context.get("player_id") == proposer_id):
+            
+            # Get the original trade information
+            rejected_trade_id = self.gc.pending_decision_context.get("rejected_trade_id")
+            if rejected_trade_id and rejected_trade_id in self.gc.trade_offers:
+                original_offer = self.gc.trade_offers[rejected_trade_id]
+                original_recipient_id = original_offer.recipient_id
+                
+                # Enforce same recipient rule
+                if recipient_id != original_recipient_id:
+                    original_recipient_name = self.players[original_recipient_id].name
+                    attempted_recipient_name = self.players[recipient_id].name
+                    self.log_event(f"[TRADE RULE VIOLATION] {self.players[proposer_id].name} cannot propose trade to {attempted_recipient_name} after rejection. Must continue negotiation with {original_recipient_name}.", "error_trade")
+                    return None
+                    
+                # Check rejection count limit
+                rejection_count = self.gc.pending_decision_context.get("rejection_count", 0)
+                if rejection_count >= self.gc.MAX_TRADE_REJECTIONS:
+                    self.log_event(f"[TRADE RULE VIOLATION] {self.players[proposer_id].name} has reached maximum trade rejections ({self.gc.MAX_TRADE_REJECTIONS}) with {self.players[recipient_id].name}.", "error_trade")
+                    return None
+        
         # Validate players
         if not (0 <= proposer_id < len(self.players)) or not (0 <= recipient_id < len(self.players)):
-            self.log_event(f"Invalid player IDs: proposer={proposer_id}, recipient={recipient_id}", "error_trade")
+            self.log_event(f"[TRADE DEBUG] Invalid player IDs: proposer={proposer_id}, recipient={recipient_id}", "error_trade")
             return None
             
         if proposer_id == recipient_id:
-            self.log_event("Cannot trade with yourself", "error_trade")
+            self.log_event("[TRADE DEBUG] Cannot trade with yourself", "error_trade")
             return None
             
         proposer = self.players[proposer_id]
         recipient = self.players[recipient_id]
         
+        # 🔍 DEBUG: Log player info
+        self.log_event(f"[TRADE DEBUG] Proposer {proposer.name} (P{proposer_id}): money=${proposer.money}, properties={list(proposer.properties_owned_ids)}", "error_trade")
+        self.log_event(f"[TRADE DEBUG] Recipient {recipient.name} (P{recipient_id}): money=${recipient.money}, properties={list(recipient.properties_owned_ids)}", "error_trade")
+        
         if proposer.is_bankrupt or recipient.is_bankrupt:
-            self.log_event("Cannot trade with bankrupt players", "error_trade")
+            self.log_event(f"[TRADE DEBUG] Bankrupt players: proposer={proposer.is_bankrupt}, recipient={recipient.is_bankrupt}", "error_trade")
             return None
         
         # Build trade offer items
@@ -87,42 +120,46 @@ class TradeManager(BaseManager):
         # Add offered properties
         for prop_id in offered_property_ids:
             if prop_id not in proposer.properties_owned_ids:
-                self.log_event(f"{proposer.name} doesn't own property {prop_id}", "error_trade")
+                property_name = self.board.get_square(prop_id).name if hasattr(self.board, 'get_square') else f"Property {prop_id}"
+                self.log_event(f"[TRADE DEBUG] {proposer.name} doesn't own property {prop_id} ({property_name})", "error_trade")
+                self.log_event(f"[TRADE DEBUG] {proposer.name} owns: {list(proposer.properties_owned_ids)}", "error_trade")
                 return None
             offered_items.append(TradeOfferItem(item_type="property", item_id=prop_id, quantity=1))
         
         # Add offered money
         if offered_money > 0:
             if proposer.money < offered_money:
-                self.log_event(f"{proposer.name} doesn't have ${offered_money}", "error_trade")
+                self.log_event(f"[TRADE DEBUG] {proposer.name} doesn't have ${offered_money} (has ${proposer.money})", "error_trade")
                 return None
             offered_items.append(TradeOfferItem(item_type="money", quantity=offered_money))
         
         # Add offered GOOJ cards
         if offered_gooj_cards > 0:
             if proposer.get_out_of_jail_free_cards < offered_gooj_cards:
-                self.log_event(f"{proposer.name} doesn't have {offered_gooj_cards} GOOJ cards", "error_trade")
+                self.log_event(f"[TRADE DEBUG] {proposer.name} doesn't have {offered_gooj_cards} GOOJ cards (has {proposer.get_out_of_jail_free_cards})", "error_trade")
                 return None
             offered_items.append(TradeOfferItem(item_type="get_out_of_jail_card", quantity=offered_gooj_cards))
         
         # Add requested properties
         for prop_id in requested_property_ids:
             if prop_id not in recipient.properties_owned_ids:
-                self.log_event(f"{recipient.name} doesn't own property {prop_id}", "error_trade")
+                property_name = self.board.get_square(prop_id).name if hasattr(self.board, 'get_square') else f"Property {prop_id}"
+                self.log_event(f"[TRADE DEBUG] {recipient.name} doesn't own property {prop_id} ({property_name})", "error_trade")
+                self.log_event(f"[TRADE DEBUG] {recipient.name} owns: {list(recipient.properties_owned_ids)}", "error_trade")
                 return None
             requested_items.append(TradeOfferItem(item_type="property", item_id=prop_id, quantity=1))
         
         # Add requested money
         if requested_money > 0:
             if recipient.money < requested_money:
-                self.log_event(f"{recipient.name} doesn't have ${requested_money}", "error_trade")
+                self.log_event(f"[TRADE DEBUG] {recipient.name} doesn't have ${requested_money} (has ${recipient.money})", "error_trade")
                 return None
             requested_items.append(TradeOfferItem(item_type="money", quantity=requested_money))
         
         # Add requested GOOJ cards
         if requested_gooj_cards > 0:
             if recipient.get_out_of_jail_free_cards < requested_gooj_cards:
-                self.log_event(f"{recipient.name} doesn't have {requested_gooj_cards} GOOJ cards", "error_trade")
+                self.log_event(f"[TRADE DEBUG] {recipient.name} doesn't have {requested_gooj_cards} GOOJ cards (has {recipient.get_out_of_jail_free_cards})", "error_trade")
                 return None
             requested_items.append(TradeOfferItem(item_type="get_out_of_jail_card", quantity=requested_gooj_cards))
         
@@ -155,7 +192,7 @@ class TradeManager(BaseManager):
             outcome_processed=False
         )
         
-        self.log_event(f"Trade {trade_id} proposed: {proposer.name} -> {recipient.name}", "trade_event")
+        self.log_event(f"[TRADE DEBUG] Trade {trade_id} successfully created: {proposer.name} -> {recipient.name}", "error_trade")
         if message:
             self.log_event(f"Trade {trade_id} message: {message}", "trade_event")
         

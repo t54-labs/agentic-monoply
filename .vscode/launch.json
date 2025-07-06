@@ -1,0 +1,33 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Monopoly Server",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "server.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "args": [],
+            "justMyCode": true,
+            "stopOnEntry": false
+        },
+        {
+            "name": "Debug Monopoly Server (External Terminal)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "server.py",
+            "console": "externalTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "args": [],
+            "justMyCode": true,
+            "stopOnEntry": false
+        }
+    ]
+} 

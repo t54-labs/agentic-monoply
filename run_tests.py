@@ -657,15 +657,15 @@ class TestOrchestrator:
         success_rates = [suite.get('success_rate', 0) for suite in self.test_results.values() if 'success_rate' in suite]
         if success_rates:
             overall_rate = sum(success_rates) / len(success_rates)
-            
-            if overall_rate >= 98:
-                recommendations.append("🎉 Excellent test coverage and stability!")
-            elif overall_rate >= 90:
-                recommendations.append("👍 Good test stability, minor issues to address")
-            elif overall_rate >= 80:
-                recommendations.append("⚠️  Multiple test failures - significant issues to resolve")
-            else:
-                recommendations.append("🚨 Major stability issues - extensive debugging required")
+        
+        if overall_rate >= 98:
+            recommendations.append("🎉 Excellent test coverage and stability!")
+        elif overall_rate >= 90:
+            recommendations.append("👍 Good test stability, minor issues to address")
+        elif overall_rate >= 80:
+            recommendations.append("⚠️  Multiple test failures - significant issues to resolve")
+        else:
+            recommendations.append("🚨 Major stability issues - extensive debugging required")
         
         # Specific recommendations for board state tests
         if 'board_state_tests' in self.test_results:

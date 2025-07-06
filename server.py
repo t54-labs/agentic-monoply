@@ -1190,7 +1190,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                     await gc.send_event_to_frontend({"type": "player_state_update", "data": player_state_data_after_action})
 
                 # Print detailed error information and send Telegram notification for action errors
-                if action_result.get("status") == "error":
+                if action_result.get("status") in ["error", "failure"]:
                     # Print detailed error information to console
                     print(f"{Fore.RED}╭{'─' * 80}╮{Style.RESET_ALL}")
                     print(f"{Fore.RED}│ 🚨 ACTION EXECUTION FAILED {' ' * 49}│{Style.RESET_ALL}")
@@ -1385,7 +1385,17 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                     # After roll & move, GC state (pending_decision, dice_roll_outcome_processed) is updated by land_on_square.
                     # If a new decision is pending for *this* player (e.g., buy), loop continues.
                     # If landing is resolved and no new decision for this player, then segment ends.
-                    if gc.pending_decision_type is None and gc.dice_roll_outcome_processed: player_turn_segment_active = False                                
+                    # 🎯 IMPORTANT: Check turn_phase to determine if segment should continue
+                    if gc.pending_decision_type is None and gc.dice_roll_outcome_processed:
+                        # Check if we should continue to post-roll phase for property management
+                        current_turn_phase = getattr(gc, 'turn_phase', 'unknown')
+                        if current_turn_phase == "post_roll" and active_player_id == current_main_turn_player_id:
+                            # Player landed on own property or entered post-roll phase - continue for property management
+                            gc.log_event(f"Continuing to post-roll phase for {current_acting_player.name} - property management available", "debug_turn_phase")
+                            # Don't end segment - let player choose property management actions
+                        else:
+                            # Normal end of segment (e.g., paid rent, bought property, etc.)
+                            player_turn_segment_active = False
                 
                 elif chosen_tool_name == "tool_buy_property":
                      # If buy succeeds, GC resolves the segment. If fails (funds), GC keeps pending_decision.

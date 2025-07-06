@@ -238,16 +238,37 @@ class OpenAIAgent(BaseAgent):
             prompt += "- Building houses reduces the housing supply for other players\n"
             prompt += "- You should prioritize building houses when you can afford them\n"
             prompt += "- RULE: Houses can only be built AFTER you have rolled dice and moved this turn\n"
-            prompt += "- Building houses is done during the property management phase, not before rolling\n\n"
+            prompt += "- Building houses is done during the property management phase, not before rolling\n"
+            
+            # 🎯 ADD CRITICAL BUILDING RULES
+            prompt += "\n🚨 CRITICAL BUILDING RULES - READ CAREFULLY:\n"
+            prompt += "1. ⭐ COLOR GROUP MONOPOLY REQUIRED: You can ONLY build houses if you own ALL properties in a color group\n"
+            prompt += "   - Example: For BROWN group, you need BOTH Mediterranean AND Baltic Avenue\n"
+            prompt += "   - Example: For LIGHT_BLUE group, you need ALL THREE: Oriental, Vermont, Connecticut\n"
+            prompt += "   - If you only own 2 out of 3 properties in a group, you CANNOT build houses!\n"
+            prompt += "2. 🏠 EVEN BUILDING RULE: Houses must be built evenly across the color group\n"
+            prompt += "   - You cannot build a 2nd house on one property until ALL properties in the group have 1 house\n"
+            prompt += "   - You cannot build a 3rd house until all have 2 houses, etc.\n"
+            prompt += "3. 💰 MONEY REQUIREMENT: You need enough money to pay the house price\n"
+            prompt += "4. 🚫 NO MORTGAGED PROPERTIES: All properties in the color group must be unmortgaged\n"
+            prompt += "5. 🎯 TIMING: Building can only happen in the post-roll phase (after you've rolled dice and moved)\n\n"
+            
+            prompt += "💡 BUILDING STRATEGY PRIORITY:\n"
+            prompt += "- If tool_build_house is available, it means you CAN build (all requirements met)\n"
+            prompt += "- Building houses should be your #1 priority when available\n"
+            prompt += "- Houses dramatically increase rent and help you win\n"
+            prompt += "- If you can't build houses, focus on completing color groups through trading\n\n"
         
         # 🎯 NEW: add strategy note for trading
         if "tool_propose_trade" in available_actions:
             prompt += "\n🤝 CRITICAL MONOPOLY STRATEGY: TRADING FOR COLOR GROUP MONOPOLIES!\n"
             prompt += "=== WHY TRADING IS ESSENTIAL ===\n"
-            prompt += "- Individual properties generate minimal rent\n"
-            prompt += "- MONOPOLY RULE: You can only build houses if you own ALL properties in a color group\n"
-            prompt += "- Completing color groups increases rent dramatically (2x base rent + house rental)\n"
-            prompt += "- Trading is often the ONLY way to complete color groups\n\n"
+            prompt += "- You CANNOT build houses without owning ALL properties in a color group\n"
+            prompt += "- Complete color groups allow you to build houses and charge monopoly rent\n"
+            prompt += "- Monopoly rent is 2x base rent (without houses) and much higher with houses\n"
+            prompt += "- Most Monopoly games are won through smart trading to complete color groups\n"
+            prompt += "- Trading is often the ONLY way to complete color groups\n"
+            prompt += "- 🎯 KEY INSIGHT: If you landed on your own property but can't build houses, you need more properties in that color group!\n\n"
             
             # analyze current color group situation
             color_group_analysis = {}
@@ -272,6 +293,7 @@ class OpenAIAgent(BaseAgent):
             # generate specific trading suggestions
             if color_group_analysis:
                 prompt += "=== YOUR COLOR GROUP ANALYSIS ===\n"
+                prompt += "🎯 REMEMBER: You need COMPLETE color groups to build houses and charge monopoly rent!\n"
                 trade_opportunities = []
                 
                 for color_group, analysis in color_group_analysis.items():
@@ -443,10 +465,10 @@ class OpenAIAgent(BaseAgent):
             "tool_bid_on_auction": "Parameters: {\"bid_amount\": <integer>}",
             "tool_pass_auction_bid": "Parameters: {} (no parameters needed)",
             "tool_withdraw_from_auction": "Parameters: {} (no parameters needed)",
-            "tool_propose_trade": "Parameters: {\"recipient_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"message\": \"<optional string>\"}",
+            "tool_propose_trade": "Parameters: {\"recipient_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"message\": \"<optional string>\"} ⚠️ CRITICAL: Look up property IDs from board_squares - do NOT guess!",
             "tool_accept_trade": "Parameters: {\"trade_id\": <integer>} (optional, auto-filled if pending)",
             "tool_reject_trade": "Parameters: {\"trade_id\": <integer>} (optional, auto-filled if pending)",
-            "tool_propose_counter_offer": "Parameters: {\"trade_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"counter_message\": \"<optional string>\"}",
+            "tool_propose_counter_offer": "Parameters: {\"trade_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"counter_message\": \"<optional string>\"} ⚠️ CRITICAL: Look up property IDs from board_squares - do NOT guess!",
             "tool_end_trade_negotiation": "Parameters: {} (no parameters needed)",
             "tool_pay_mortgage_interest_fee": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",
             "tool_unmortgage_property_immediately": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",
@@ -462,12 +484,44 @@ class OpenAIAgent(BaseAgent):
             else:
                 prompt += f"• {action_name}: Parameters: {{}} (unknown tool, use no parameters)\n"
         
+        # 🚨 CRITICAL: Add property ID verification for trades
+        if "tool_propose_trade" in available_actions:
+            prompt += "\n🔍 PROPERTY ID VERIFICATION - READ CAREFULLY!\n"
+            prompt += "Before proposing any trade, you MUST verify property IDs using the board_squares list.\n"
+            
+            prompt += "\n🎯 VERIFICATION CHECKLIST BEFORE SUBMITTING:\n"
+            prompt += "1. Double-check property names match the exact names in board_squares\n"
+            prompt += "2. Verify property IDs match the names you want to trade\n"
+            prompt += "3. Cross-reference with the board_squares list provided in your game state\n"
+            prompt += "4. NEVER assume property IDs - always check the board_squares data\n\n"
+
         prompt += "\nINSTRUCTIONS FOR YOUR RESPONSE:\n"
         prompt += "You must respond with a single JSON object containing your action and thoughts.\n"
         prompt += "The JSON object MUST have these keys:\n"
         prompt += "1. 'thoughts': A string containing your step-by-step thinking process and strategy\n"
         prompt += "2. 'tool_name': The exact name of the chosen action from the available actions list\n"
-        prompt += "3. 'parameters': A JSON object containing the action parameters (use {} if no parameters needed)\n"
+        prompt += "3. 'parameters': A JSON object containing the action parameters (use {} if no parameters needed)\n"        
+        # 🎯 Add error handling and failure recovery guidance
+        prompt += "\n🚨 CRITICAL ERROR HANDLING AND STRATEGY ADJUSTMENT:\n"
+        prompt += "If your previous action FAILED (you see error messages), you MUST:\n"
+        prompt += "1. READ the error message carefully for specific reasons (e.g., 'You don't own property X')\n"
+        prompt += "2. ADJUST your strategy based on the error:\n"
+        prompt += "   • Property ownership errors → Check actual property ownership before trading\n"
+        prompt += "   • Money errors → Reduce money amounts or offer different items\n"
+        prompt += "   • Invalid recipient → Choose a different player who's not bankrupt\n"
+        prompt += "3. NEVER repeat the exact same failed action with identical parameters\n"
+        prompt += "4. If multiple trade attempts fail, consider tool_end_trade_negotiation\n"
+        prompt += "5. For other repeated failures, try tool_end_turn to move forward\n"
+        prompt += "6. LEARN from error messages - they contain specific guidance to fix your approach\n\n"
+        
+        prompt += "🔄 TRADE FAILURE RECOVERY STRATEGY:\n"
+        prompt += "When tool_propose_trade fails, analyze the error and try ONE of these:\n"
+        prompt += "• Fix property IDs: Use properties you actually own and they actually own\n"
+        prompt += "• Fix money amounts: Ensure you have enough money to offer, they have enough to pay\n"
+        prompt += "• Try different recipients: Choose non-bankrupt players\n"
+        prompt += "• Simplify the trade: Reduce complexity (fewer properties, less money)\n"
+        prompt += "• Use tool_end_trade_negotiation if you've tried multiple times\n\n"
+        
         prompt += "\nExamples:\n"
         prompt += "For 'tool_propose_trade' with thoughts and message:\n"
         prompt += '{"thoughts": "I want Baltic Avenue to complete my brown set. Maybe Player B will accept this offer if I explain my reasoning.", "tool_name": "tool_propose_trade", "parameters": {"recipient_id": 1, "offered_property_ids": [1], "offered_money": 50, "requested_property_ids": [3], "message": "Baltic would complete my set! How about this deal?"}}\n'

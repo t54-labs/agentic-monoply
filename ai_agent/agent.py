@@ -147,7 +147,7 @@ class OpenAIAgent(BaseAgent):
                 prompt += f"This property is owned by {owner_name}. Mortgaged: {current_square_details.get('is_mortgaged')}\n"
         
         # Other Players' Status
-        prompt += "\n--- Opponent Status (Summary) ---\n"
+        prompt += "\n--- Opponent Status (Detailed) ---\n"
         if not game_state.get('other_players', []):
             prompt += "  (No other active players)\n"
         else:
@@ -156,6 +156,20 @@ class OpenAIAgent(BaseAgent):
                     prompt += f"{p_info['name']} (ID: {p_info['player_id']}): BANKRUPT\n"
                 else:
                     prompt += f"{p_info['name']} (ID: {p_info['player_id']}): Pos {p_info.get('position')}, Props {p_info.get('num_properties')}, Jail: {p_info.get('in_jail')}\n"
+                    
+                    # 🎯 CRITICAL: Show detailed property ownership for accurate trading
+                    properties_owned = p_info.get('properties_owned', [])
+                    if properties_owned:
+                        prompt += f"  Properties owned by {p_info['name']}:\n"
+                        for prop in properties_owned:
+                            mortgaged_status = " (Mortgaged)" if prop.get('is_mortgaged') else ""
+                            houses_str = ""
+                            if prop.get('num_houses', 0) > 0:
+                                houses_str = f", {prop['num_houses']} houses" if prop['num_houses'] < 5 else ", HOTEL"
+                            color_group_str = f" [{prop.get('color_group', 'N/A')}]" if prop.get('color_group') else ""
+                            prompt += f"    - {prop['name']} (ID: {prop['id']}){color_group_str}{houses_str}{mortgaged_status}\n"
+                    else:
+                        prompt += f"  {p_info['name']} owns no properties\n"
         
         # Recent Game Events
         prompt += "\n--- Recent Game Events (Last 5) ---\n"
@@ -359,9 +373,41 @@ class OpenAIAgent(BaseAgent):
             player_id = other_player['player_id']
             player_name = other_player['name']
             
-            # assume other players also want to complete color group (simplified analysis)
-            prompt += f"• P{player_id} ({player_name}): {other_player.get('num_properties', 0)} properties\n"
-            prompt += f"  Consider what they might need to complete their color groups\n"
+            # analyze their color group completion status
+            other_properties = other_player.get('properties_owned', [])
+            if other_properties:
+                prompt += f"• P{player_id} ({player_name}): {len(other_properties)} properties\n"
+                
+                # Group their properties by color group
+                other_color_groups = {}
+                for prop in other_properties:
+                    color_group = prop.get('color_group')
+                    if color_group and color_group != 'N/A':
+                        if color_group not in other_color_groups:
+                            other_color_groups[color_group] = []
+                        other_color_groups[color_group].append(prop)
+                
+                if other_color_groups:
+                    prompt += f"  Color groups they're working on:\n"
+                    for color_group, props in other_color_groups.items():
+                        # Count total properties in this color group from board
+                        total_in_group = len([sq for sq in game_state.get('board_squares', []) 
+                                            if sq.get('color_group') == color_group and sq.get('type') == 'PROPERTY'])
+                        owned_count = len(props)
+                        if owned_count > 0:
+                            if owned_count == total_in_group:
+                                prompt += f"    - {color_group}: COMPLETE MONOPOLY ({owned_count}/{total_in_group})\n"
+                            else:
+                                prompt += f"    - {color_group}: {owned_count}/{total_in_group} properties\n"
+                                # Show which properties they need
+                                missing = total_in_group - owned_count
+                                if missing == 1:
+                                    prompt += f"      → They need 1 more property to complete this group!\n"
+                                    prompt += f"      → Consider offering properties in {color_group} group\n"
+                else:
+                    prompt += f"  No complete color groups yet\n"
+            else:
+                prompt += f"• P{player_id} ({player_name}): No properties\n"
         
         prompt += "\n🚨 WHEN TO PROPOSE TRADES:\n"
         prompt += "- ANYTIME you can complete a color group (even if expensive)\n"
@@ -465,7 +511,7 @@ class OpenAIAgent(BaseAgent):
             "tool_bid_on_auction": "Parameters: {\"bid_amount\": <integer>}",
             "tool_pass_auction_bid": "Parameters: {} (no parameters needed)",
             "tool_withdraw_from_auction": "Parameters: {} (no parameters needed)",
-            "tool_propose_trade": "Parameters: {\"recipient_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"message\": \"<optional string>\"} ⚠️ CRITICAL: Look up property IDs from board_squares - do NOT guess!",
+            "tool_propose_trade": "Parameters: {\"recipient_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers representing properties index id>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"message\": \"<optional string>\"} ⚠️ CRITICAL: Look up property IDs from board_squares - do NOT guess!",
             "tool_accept_trade": "Parameters: {\"trade_id\": <integer>} (optional, auto-filled if pending)",
             "tool_reject_trade": "Parameters: {\"trade_id\": <integer>} (optional, auto-filled if pending)",
             "tool_propose_counter_offer": "Parameters: {\"trade_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"counter_message\": \"<optional string>\"} ⚠️ CRITICAL: Look up property IDs from board_squares - do NOT guess!",
@@ -487,13 +533,21 @@ class OpenAIAgent(BaseAgent):
         # 🚨 CRITICAL: Add property ID verification for trades
         if "tool_propose_trade" in available_actions:
             prompt += "\n🔍 PROPERTY ID VERIFICATION - READ CAREFULLY!\n"
-            prompt += "Before proposing any trade, you MUST verify property IDs using the board_squares list.\n"
+            prompt += "Before proposing any trade, you MUST verify property IDs using the detailed information provided.\n"
             
             prompt += "\n🎯 VERIFICATION CHECKLIST BEFORE SUBMITTING:\n"
-            prompt += "1. Double-check property names match the exact names in board_squares\n"
-            prompt += "2. Verify property IDs match the names you want to trade\n"
-            prompt += "3. Cross-reference with the board_squares list provided in your game state\n"
-            prompt += "4. NEVER assume property IDs - always check the board_squares data\n\n"
+            prompt += "1. ✅ Check 'Properties owned by [Player]' section above for exact property names and IDs\n"
+            prompt += "2. ✅ Use the EXACT property IDs shown in the opponent's property list\n"
+            prompt += "3. ✅ For your own properties, use the IDs from 'Properties Owned' section\n"
+            prompt += "4. ✅ Cross-reference with board_squares if needed for additional details\n"
+            prompt += "5. ❌ NEVER guess property IDs - all information is provided above\n"
+            
+            prompt += "\n💡 EXAMPLE WORKFLOW:\n"
+            prompt += "1. 'I want to trade with Ricky for his Vermont Avenue'\n"
+            prompt += "2. Look at 'Properties owned by Ricky' section above\n"
+            prompt += "3. Find 'Vermont Avenue (ID: 8)' in his property list\n"
+            prompt += "4. Use ID 8 in requested_property_ids parameter\n"
+            prompt += "5. For offered properties, check my own 'Properties Owned' section\n\n"
 
         prompt += "\nINSTRUCTIONS FOR YOUR RESPONSE:\n"
         prompt += "You must respond with a single JSON object containing your action and thoughts.\n"
@@ -513,14 +567,6 @@ class OpenAIAgent(BaseAgent):
         prompt += "4. If multiple trade attempts fail, consider tool_end_trade_negotiation\n"
         prompt += "5. For other repeated failures, try tool_end_turn to move forward\n"
         prompt += "6. LEARN from error messages - they contain specific guidance to fix your approach\n\n"
-        
-        prompt += "🔄 TRADE FAILURE RECOVERY STRATEGY:\n"
-        prompt += "When tool_propose_trade fails, analyze the error and try ONE of these:\n"
-        prompt += "• Fix property IDs: Use properties you actually own and they actually own\n"
-        prompt += "• Fix money amounts: Ensure you have enough money to offer, they have enough to pay\n"
-        prompt += "• Try different recipients: Choose non-bankrupt players\n"
-        prompt += "• Simplify the trade: Reduce complexity (fewer properties, less money)\n"
-        prompt += "• Use tool_end_trade_negotiation if you've tried multiple times\n\n"
         
         prompt += "\nExamples:\n"
         prompt += "For 'tool_propose_trade' with thoughts and message:\n"

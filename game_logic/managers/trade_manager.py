@@ -165,6 +165,16 @@ class TradeManager(BaseManager):
         
         # Create trade offer
         trade_id = self._generate_trade_id()
+        
+        # 🎯 CRITICAL FIX: Inherit rejection count for continued negotiations
+        inherited_rejection_count = 0
+        if (self.gc.pending_decision_type == "propose_new_trade_after_rejection" and 
+            hasattr(self.gc, 'pending_decision_context') and 
+            self.gc.pending_decision_context.get("player_id") == proposer_id):
+            # Continue the rejection count from the previous negotiation
+            inherited_rejection_count = self.gc.pending_decision_context.get("rejection_count", 0)
+            self.log_event(f"[TRADE DEBUG] Inheriting rejection count: {inherited_rejection_count} for continued negotiation", "error_trade")
+        
         trade_offer = TradeOffer(
             trade_id=trade_id,
             proposer_id=proposer_id,
@@ -175,7 +185,7 @@ class TradeManager(BaseManager):
             counter_offer_to_trade_id=counter_to_trade_id,
             turn_proposed=self.turn_count,
             message=message,
-            rejection_count=0
+            rejection_count=inherited_rejection_count  # 🎯 Use inherited count instead of always 0
         )
         
         self.gc.trade_offers[trade_id] = trade_offer

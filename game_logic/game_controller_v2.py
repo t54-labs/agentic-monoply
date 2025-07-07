@@ -26,7 +26,7 @@ from .managers import (
 
 from admin.game_event_handler import get_game_event_handler
 
-MAX_TRADE_REJECTIONS = 5
+MAX_TRADE_REJECTIONS = 3
 
 
 @dataclass
@@ -1212,6 +1212,24 @@ class GameControllerV2:
         # Build other players information
         for p_other in self.players:
             if p_other.player_id != player_id:
+                # 🎯 CRITICAL FIX: Include detailed property information for other players
+                # This prevents AI agents from guessing property IDs in trades
+                other_player_properties = []
+                for prop_id in p_other.properties_owned_ids:
+                    prop_square = self.board.get_square(prop_id)
+                    if isinstance(prop_square, PurchasableSquare):
+                        prop_info = {
+                            "id": prop_id,
+                            "name": prop_square.name,
+                            "type": prop_square.square_type.value,
+                            "color_group": prop_square.color_group.value if hasattr(prop_square, 'color_group') and prop_square.color_group else None,
+                            "is_mortgaged": prop_square.is_mortgaged,
+                        }
+                        # Add house info for properties
+                        if isinstance(prop_square, PropertySquare):
+                            prop_info["num_houses"] = prop_square.num_houses
+                        other_player_properties.append(prop_info)
+                
                 other_info = {
                     "player_id": p_other.player_id,
                     "name": p_other.name,
@@ -1219,6 +1237,7 @@ class GameControllerV2:
                     "in_jail": p_other.in_jail,
                     "is_bankrupt": p_other.is_bankrupt,
                     "num_properties": len(p_other.properties_owned_ids),
+                    "properties_owned": other_player_properties,  # 🎯 NEW: Detailed property information
                 }
                 game_state["other_players"].append(other_info)
                 

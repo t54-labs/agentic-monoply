@@ -40,6 +40,45 @@ class TradeManager(BaseManager):
             self.gc.trade_offers = {}
         if not hasattr(self.gc, 'next_trade_id'):
             self.gc.next_trade_id = 1
+        # 🎯 NEW: Track trade attempts per player per turn to prevent abuse
+        if not hasattr(self.gc, 'trade_attempts_this_turn'):
+            self.gc.trade_attempts_this_turn = {}
+        if not hasattr(self.gc, 'last_turn_tracked'):
+            self.gc.last_turn_tracked = 0
+    
+    def _reset_turn_trade_attempts_if_needed(self) -> None:
+        """Reset trade attempts counter when turn changes"""
+        current_turn = getattr(self.gc, 'turn_count', 0)
+        if current_turn != self.gc.last_turn_tracked:
+            self.log_event(f"[TRADE DEBUG] Resetting trade attempts for new turn {current_turn}", "error_trade")
+            self.gc.trade_attempts_this_turn = {}
+            self.gc.last_turn_tracked = current_turn
+    
+    def _check_turn_trade_limit(self, proposer_id: int) -> bool:
+        """Check if player has exceeded trade attempts limit for this turn"""
+        self._reset_turn_trade_attempts_if_needed()
+        
+        attempts = self.gc.trade_attempts_this_turn.get(proposer_id, 0)
+        max_attempts = self.gc.MAX_TRADE_REJECTIONS
+        
+        if attempts >= max_attempts:
+            proposer_name = self.players[proposer_id].name
+            self.log_event(f"[TRADE LIMIT] {proposer_name} has reached maximum trade attempts ({max_attempts}) for this turn", "error_trade")
+            return False
+        return True
+    
+    def _increment_trade_attempt(self, proposer_id: int) -> None:
+        """Increment trade attempt counter for the proposer"""
+        self._reset_turn_trade_attempts_if_needed()
+        
+        if proposer_id not in self.gc.trade_attempts_this_turn:
+            self.gc.trade_attempts_this_turn[proposer_id] = 0
+        
+        self.gc.trade_attempts_this_turn[proposer_id] += 1
+        attempts = self.gc.trade_attempts_this_turn[proposer_id]
+        proposer_name = self.players[proposer_id].name
+        
+        self.log_event(f"[TRADE ATTEMPT] {proposer_name} trade attempt {attempts}/{self.gc.MAX_TRADE_REJECTIONS} this turn", "error_trade")
     
     def propose_trade_action(self, proposer_id: int, recipient_id: int, 
                            offered_property_ids: List[int], offered_money: int, offered_gooj_cards: int,
@@ -68,6 +107,10 @@ class TradeManager(BaseManager):
         self.log_event(f"[TRADE DEBUG] Proposing trade: P{proposer_id} -> P{recipient_id}", "error_trade")
         self.log_event(f"  Offered properties: {offered_property_ids}, money: ${offered_money}, GOOJ: {offered_gooj_cards}", "error_trade")
         self.log_event(f"  Requested properties: {requested_property_ids}, money: ${requested_money}, GOOJ: {requested_gooj_cards}", "error_trade")
+        
+        # 🎯 NEW: Check turn-based trade limit (prevent abuse)
+        if not self._check_turn_trade_limit(proposer_id):
+            return None
         
         # 🚨 Check if this is a new trade proposal after rejection - enforce same recipient rule
         if (self.gc.pending_decision_type == "propose_new_trade_after_rejection" and 
@@ -190,6 +233,9 @@ class TradeManager(BaseManager):
         
         self.gc.trade_offers[trade_id] = trade_offer
         
+        # 🎯 NEW: Increment trade attempt counter for this turn
+        self._increment_trade_attempt(proposer_id)
+        
         # Set pending decision for recipient
         self.gc._set_pending_decision(
             "respond_to_trade_offer",
@@ -280,7 +326,32 @@ class TradeManager(BaseManager):
             return True
             
         elif response == "counter":
-            # Create counter-offer
+            # 🎯 Check if player can still make counter offers (subject to turn limits)
+            if not self._check_turn_trade_limit(player_id):
+                self.log_event(f"Trade {trade_id} counter-offer blocked: {player.name} has reached turn trade limit", "trade_event")
+                # Force reject instead
+                offer.status = "rejected"
+                offer.rejection_count += 1
+                self.log_event(f"Trade {trade_id} auto-rejected due to turn trade limit", "trade_event")
+                
+                # Check if max rejections reached
+                if offer.rejection_count >= self.gc.MAX_TRADE_REJECTIONS:
+                    self.log_event(f"Trade {trade_id} reached maximum rejections ({self.gc.MAX_TRADE_REJECTIONS})", "trade_event")
+                    self.gc._resolve_current_action_segment()
+                else:
+                    # Allow proposer to make a new offer or end negotiation
+                    self.gc._set_pending_decision(
+                        "propose_new_trade_after_rejection",
+                        context={
+                            "player_id": offer.proposer_id,
+                            "rejected_trade_id": trade_id,
+                            "rejection_count": offer.rejection_count
+                        },
+                        outcome_processed=False
+                    )
+                return True
+            
+            # Create counter-offer (this will increment the counter's trade attempt)
             counter_trade_id = self.propose_trade_action(
                 proposer_id=player_id,
                 recipient_id=offer.proposer_id,

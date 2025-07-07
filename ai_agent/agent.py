@@ -273,16 +273,32 @@ class OpenAIAgent(BaseAgent):
             prompt += "- Houses dramatically increase rent and help you win\n"
             prompt += "- If you can't build houses, focus on completing color groups through trading\n\n"
         
-        # 🎯 NEW: add strategy note for trading
+        # 🎯 CONDITIONAL: add strategy note for trading (only in later game stages)
         if "tool_propose_trade" in available_actions:
-            prompt += "\n🤝 CRITICAL MONOPOLY STRATEGY: TRADING FOR COLOR GROUP MONOPOLIES!\n"
-            prompt += "=== WHY TRADING IS ESSENTIAL ===\n"
-            prompt += "- You CANNOT build houses without owning ALL properties in a color group\n"
-            prompt += "- Complete color groups allow you to build houses and charge monopoly rent\n"
-            prompt += "- Monopoly rent is 2x base rent (without houses) and much higher with houses\n"
-            prompt += "- Most Monopoly games are won through smart trading to complete color groups\n"
-            prompt += "- Trading is often the ONLY way to complete color groups\n"
-            prompt += "- 🎯 KEY INSIGHT: If you landed on your own property but can't build houses, you need more properties in that color group!\n\n"
+            # Determine if we're in later game stage for trade emphasis
+            total_properties_owned = len(game_state.get('my_properties_owned_ids', []))
+            turn_count = game_state.get('turn_count', 1)
+            other_players_have_properties = any(
+                len(p.get('properties_owned', [])) > 2 
+                for p in game_state.get('other_players', [])
+            )
+            
+            # Only emphasize trading in later stages: turn 10+, or when players have 3+ properties
+            is_later_stage = turn_count >= 50 or total_properties_owned >= 3 or other_players_have_properties
+            
+            if is_later_stage:
+                prompt += "\n🤝 MONOPOLY STRATEGY: TRADING FOR COLOR GROUP MONOPOLIES!\n"
+                prompt += "=== WHY TRADING BECOMES IMPORTANT ===\n"
+                prompt += "- You CANNOT build houses without owning ALL properties in a color group\n"
+                prompt += "- Complete color groups allow you to build houses and charge monopoly rent\n"
+                prompt += "- Monopoly rent is 2x base rent (without houses) and much higher with houses\n"
+                prompt += "- Trading is often the ONLY way to complete color groups\n"
+                prompt += "- 🎯 KEY INSIGHT: If you landed on your own property but can't build houses, you need more properties in that color group!\n\n"
+            else:
+                prompt += "\n🏠 EARLY GAME FOCUS: PROPERTY ACQUISITION\n"
+                prompt += "- Early game priority: Buy unowned properties when you land on them\n"
+                prompt += "- Trading becomes more valuable once players own multiple properties\n"
+                prompt += "- Focus on cash flow and property collection first\n\n"
             
             # analyze current color group situation
             color_group_analysis = {}
@@ -304,8 +320,8 @@ class OpenAIAgent(BaseAgent):
                 missing_props = [sq for sq in total_props_in_group if sq['id'] not in owned_ids]
                 color_group_analysis[color_group]['missing'] = missing_props
             
-            # generate specific trading suggestions
-            if color_group_analysis:
+            # generate specific trading suggestions (only in later stages)
+            if color_group_analysis and is_later_stage:
                 prompt += "=== YOUR COLOR GROUP ANALYSIS ===\n"
                 prompt += "🎯 REMEMBER: You need COMPLETE color groups to build houses and charge monopoly rent!\n"
                 trade_opportunities = []
@@ -409,12 +425,20 @@ class OpenAIAgent(BaseAgent):
             else:
                 prompt += f"• P{player_id} ({player_name}): No properties\n"
         
-        prompt += "\n🚨 WHEN TO PROPOSE TRADES:\n"
-        prompt += "- ANYTIME you can complete a color group (even if expensive)\n"
-        prompt += "- When you land on your own property but can't build (need complete group)\n"
-        prompt += "- When other players land on properties you need\n"
-        prompt += "- During your property management phase (after rolling dice)\n"
-        prompt += "- Be persistent! Most monopoly games are won through trading\n\n"
+        # 🎯 Conditional trading advice based on game stage
+        if is_later_stage:
+            prompt += "\n🚨 WHEN TO PROPOSE TRADES (LATER GAME):\n"
+            prompt += "- ANYTIME you can complete a color group (even if expensive)\n"
+            prompt += "- When you land on your own property but can't build (need complete group)\n"
+            prompt += "- When other players land on properties you need\n"
+            prompt += "- During your property management phase (after rolling dice)\n"
+            prompt += "- Be strategic! Trading becomes crucial for color group completion\n\n"
+        else:
+            prompt += "\n💰 EARLY GAME TRADE CONSIDERATIONS:\n"
+            prompt += "- Only trade if it clearly benefits your position\n"
+            prompt += "- Focus on buying unowned properties first\n"
+            prompt += "- Trading is less urgent until players have established property bases\n"
+            prompt += "- Conserve cash for property purchases\n\n"
         
         current_pending_decision = game_state.get('pending_decision_type', 'None')
         prompt += f"Current pending decision: {current_pending_decision}\n"

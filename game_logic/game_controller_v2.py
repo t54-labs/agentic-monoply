@@ -899,8 +899,16 @@ class GameControllerV2:
             if self.pending_decision_context.get("player_id") == player_id:
                 rejection_count = self.pending_decision_context.get("rejection_count", 0)
                 self.log_event(f"[TRADE DEBUG] P{player_id} in propose_new_trade_after_rejection state, rejection_count: {rejection_count}, max: {MAX_TRADE_REJECTIONS}", "error_trade")
-                if rejection_count < MAX_TRADE_REJECTIONS:
+                
+                # 🎯 Check both rejection count AND turn trade limit
+                can_propose_due_to_rejections = rejection_count < MAX_TRADE_REJECTIONS
+                can_propose_due_to_turn_limit = self.trade_manager._check_turn_trade_limit(player_id)
+                
+                if can_propose_due_to_rejections and can_propose_due_to_turn_limit:
                     actions.append("tool_propose_trade")
+                elif not can_propose_due_to_turn_limit:
+                    self.log_event(f"[TRADE LIMIT] P{player_id} cannot propose more trades due to turn limit", "error_trade")
+                
                 actions.append("tool_end_trade_negotiation")
             else: 
                 self._clear_pending_decision()
@@ -1040,8 +1048,13 @@ class GameControllerV2:
                             actions.append("tool_mortgage_property")
                         if any(isinstance(sq := self.board.get_square(pid), PurchasableSquare) and sq.owner_id == player_id and sq.is_mortgaged and player.money >= int(sq.mortgage_value*1.1) for pid in player.properties_owned_ids): 
                             actions.append("tool_unmortgage_property")
-                        if len([p_other for p_other in self.players if not p_other.is_bankrupt and p_other.player_id != player_id]) > 0: 
-                            actions.append("tool_propose_trade")
+                        # 🎯 Trading with turn-based limits
+                        if len([p_other for p_other in self.players if not p_other.is_bankrupt and p_other.player_id != player_id]) > 0:
+                            # Check if player can still propose trades this turn
+                            if self.trade_manager._check_turn_trade_limit(player_id):
+                                actions.append("tool_propose_trade")
+                            else:
+                                self.log_event(f"[TRADE LIMIT] {player.name} cannot propose more trades this turn", "debug_trade")
                         
                         # 🎲 BONUS TURN: If player rolled doubles, they can roll again after property management
                         if self.doubles_streak > 0 and self.doubles_streak < 3:

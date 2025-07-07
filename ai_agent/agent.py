@@ -514,7 +514,7 @@ class OpenAIAgent(BaseAgent):
             "tool_propose_trade": "Parameters: {\"recipient_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers representing properties index id>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"message\": \"<optional string>\"} ⚠️ CRITICAL: Look up property IDs from board_squares - do NOT guess!",
             "tool_accept_trade": "Parameters: {\"trade_id\": <integer>} (optional, auto-filled if pending)",
             "tool_reject_trade": "Parameters: {\"trade_id\": <integer>} (optional, auto-filled if pending)",
-            "tool_propose_counter_offer": "Parameters: {\"trade_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"counter_message\": \"<optional string>\"} ⚠️ CRITICAL: Look up property IDs from board_squares - do NOT guess!",
+            "tool_propose_counter_offer": "Parameters: {\"trade_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers representing properties index id>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"counter_message\": \"<optional string>\"} ⚠️ CRITICAL: Look up property IDs from board_squares - do NOT guess!",
             "tool_end_trade_negotiation": "Parameters: {} (no parameters needed)",
             "tool_pay_mortgage_interest_fee": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",
             "tool_unmortgage_property_immediately": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",
@@ -530,10 +530,10 @@ class OpenAIAgent(BaseAgent):
             else:
                 prompt += f"• {action_name}: Parameters: {{}} (unknown tool, use no parameters)\n"
         
-        # 🚨 CRITICAL: Add property ID verification for trades
-        if "tool_propose_trade" in available_actions:
+        # 🚨 CRITICAL: Add property ID verification for trades AND counter offers
+        if "tool_propose_trade" in available_actions or "tool_propose_counter_offer" in available_actions:
             prompt += "\n🔍 PROPERTY ID VERIFICATION - READ CAREFULLY!\n"
-            prompt += "Before proposing any trade, you MUST verify property IDs using the detailed information provided.\n"
+            prompt += "Before proposing any trade or you are responding to proposal with a counter-offer, you MUST verify property IDs using the detailed information provided.\n"
             
             prompt += "\n🎯 VERIFICATION CHECKLIST BEFORE SUBMITTING:\n"
             prompt += "1. ✅ Check 'Properties owned by [Player]' section above for exact property names and IDs\n"
@@ -547,7 +547,18 @@ class OpenAIAgent(BaseAgent):
             prompt += "2. Look at 'Properties owned by Ricky' section above\n"
             prompt += "3. Find 'Vermont Avenue (ID: 8)' in his property list\n"
             prompt += "4. Use ID 8 in requested_property_ids parameter\n"
-            prompt += "5. For offered properties, check my own 'Properties Owned' section\n\n"
+            prompt += "5. For offered properties, check my own 'Properties Owned' section\n"
+            
+            # 🎯 Add specific guidance for counter offers
+            if "tool_propose_counter_offer" in available_actions:
+                prompt += "\n🔄 COUNTER-OFFER SPECIAL INSTRUCTIONS:\n"
+                prompt += "When responding to a trade offer with a counter-offer:\n"
+                prompt += "1. ✅ Review the original trade details in 'Current Trade Details' section above\n"
+                prompt += "2. ✅ Understand what the proposer offered and requested\n"
+                prompt += "3. ✅ Your counter-offer offered_property_ids = properties YOU give to THEM\n"
+                prompt += "4. ✅ Your counter-offer requested_property_ids = properties YOU want from THEM\n"
+                prompt += "5. ✅ Use the detailed property ownership information to verify all IDs\n"
+                prompt += "6. ✅ Include a counter_message explaining your counter-proposal\n\n"
 
         prompt += "\nINSTRUCTIONS FOR YOUR RESPONSE:\n"
         prompt += "You must respond with a single JSON object containing your action and thoughts.\n"

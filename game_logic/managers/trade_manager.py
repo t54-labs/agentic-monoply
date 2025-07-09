@@ -110,9 +110,11 @@ class TradeManager(BaseManager):
         
         # 🎯 NEW: Check turn-based trade limit (prevent abuse)
         if not self._check_turn_trade_limit(proposer_id):
+            proposer_name = self.players[proposer_id].name
+            self.log_event(f"[TRADE BLOCKED] {proposer_name} has reached maximum trade attempts for this turn", "error_trade")
             return None
         
-        # 🚨 Check if this is a new trade proposal after rejection - enforce same recipient rule
+        # 🚨 Check if this is a new trade proposal after rejection - allow different recipients but track rejections properly
         if (self.gc.pending_decision_type == "propose_new_trade_after_rejection" and 
             hasattr(self.gc, 'pending_decision_context') and 
             self.gc.pending_decision_context.get("player_id") == proposer_id):
@@ -123,12 +125,13 @@ class TradeManager(BaseManager):
                 original_offer = self.gc.trade_offers[rejected_trade_id]
                 original_recipient_id = original_offer.recipient_id
                 
-                # Enforce same recipient rule
+                # 🎯 RELAXED RULE: Allow trading with different players after rejection
+                # This gives players more flexibility while still maintaining turn limits
                 if recipient_id != original_recipient_id:
                     original_recipient_name = self.players[original_recipient_id].name
                     attempted_recipient_name = self.players[recipient_id].name
-                    self.log_event(f"[TRADE RULE VIOLATION] {self.players[proposer_id].name} cannot propose trade to {attempted_recipient_name} after rejection. Must continue negotiation with {original_recipient_name}.", "error_trade")
-                    return None
+                    self.log_event(f"[TRADE FLEXIBILITY] {self.players[proposer_id].name} switching negotiation from {original_recipient_name} to {attempted_recipient_name}.", "info_trade")
+                    # Don't return None - allow the switch
                     
                 # Check rejection count limit
                 rejection_count = self.gc.pending_decision_context.get("rejection_count", 0)

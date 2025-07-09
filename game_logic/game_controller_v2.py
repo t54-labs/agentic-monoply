@@ -1,6 +1,7 @@
 from typing import List, Optional, Tuple, Dict, Any
 import random
 import asyncio
+import os
 from dataclasses import dataclass, field
 
 from .board import Board, CardData
@@ -102,10 +103,15 @@ class GameControllerV2:
         self.auction_current_bidder_turn_index: int = 0
         self.trade_offers: Dict[int, TradeOffer] = {}
         self.next_trade_id: int = 1
-        self.MAX_TRADE_REJECTIONS: int = 5  # Maximum number of rejections allowed for a trade
+        self.MAX_TRADE_REJECTIONS: int = 3
         
         # Initialize managers for modular architecture FIRST
-        self.payment_manager = PaymentManager(self)
+        # Use LocalPaymentManager in test environment to avoid TPay dependencies
+        if os.getenv("RUN_CONTEXT") == "test":
+            from .managers.local_payment_manager import LocalPaymentManager
+            self.payment_manager = LocalPaymentManager(self)
+        else:
+            self.payment_manager = PaymentManager(self)
         self.property_manager = PropertyManager(self)
         self.trade_manager = TradeManager(self)
         self.state_manager = StateManager(self)
@@ -940,15 +946,23 @@ class GameControllerV2:
             if self.current_player_index == player_id:
                 if not player.in_jail: 
                     if self.turn_phase == "pre_roll":
-                        # 🎲 RULE: In Monopoly, rolling dice is MANDATORY at the start of each turn
-                        # Players cannot choose to skip rolling dice to avoid moving
-                        actions.append("tool_roll_dice")
+                        # 🎲 RULE: In Monopoly, rolling dice is MANDATORY and AUTOMATIC
+                        # Players cannot choose to skip rolling dice - it happens automatically
+                        self.log_event(f"[AUTO DICE ROLL] {player.name} must roll dice automatically (pre_roll phase)", "debug_dice")
                         
-                        # 🚫 IMPORTANT: NO property management before rolling dice
-                        # Players must roll dice first, then move, then handle property management
-                        
-                        # The only exception is resign game
-                        actions.append("tool_resign_game")
+                        # 🔄 AUTO-EXECUTE dice roll immediately
+                        try:
+                            dice_roll = self.roll_dice()
+                            self.log_event(f"[AUTO DICE ROLL] {player.name} auto-rolled: {dice_roll}", "debug_dice")
+                            # After auto-rolling, recalculate available actions
+                            return self.get_available_actions(player_id)
+                        except Exception as e:
+                            self.log_event(f"[ERROR] Auto dice roll failed for {player.name}: {e}", "error_log")
+                            # 🚨 CRITICAL: Dice rolling is MANDATORY - do not allow manual override
+                            # If auto dice roll fails, this is a system error that needs fixing
+                            # DO NOT add tool_roll_dice as fallback - fix the underlying issue instead
+                            self.log_event(f"[SYSTEM ERROR] Auto dice roll failed - game flow compromised", "error_log")
+                            actions.append("tool_resign_game")  # Only allow resignation if dice system broken
                         
                     elif self.turn_phase == "post_roll":
                         # 🎲 Dice has been rolled and player has moved to new position
@@ -1056,10 +1070,25 @@ class GameControllerV2:
                             else:
                                 self.log_event(f"[TRADE LIMIT] {player.name} cannot propose more trades this turn", "debug_trade")
                         
-                        # 🎲 BONUS TURN: If player rolled doubles, they can roll again after property management
+                        # 🎲 BONUS TURN: If player rolled doubles, automatically execute dice roll
+                        # NOTE: Dice rolling is AUTOMATIC for bonus turns, not a player choice
                         if self.doubles_streak > 0 and self.doubles_streak < 3:
-                            actions.append("tool_roll_dice")  # Allow another dice roll for bonus turn
-                            self.log_event(f"[Bonus Turn] {player.name} can roll dice again due to doubles (streak: {self.doubles_streak})", "debug_bonus_turn")
+                            self.log_event(f"[Auto Bonus Turn] {player.name} automatically rolling dice due to doubles (streak: {self.doubles_streak})", "debug_bonus_turn")
+                            
+                            # 🔄 AUTO-EXECUTE dice roll immediately
+                            try:
+                                dice_roll = self.roll_dice()
+                                self.log_event(f"[Auto Dice Roll] {player.name} auto-rolled: {dice_roll}", "debug_bonus_turn")
+                                # After auto-rolling, the player should be able to do normal post-roll actions
+                                # Don't add any actions here - let the normal flow continue
+                                return self.get_available_actions(player_id)  # Recalculate actions after auto-roll
+                            except Exception as e:
+                                self.log_event(f"[ERROR] Auto dice roll failed for {player.name}: {e}", "error_log")
+                                # 🚨 CRITICAL: Dice rolling is MANDATORY - do not allow manual override
+                                # If auto dice roll fails, this is a system error that needs fixing
+                                # DO NOT add tool_roll_dice as fallback - fix the underlying issue instead
+                                self.log_event(f"[SYSTEM ERROR] Auto dice roll failed for bonus turn - game flow compromised", "error_log")
+                                actions.append("tool_resign_game")  # Only allow resignation if dice system broken
                         
                         # In post-roll phase, player can end turn (but only if no bonus turn available or they choose to skip it)
                         actions.append("tool_end_turn")
@@ -1178,6 +1207,8 @@ class GameControllerV2:
             "pending_decision_context": self.pending_decision_context,
             "dice_roll_outcome_processed": self.dice_roll_outcome_processed,
             "last_dice_roll": self.dice if self.dice != (0,0) else None,
+            "turn_phase": getattr(self, 'turn_phase', 'unknown'),  # 🎯 CRITICAL: AI needs to know turn phase
+            "has_rolled_dice_this_turn": self.dice_roll_outcome_processed and self.dice != (0,0),  # 🎯 CLEAR indicator
             "current_trade_info": current_trade_info,
             "recent_trade_offers": recent_trade_offers,
             "board_squares": [], 

@@ -274,18 +274,19 @@ class OpenAIAgent(BaseAgent):
             prompt += "- If you can't build houses, focus on completing color groups through trading\n\n"
         
         # 🎯 CONDITIONAL: add strategy note for trading (only in later game stages)
+        # 🚨 FIX: Define is_later_stage outside of conditions to avoid UnboundLocalError
+        # Determine if we're in later game stage for trade emphasis
+        total_properties_owned = len(game_state.get('my_properties_owned_ids', []))
+        turn_count = game_state.get('turn_count', 1)
+        other_players_have_properties = any(
+            len(p.get('properties_owned', [])) > 2 
+            for p in game_state.get('other_players', [])
+        )
+        
+        # Only emphasize trading in later stages: turn 50+, or when players have 3+ properties
+        is_later_stage = turn_count >= 30 or total_properties_owned >= 3 or other_players_have_properties
+        
         if "tool_propose_trade" in available_actions:
-            # Determine if we're in later game stage for trade emphasis
-            total_properties_owned = len(game_state.get('my_properties_owned_ids', []))
-            turn_count = game_state.get('turn_count', 1)
-            other_players_have_properties = any(
-                len(p.get('properties_owned', [])) > 2 
-                for p in game_state.get('other_players', [])
-            )
-            
-            # Only emphasize trading in later stages: turn 10+, or when players have 3+ properties
-            is_later_stage = turn_count >= 50 or total_properties_owned >= 3 or other_players_have_properties
-            
             if is_later_stage:
                 prompt += "\n🤝 MONOPOLY STRATEGY: TRADING FOR COLOR GROUP MONOPOLIES!\n"
                 prompt += "=== WHY TRADING BECOMES IMPORTANT ===\n"
@@ -497,6 +498,7 @@ class OpenAIAgent(BaseAgent):
                 
                 if rejection_count < MAX_TRADE_REJECTIONS_FOR_PROMPT:
                     prompt += f"You can either propose a new trade (tool_propose_trade) to P{rejected_by_player_id} (include new terms and an optional 'message' parameter), or end this negotiation (tool_end_trade_negotiation).\n"
+                    prompt += f"IMPORTANT: Check your turn trade limit before proposing - you may have reached the maximum trade attempts for this turn.\n"
                 else:
                     prompt += f"You have reached the maximum number of rejections for this negotiation. You must choose to end the negotiation (tool_end_trade_negotiation).\n"
             
@@ -521,7 +523,6 @@ class OpenAIAgent(BaseAgent):
         prompt += "IMPORTANT: Use EXACT parameter names as specified below:\n\n"
         
         tool_descriptions = {
-            "tool_roll_dice": "Parameters: {} (no parameters needed)",
             "tool_end_turn": "Parameters: {} (no parameters needed)",
             "tool_buy_property": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",
             "tool_pass_on_buying_property": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",
@@ -606,10 +607,10 @@ class OpenAIAgent(BaseAgent):
         prompt += "\nExamples:\n"
         prompt += "For 'tool_propose_trade' with thoughts and message:\n"
         prompt += '{"thoughts": "I want Baltic Avenue to complete my brown set. Maybe Player B will accept this offer if I explain my reasoning.", "tool_name": "tool_propose_trade", "parameters": {"recipient_id": 1, "offered_property_ids": [1], "offered_money": 50, "requested_property_ids": [3], "message": "Baltic would complete my set! How about this deal?"}}\n'
-        prompt += "\nFor 'tool_roll_dice' with thoughts:\n"
-        prompt += '{"thoughts": "I need to move and see where I land. Rolling dice is mandatory at start of turn.", "tool_name": "tool_roll_dice", "parameters": {}}\n'
         prompt += "\nFor 'tool_build_house' with thoughts:\n"
         prompt += '{"thoughts": "I own the complete color group and have enough money. Building houses will increase rent significantly!", "tool_name": "tool_build_house", "parameters": {"property_id": 9}}\n'
+        prompt += "\nFor 'tool_end_turn' with thoughts:\n"
+        prompt += '{"thoughts": "I have completed my property management for this turn. Time to end my turn and let the next player go.", "tool_name": "tool_end_turn", "parameters": {}}\n'
         prompt += "\nRespond ONLY with the JSON object. Ensure it contains all three required keys and is valid JSON."
 
         self.last_prompt = prompt
@@ -618,8 +619,8 @@ class OpenAIAgent(BaseAgent):
         system_prompt = (
             "You are an expert Monopoly AI player. Your goal is to win by bankrupting all other players while avoiding bankruptcy yourself. "
             "Follow the detailed game state analysis and tool parameter specifications provided. "
-            "MONOPOLY RULE SEQUENCE: 1) Roll dice (MANDATORY), 2) Move to new position, 3) Handle landing effects, 4) Then optional property management. "
-            "You CANNOT do property management (build houses, sell, mortgage) before rolling dice on your turn. "
+            "MONOPOLY RULE SEQUENCE: 1) Dice roll (AUTOMATIC), 2) Move to new position, 3) Handle landing effects, 4) Then optional property management. "
+            "IMPORTANT: Dice rolling is AUTOMATIC - the game handles it for you. Your decisions come AFTER dice are rolled and you've moved. "
             "You MUST respond with a valid JSON object containing 'tool_name' and 'parameters' keys. "
             "Use EXACT parameter names as specified in the tool descriptions."
         )

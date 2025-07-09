@@ -239,7 +239,8 @@ class AgentManager:
                 self.agents_in_game[agent['agent_uid']] = game_uid
                 # Update status in database
                 self._update_agent_status(agent['agent_uid'], 'in_game')
-                print(f"{Fore.GREEN}[Agent Manager] Assigned agent {agent['name']} to game {game_uid}{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}[AGENT STATE] 🎮 Agent {agent['name']} ({agent['agent_uid']}) assigned to game {game_uid}{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}[AGENT STATE]    📊 Status: active → in_game, Total in game: {len(self.agents_in_game)}{Style.RESET_ALL}")
     
     def release_agents_from_game(self, game_uid: str):
         """Release agents back to available pool when game ends"""
@@ -284,7 +285,8 @@ class AgentManager:
                                     'status': 'active'  # Set to active since we just updated it
                                 }
                                 self.available_agents.append(agent_dict)
-                                print(f"{Fore.GREEN}[Agent Manager] Released agent {agent_dict['name']} back to available pool (status: {agent_row.status} -> active){Style.RESET_ALL}")
+                                print(f"{Fore.BLUE}[AGENT STATE] 🔄 Agent {agent_dict['name']} released from game {game_uid}{Style.RESET_ALL}")
+                                print(f"{Fore.BLUE}[AGENT STATE]    📊 Status: {agent_row.status} → active, Available pool: {len(self.available_agents)}{Style.RESET_ALL}")
                             else:
                                 print(f"{Fore.YELLOW}[Agent Manager] Agent {agent_row.name} has status '{agent_row.status}' - not adding back to available pool{Style.RESET_ALL}")
                         else:
@@ -1069,6 +1071,13 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 # Reset turn actions when a new turn starts (new player)
                 current_turn_actions = []
                 print(f"{Fore.CYAN}🔄 [NEW TURN] Turn {gc.turn_count} started, reset actions for player {gc.current_player_index}{Style.RESET_ALL}")
+                if gc.turn_count % 10 == 0:
+                    print(f"{Fore.MAGENTA}🏁 [MILESTONE] Turn {gc.turn_count} reached! Game progress milestone{Style.RESET_ALL}")
+                if gc.turn_count >= 100:
+                    print(f"{Fore.RED}🎯 [TARGET REACHED] Turn 100+ achieved! Current turn: {gc.turn_count}{Style.RESET_ALL}")
+                    print(f"{Fore.RED}🎯 [GAME STATUS] Players status check at turn {gc.turn_count}:{Style.RESET_ALL}")
+                    for i, p in enumerate(gc.players):
+                        print(f"{Fore.RED}   Player {i}: {p.name}, Money: ${p.money}, Properties: {len(p.properties)}, Bankrupt: {p.is_bankrupt}{Style.RESET_ALL}")
             
             print(f"{Fore.CYAN}[DEBUG] About to determine active player...{Style.RESET_ALL}")
             
@@ -1157,15 +1166,32 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 print(f"[DEBUG SERVER LOOP] Passing gc.turn_count: {gc.turn_count} to agent {active_player_id} (Name: {agent_to_act.name}) for decide_action")
                 
                 try:
-                    print(f"{Fore.CYAN}[DEBUG] About to call agent.decide_action...{Style.RESET_ALL}")
-                    print(f"{Fore.CYAN}[DEBUG] Agent: {agent_to_act}, Player ID: {active_player_id}, Available actions: {len(available_actions)}{Style.RESET_ALL}")
+                    print(f"{Fore.CYAN}[AI DECISION] 🤖 Agent {agent_to_act.name} starting decision process...{Style.RESET_ALL}")
+                    print(f"{Fore.CYAN}[AI DECISION]    📊 Turn: {gc.turn_count}, Action #{action_sequence_this_gc_turn}{Style.RESET_ALL}")
+                    print(f"{Fore.CYAN}[AI DECISION]    🎯 Available actions: {available_actions}{Style.RESET_ALL}")
                     
-                    chosen_tool_name, params = await asyncio.to_thread(agent_to_act.decide_action, game_state_for_agent, available_actions, gc.turn_count, action_sequence_this_gc_turn)
+                    import time
+                    decision_start_time = time.time()
                     
-                    print(f"{Fore.GREEN}[DEBUG] Agent decision completed successfully: {chosen_tool_name} with params: {params}{Style.RESET_ALL}")
+                    # Add timeout wrapper for AI decision
+                    chosen_tool_name, params = await asyncio.wait_for(
+                        asyncio.to_thread(agent_to_act.decide_action, game_state_for_agent, available_actions, gc.turn_count, action_sequence_this_gc_turn),
+                        timeout=30.0  # 30 second timeout
+                    )
                     
+                    decision_time = time.time() - decision_start_time
+                    print(f"{Fore.GREEN}[AI DECISION] ✅ Decision completed in {decision_time:.2f}s: {chosen_tool_name}{Style.RESET_ALL}")
+                    if decision_time > 10.0:
+                        print(f"{Fore.YELLOW}[AI DECISION] ⚠️  SLOW DECISION WARNING: {decision_time:.2f}s > 10s{Style.RESET_ALL}")
+                    
+                except asyncio.TimeoutError:
+                    print(f"{Fore.RED}[AI DECISION] ⏰ TIMEOUT: Agent {agent_to_act.name} decision took >30s{Style.RESET_ALL}")
+                    print(f"{Fore.RED}[AI DECISION] 🔄 Falling back to default action{Style.RESET_ALL}")
+                    # Fallback to first available action
+                    chosen_tool_name = available_actions[0] if available_actions else "tool_end_turn"
+                    params = {}
                 except Exception as agent_decision_error:
-                    print(f"{Fore.RED}[DEBUG ERROR] Agent decision failed: {agent_decision_error}{Style.RESET_ALL}")
+                    print(f"{Fore.RED}[AI DECISION] ❌ Decision failed: {type(agent_decision_error).__name__}: {agent_decision_error}{Style.RESET_ALL}")
                     import traceback
                     traceback.print_exc()
                     raise  # Re-raise to trigger main exception handler
@@ -1504,7 +1530,14 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                                               gc.dice[0] == gc.dice[1] and gc.dice[0] != 0 and 
                                               not is_in_jail_at_segment_end and 
                                               gc.doubles_streak < 3 and gc.doubles_streak > 0)
-                    print(f"{Fore.MAGENTA}    🎯 Doubles check: rolled={roll_action_taken_this_main_turn_segment}, dice_equal={gc.dice[0] == gc.dice[1]}, not_zero={gc.dice[0] != 0}, not_in_jail={not is_in_jail_at_segment_end}, streak_valid={gc.doubles_streak < 3 and gc.doubles_streak > 0}{Style.RESET_ALL}")
+                    print(f"{Fore.MAGENTA}    🎯 [DOUBLES DEBUG] Player {main_turn_player_for_next_step.name} dice analysis:{Style.RESET_ALL}")
+                    print(f"{Fore.MAGENTA}       📊 Current dice: ({gc.dice[0]}, {gc.dice[1]}), streak: {gc.doubles_streak}{Style.RESET_ALL}")
+                    print(f"{Fore.MAGENTA}       ✓ Roll taken this segment: {roll_action_taken_this_main_turn_segment}{Style.RESET_ALL}")
+                    print(f"{Fore.MAGENTA}       ✓ Dice are equal: {gc.dice[0] == gc.dice[1]}{Style.RESET_ALL}")
+                    print(f"{Fore.MAGENTA}       ✓ Dice not zero: {gc.dice[0] != 0}{Style.RESET_ALL}")
+                    print(f"{Fore.MAGENTA}       ✓ Not in jail: {not is_in_jail_at_segment_end}{Style.RESET_ALL}")
+                    print(f"{Fore.MAGENTA}       ✓ Streak valid (0 < {gc.doubles_streak} < 3): {gc.doubles_streak < 3 and gc.doubles_streak > 0}{Style.RESET_ALL}")
+                    print(f"{Fore.MAGENTA}       🎯 FINAL DOUBLES BONUS: {rolled_doubles_for_bonus}{Style.RESET_ALL}")
                     
                     if rolled_doubles_for_bonus:
                         await gc.send_event_to_frontend({"type": "bonus_turn", "player_id": main_turn_player_for_next_step.player_id, "streak": gc.doubles_streak})
@@ -1566,15 +1599,21 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
             print(f"{Fore.MAGENTA}🎯 [TURN LOGIC] FINAL DECISION: call_next_turn_flag = {call_next_turn_flag}{Style.RESET_ALL}")
             
             if call_next_turn_flag:
-                print(f"{Fore.GREEN}🔄 [TURN ADVANCE] Advancing turn for {game_uid}: Player {current_main_turn_player_id} -> Next{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}🔄 [TURN ADVANCE] Beginning turn advancement for {game_uid}{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}[TURN ADVANCE]    📊 BEFORE: Turn {gc.turn_count}, Player {current_main_turn_player_id} ({gc.players[current_main_turn_player_id].name}){Style.RESET_ALL}")
+                print(f"{Fore.GREEN}[TURN ADVANCE]    🎯 Actions taken this turn: {len(current_turn_actions)}{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}[TURN ADVANCE]    🎲 Dice state: {gc.dice}, streak: {gc.doubles_streak}{Style.RESET_ALL}")
                 
                 # Store the previous turn number for notification
                 previous_turn_number = gc.turn_count
+                previous_player_name = gc.players[current_main_turn_player_id].name
                 
                 gc.log_event(f"Calling gc.next_turn() for G_UID:{game_uid}. Previous GC turn: {gc.turn_count}, Previous Main PIdx: {current_main_turn_player_id}", "debug_next_turn")
                 gc.next_turn() # This will increment gc.turn_count and set new current_player_index
                 gc.log_event(f"gc.next_turn() called. New GC turn: {gc.turn_count}, New Main PIdx: {gc.current_player_index}", "debug_next_turn")
-                print(f"{Fore.GREEN}✅ [TURN ADVANCE] Turn advanced: GC Turn {gc.turn_count}, Current Player {gc.current_player_index}{Style.RESET_ALL}")
+                
+                print(f"{Fore.GREEN}[TURN ADVANCE]    📊 AFTER: Turn {gc.turn_count}, Player {gc.current_player_index} ({gc.players[gc.current_player_index].name}){Style.RESET_ALL}")
+                print(f"{Fore.GREEN}✅ [TURN ADVANCE] Turn advancement complete: {previous_player_name} → {gc.players[gc.current_player_index].name}{Style.RESET_ALL}")
                 
                 # Send turn end notification (each turn now has unique turn_count)
                 print(f"{Fore.BLUE}📢 [TURN END] Preparing turn end notification for player {current_main_turn_player_id}, turn {previous_turn_number}{Style.RESET_ALL}")

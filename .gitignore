@@ -26,6 +26,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.idea/
 
 # PyInstaller
 #  Usually these files are written by a script, but they may be committed to
@@ -118,3 +119,4 @@ dmypy.json
 # Cython debug symbols
 cython_debug/ 
 test_results.json
+/.claude

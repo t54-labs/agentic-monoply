@@ -25,6 +25,9 @@ import time
 import random
 from typing import Dict, Any, List, Optional
 
+# Set test environment to avoid TPay dependencies
+os.environ["RUN_CONTEXT"] = "test"
+
 # Add the project root to the path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -519,6 +522,9 @@ class TestOrchestrator:
         self.regression_runner = RegressionTestRunner()
         self.board_state_suite = BoardStateTestSuite()
         self.test_results = {}
+        # Import trade integration test suite
+        from tests.test_trade_integration import TradeIntegrationTestSuite
+        self.trade_integration_suite = TradeIntegrationTestSuite()
         
     async def run_core_tests(self) -> Dict[str, Any]:
         """Run core GameControllerV2 functionality tests"""
@@ -537,6 +543,16 @@ class TestOrchestrator:
         
         results = await self.board_state_suite.run_all_board_state_tests()
         self.test_results['board_state_tests'] = results
+        
+        return results
+    
+    async def run_trade_integration_tests(self) -> Dict[str, Any]:
+        """Run trade integration tests with AI agents"""
+        print("🤝 Running Trade Integration Tests...")
+        print("=" * 50)
+        
+        results = await self.trade_integration_suite.run_all_tests()
+        self.test_results['trade_integration_tests'] = results
         
         return results
     
@@ -657,6 +673,8 @@ class TestOrchestrator:
         success_rates = [suite.get('success_rate', 0) for suite in self.test_results.values() if 'success_rate' in suite]
         if success_rates:
             overall_rate = sum(success_rates) / len(success_rates)
+        else:
+            overall_rate = 0
         
         if overall_rate >= 98:
             recommendations.append("🎉 Excellent test coverage and stability!")
@@ -722,12 +740,13 @@ async def main():
     parser.add_argument('--regression', action='store_true', help='Run regression tests only')
     parser.add_argument('--performance', action='store_true', help='Run performance tests')
     parser.add_argument('--board-states', action='store_true', help='Run board state simulation tests')
+    parser.add_argument('--trade-integration', action='store_true', help='Run trade integration tests')
     parser.add_argument('--output', default='test_results.json', help='Output file for results')
     
     args = parser.parse_args()
     
     # If no specific test type is specified, run all tests
-    if not any([args.core, args.smoke, args.regression, args.performance, args.board_states]):
+    if not any([args.core, args.smoke, args.regression, args.performance, args.board_states, args.trade_integration]):
         args.all = True
     
     orchestrator = TestOrchestrator()
@@ -748,6 +767,9 @@ async def main():
     
     if args.all or args.board_states:
         await orchestrator.run_board_state_tests()
+    
+    if args.all or args.trade_integration:
+        await orchestrator.run_trade_integration_tests()
     
     # Generate and display comprehensive report
     final_report = orchestrator.generate_comprehensive_report()

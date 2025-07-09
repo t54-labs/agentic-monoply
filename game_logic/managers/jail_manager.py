@@ -68,6 +68,10 @@ class JailManager(BaseManager):
             # Move player based on dice roll
             await self.gc._move_player(player, dice1 + dice2)
             
+            # 🎯 CRITICAL FIX: After movement, resolve the action segment
+            # This ensures the game state is properly updated and prevents agents from thinking they need to roll dice again
+            self.gc._resolve_current_action_segment()
+            
             return {
                 "success": True, 
                 "message": f"{player.name} rolled doubles and is free!",
@@ -150,6 +154,10 @@ class JailManager(BaseManager):
             # Move player based on dice roll
             await self.gc._move_player(player, dice1 + dice2)
             
+            # 🎯 CRITICAL FIX: After movement, resolve the action segment
+            # This ensures the game state is properly updated and prevents agents from thinking they need to roll dice again
+            self.gc._resolve_current_action_segment()
+            
             return {
                 "success": True,
                 "message": f"{player.name} paid bail, rolled ({dice1}, {dice2}), and moved!",
@@ -212,6 +220,10 @@ class JailManager(BaseManager):
         
         # Move player based on dice roll - now properly await the async call
         await self.gc._move_player(player, dice1 + dice2)
+        
+        # 🎯 CRITICAL FIX: After movement, resolve the action segment
+        # This ensures the game state is properly updated and prevents agents from thinking they need to roll dice again
+        self.gc._resolve_current_action_segment()
         
         return {
             "success": True,

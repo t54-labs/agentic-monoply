@@ -301,14 +301,23 @@ class GameControllerV2:
     async def _move_player(self, player: Player, steps: int) -> None:
         """Move player with proper GO handling"""
         old_position = player.position
+        old_square = self.board.get_square(old_position)
         new_position = (old_position + steps) % len(self.board.squares)
+        new_square = self.board.get_square(new_position)
+        
+        # Log movement start
+        self.log_event(f"🚶 [MOVEMENT START] {player.name} moving {steps} steps from position {old_position} ({old_square.name})...", "game_log_event")
         
         # Check for passing GO
         if new_position < old_position:
+            self.log_event(f"🎯 [PASSING GO] {player.name} is passing GO while moving from {old_position} to {new_position}", "game_log_event")
             await self._handle_go_passed(player)
             
         player.position = new_position
-        self.log_event(f"{player.name} moved {steps} spaces to {self.board.get_square(new_position).name}")
+        
+        # Log movement completion
+        self.log_event(f"🚶 [MOVEMENT END] {player.name} moved from {old_position} ({old_square.name}) to {new_position} ({new_square.name})", "game_log_event")
+        self.log_event(f"🏁 [LANDING] {player.name} landed on {new_square.name} (position {new_position})", "game_log_event")
         
         # Handle landing on the square
         await self.land_on_square(player)
@@ -316,7 +325,7 @@ class GameControllerV2:
     async def _handle_go_passed(self, player: Player) -> None:
         """Handle player passing GO and collecting salary"""
         go_salary = 200
-        self.log_event(f"{player.name} passed GO!")
+        self.log_event(f"💰 [GO PASSED] {player.name} passed GO and will collect ${go_salary} salary", "game_log_event")
         
         # Create TPay payment from system to player
         payment_success = await self._create_tpay_payment_system_to_player(
@@ -327,41 +336,47 @@ class GameControllerV2:
         )
         
         if payment_success:
-            self.log_event(f"{player.name} collected ${go_salary} for passing GO")
+            self.log_event(f"💰 [GO SALARY] {player.name} successfully collected ${go_salary} for passing GO", "game_log_event")
             
             # Send GO salary event notification
             await self.notify_special_event('go_salary', player.name, {
                 'amount': go_salary
             })
         else:
-            self.log_event(f"[Error] {player.name} GO salary payment failed")
+            self.log_event(f"❌ [GO SALARY ERROR] {player.name} failed to collect ${go_salary} GO salary payment", "game_log_event")
         
     async def land_on_square(self, player: Player) -> None:
         """Handle landing on square with full logic matching original GameController"""
         if player.is_bankrupt:
+            self.log_event(f"⚠️ [BANKRUPT PLAYER] {player.name} is bankrupt, skipping square landing actions", "game_log_event")
             self.dice_roll_outcome_processed = True
             self._clear_pending_decision()
             return
-        
+
         square = self.board.get_square(player.position)
-        self.log_event(f"{player.name} landed on {square.name}.")
+        self.log_event(f"🏁 [SQUARE ANALYSIS] {player.name} landed on {square.name} (position {player.position}), type: {square.square_type}", "game_log_event")
         self._clear_pending_decision()  # Clear previous before specific handler potentially sets a new one.
 
         if isinstance(square, PropertySquare) or isinstance(square, RailroadSquare) or isinstance(square, UtilitySquare):
+            self.log_event(f"🏢 [PROPERTY SQUARE] Processing property landing for {player.name} on {square.name}", "game_log_event")
             await self._handle_property_landing(player, square)  # This will set pending_decision or resolve outcome
         elif isinstance(square, ActionSquare):
+            self.log_event(f"🎴 [ACTION SQUARE] Processing action card for {player.name} on {square.name}", "game_log_event")
             await self._handle_action_square_landing(player, square)  # This will set pending_decision or resolve outcome
         elif isinstance(square, TaxSquare):
+            self.log_event(f"💸 [TAX SQUARE] Processing tax payment for {player.name} on {square.name}", "game_log_event")
             await self._handle_tax_square_landing(player, square)  # This will set pending_decision or resolve outcome
         elif square.square_type == SquareType.GO_TO_JAIL:
+            self.log_event(f"🚔 [GO TO JAIL] Processing jail sentence for {player.name} on {square.name}", "game_log_event")
             self._handle_go_to_jail_landing(player)  # Resolves outcome for this landing
         elif square.square_type in [SquareType.GO, SquareType.JAIL_VISITING, SquareType.FREE_PARKING]:
+            self.log_event(f"🏛️ [SPECIAL SQUARE] Processing special square for {player.name} on {square.name}", "game_log_event")
             self._handle_special_square_landing(player, square)  # Resolves outcome for this landing
         else:
-            self.log_event(f"Landed on {square.name} - no specific action. Outcome processed.")
+            self.log_event(f"❓ [UNKNOWN SQUARE] No specific action for {player.name} on {square.name}. Outcome processed.", "game_log_event")
             self.dice_roll_outcome_processed = True
             self._clear_pending_decision()
-            
+        
     async def _handle_property_landing(self, player: Player, square: PurchasableSquare) -> None:
         """Handle landing on property with rent calculation and TPay payments"""
         self.log_event(f"Handling property landing: {square.name} for {player.name}")
@@ -544,13 +559,22 @@ class GameControllerV2:
     async def _move_player_directly_to_square(self, player: Player, target_pos: int, collect_go_salary_if_passed: bool = False) -> None:
         """Move player directly to square with proper GO handling"""
         old_position = player.position
+        old_square = self.board.get_square(old_position)
+        target_square = self.board.get_square(target_pos)
+        
+        # Log direct movement start
+        self.log_event(f"🚀 [DIRECT MOVE START] {player.name} moving directly from position {old_position} ({old_square.name}) to position {target_pos} ({target_square.name})", "game_log_event")
         
         # Check for passing GO if moving forward
         if collect_go_salary_if_passed and target_pos < old_position:
+            self.log_event(f"🎯 [PASSING GO] {player.name} is passing GO during direct movement", "game_log_event")
             await self._handle_go_passed(player)
             
         player.position = target_pos
-        self.log_event(f"{player.name} moved directly to {self.board.get_square(target_pos).name}")
+        
+        # Log direct movement completion
+        self.log_event(f"🚀 [DIRECT MOVE END] {player.name} moved directly from {old_position} ({old_square.name}) to {target_pos} ({target_square.name})", "game_log_event")
+        self.log_event(f"🏁 [DIRECT LANDING] {player.name} landed on {target_square.name} (position {target_pos})", "game_log_event")
         
         # Handle landing on the square
         await self.land_on_square(player)
@@ -747,11 +771,18 @@ class GameControllerV2:
     def roll_dice(self) -> Tuple[int, int]:
         """Roll dice (preserved from original)"""
         current_player = self.get_current_player()
+        
+        # Log pre-roll state
+        self.log_event(f"🎲 [DICE ROLL INITIATED] {current_player.name} is rolling dice...", "game_log_event")
+        
         if current_player.in_jail:
-            self.log_event(f"[Warning] roll_dice called for player in jail. Use jail-specific roll tool.")
+            self.log_event(f"⚠️ [JAIL ROLL WARNING] roll_dice called for player in jail. Use jail-specific roll tool.", "game_log_event")
 
         self.dice = (random.randint(1, 6), random.randint(1, 6))
-        self.log_event(f"{current_player.name} rolled {self.dice[0]} and {self.dice[1]}.")
+        dice_sum = self.dice[0] + self.dice[1]
+        
+        self.log_event(f"🎲 [DICE RESULT] {current_player.name} rolled ({self.dice[0]}, {self.dice[1]}) = {dice_sum}", "game_log_event")
+        
         self.dice_roll_outcome_processed = False
         
         # 🎯 When rolling dice, we're in "processing" state - not pre_roll or post_roll
@@ -759,13 +790,17 @@ class GameControllerV2:
         
         if self.is_double_roll():
             self.doubles_streak += 1
-            self.log_event(f"Doubles! Streak: {self.doubles_streak}")
+            self.log_event(f"🎯 [DOUBLES ROLLED] {current_player.name} rolled doubles! Current streak: {self.doubles_streak}", "game_log_event")
             if self.doubles_streak == 3:
-                self.log_event(f"{current_player.name} rolled doubles 3 times in a row. Go to Jail!")
+                self.log_event(f"🚨 [THIRD DOUBLES] {current_player.name} rolled doubles 3 times in a row. Going to jail!", "game_log_event")
                 self._handle_go_to_jail_landing(current_player)
                 return self.dice
         else:
+            if self.doubles_streak > 0:
+                self.log_event(f"📊 [DOUBLES STREAK END] {current_player.name} did not roll doubles, streak reset from {self.doubles_streak} to 0", "game_log_event")
             self.doubles_streak = 0
+            
+        self.log_event(f"🎲 [DICE ROLL COMPLETE] {current_player.name} dice roll completed, ready for movement", "game_log_event")
         return self.dice
 
     def is_double_roll(self) -> bool:
@@ -774,8 +809,14 @@ class GameControllerV2:
         
     def _handle_go_to_jail_landing(self, player: Player) -> None:
         """Handle go to jail (preserved from original)"""
-        self.log_event(f"{player.name} is going to jail!")
+        self.log_event(f"🚔 [GO TO JAIL START] {player.name} is going to jail from position {player.position}!", "game_log_event")
+        
+        old_position = player.position
         player.go_to_jail()
+        
+        self.log_event(f"🔒 [JAIL ENTRY] {player.name} moved from position {old_position} to jail (position {player.position})", "game_log_event")
+        self.log_event(f"🎯 [DOUBLES RESET] Doubles streak reset to 0 for {player.name}", "game_log_event")
+        
         self.doubles_streak = 0 
         
         # Send jail event notification - fixed for thread safety
@@ -791,17 +832,18 @@ class GameControllerV2:
                     'event_data': {}
                 }
                 self._threaded_game_instance.send_message_safely(notification_message)
+                self.log_event(f"📢 [JAIL NOTIFICATION] Jail event notification sent for {player.name}", "game_log_event")
             else:
                 # Fallback for non-threaded environments
                 try:
                     loop = asyncio.get_running_loop()
                     if loop.is_running():
                         asyncio.create_task(self.notify_special_event('jail', player.name))
-                except (RuntimeError, AttributeError):
-                    # If no event loop is running or we're in wrong thread, just log
-                    self.log_event(f"[Info] {player.name} went to jail (notification skipped - no async context)")
+                        self.log_event(f"📢 [JAIL NOTIFICATION] Jail event notification queued for {player.name}", "game_log_event")
+                except Exception:
+                    self.log_event(f"⚠️ [JAIL NOTIFICATION] Could not send jail notification for {player.name} - no async context", "game_log_event")
         except Exception as e:
-            self.log_event(f"[Warning] Failed to send jail notification for {player.name}: {e}")
+            self.log_event(f"❌ [JAIL NOTIFICATION ERROR] Failed to send jail notification for {player.name}: {e}", "game_log_event")
         
         self._resolve_current_action_segment()
 
@@ -819,6 +861,11 @@ class GameControllerV2:
             self.game_over = True
             return
         
+        # 🔍 DEBUG: Log player states before any modifications
+        self.log_event("🔍 [DEBUG] Player states BEFORE start_game modifications:")
+        for i, player in enumerate(self.players):
+            self.log_event(f"  Player {i}: {player.name}, position={player.position}, in_jail={player.in_jail}")
+        
         # Record game start time for duration tracking
         self.start_time = datetime.datetime.now()
         
@@ -834,6 +881,17 @@ class GameControllerV2:
             for player in self.players:
                 player.go_to_jail()
                 player.jail_turns_remaining = 0  # Allow them to start trying to get out immediately
+        else:
+            # 🎯 CRITICAL FIX: Ensure NO players are in jail at game start in normal mode
+            self.log_event("[NORMAL MODE] Ensuring all players start at GO (position 0) and NOT in jail.")
+            for player in self.players:
+                if player.position != 0:
+                    self.log_event(f"⚠️  [FIXING] Player {player.name} had incorrect position {player.position}, setting to 0")
+                    player.position = 0
+                if player.in_jail:
+                    self.log_event(f"⚠️  [FIXING] Player {player.name} was incorrectly in jail, setting in_jail=False")
+                    player.in_jail = False
+                    player.jail_turns_remaining = 0
                 
         if test_mode_trade_details:
             self.log_event(f"[TEST MODE] Trade will be initiated: {test_mode_trade_details}")
@@ -845,15 +903,26 @@ class GameControllerV2:
             
         # Clear any pending decisions and set initial state
         self._clear_pending_decision()
-        self.dice_roll_outcome_processed = True
         
         # 🎯 Set initial turn phase to pre-roll (first player must roll dice)
         self.turn_phase = "pre_roll"
         
+        # 🎲 Reset dice and processing state for new turn
+        self.dice = (0, 0)
+        self.dice_roll_outcome_processed = False  # Player needs to roll dice
+        
+        # 🔍 DEBUG: Log player states after modifications
+        self.log_event("🔍 [DEBUG] Player states AFTER start_game modifications:")
+        for i, player in enumerate(self.players):
+            self.log_event(f"  Player {i}: {player.name}, position={player.position}, in_jail={player.in_jail}")
+        
         # Check if starting player is in jail (for test mode or other reasons)
         current_player = self.get_current_player()
         if current_player.in_jail:
+            self.log_event(f"⚠️  [JAIL DETECTED] Starting player {current_player.name} is in jail, handling jail turn initiation")
             self._handle_jail_turn_initiation(current_player)
+        else:
+            self.log_event(f"✅ [NORMAL START] Starting player {current_player.name} is not in jail, ready for normal gameplay")
             
         self.log_event(f"Game initialized successfully. Current player: {current_player.name}. Ready for first action - PRE-ROLL phase.")
         
@@ -862,36 +931,24 @@ class GameControllerV2:
         self.jail_manager.handle_jail_turn_initiation(player)
         
     def get_available_actions(self, player_id: int) -> List[str]:
-        """Get available actions with comprehensive logic matching original GameController"""
-        actions: List[str] = []
+        """Get available actions for a player - matching original GameController"""
+        
         if not (0 <= player_id < len(self.players)):
             return []
             
         player = self.players[player_id]
-        if player.is_bankrupt: 
-            return []
-
-        # --- Specific Pending Decisions ---
+        
+        actions = []
+        
+        if player.is_bankrupt:
+            return ["tool_wait"]
+            
+        # Handle specific decision types that override normal turn actions
         if self.pending_decision_type == "jail_options":
-            if player.in_jail and self.pending_decision_context.get("player_id") == player_id:
-                has_card = getattr(player, 'has_chance_gooj_card', False) or getattr(player, 'has_community_gooj_card', False)
-                can_pay_bail_directly = player.money >= 50
-                max_rolls_attempted = getattr(player, 'jail_turns_remaining', 0) >= 3 or self.pending_decision_context.get("max_rolls_attempted", False)
-                if has_card: 
-                    actions.append("tool_use_get_out_of_jail_card")
-                if can_pay_bail_directly: 
-                    actions.append("tool_pay_bail")
-                if not max_rolls_attempted: 
-                    actions.append("tool_roll_for_doubles_to_get_out_of_jail")
-                if max_rolls_attempted and not has_card and not can_pay_bail_directly:
-                    can_mortgage = any(isinstance(sq := self.board.get_square(pid), PurchasableSquare) and sq.owner_id == player_id and not sq.is_mortgaged and not (isinstance(sq, PropertySquare) and sq.num_houses > 0) for pid in player.properties_owned_ids)
-                    can_sell_houses = any(isinstance(sq := self.board.get_square(pid), PropertySquare) and sq.owner_id == player_id and sq.num_houses > 0 for pid in player.properties_owned_ids)
-                    if can_mortgage: 
-                        actions.append("tool_mortgage_property")
-                    if can_sell_houses: 
-                        actions.append("tool_sell_house")
-                if not actions or (max_rolls_attempted and (has_card or can_pay_bail_directly)):
-                    actions.append("tool_end_turn") 
+            if self.pending_decision_context.get("player_id") == player_id: 
+                actions.extend(["tool_roll_to_get_out_of_jail", "tool_pay_to_get_out_of_jail"])
+                if getattr(player, 'has_chance_gooj_card', False) or getattr(player, 'has_community_gooj_card', False):
+                    actions.append("tool_use_card_to_get_out_of_jail")
             else: 
                 self._clear_pending_decision()
         
@@ -943,8 +1000,11 @@ class GameControllerV2:
 
         # --- General Turn Actions (if no specific decision is pending) ---
         if not actions and self.pending_decision_type is None: 
+            
             if self.current_player_index == player_id:
+                
                 if not player.in_jail: 
+                    
                     if self.turn_phase == "pre_roll":
                         # 🎲 RULE: In Monopoly, rolling dice is MANDATORY and AUTOMATIC
                         # Players cannot choose to skip rolling dice - it happens automatically
@@ -952,18 +1012,77 @@ class GameControllerV2:
                         
                         # 🔄 AUTO-EXECUTE dice roll immediately
                         try:
+                            self.log_event(f"🎲 [DICE ROLL START] {player.name} is rolling dice automatically...", "game_log_event")
                             dice_roll = self.roll_dice()
-                            self.log_event(f"[AUTO DICE ROLL] {player.name} auto-rolled: {dice_roll}", "debug_dice")
-                            # After auto-rolling, recalculate available actions
+                            self.log_event(f"🎲 [DICE ROLL RESULT] {player.name} rolled ({dice_roll[0]}, {dice_roll[1]}) = {sum(dice_roll)}", "game_log_event")
+                            
+                            # Check for doubles
+                            if dice_roll[0] == dice_roll[1]:
+                                self.log_event(f"🎯 [DOUBLES] {player.name} rolled doubles! Streak: {self.doubles_streak}", "game_log_event")
+                                if self.doubles_streak == 3:
+                                    self.log_event(f"🚨 [GO TO JAIL] {player.name} rolled 3 doubles in a row and goes to jail!", "game_log_event")
+                                    # After rolling, recalculate available actions (player is now in jail)
+                                    return self.get_available_actions(player_id)
+                            else:
+                                self.log_event(f"📊 [NO DOUBLES] {player.name} did not roll doubles, doubles streak reset", "game_log_event")
+                            
+                            # 🎯 CRITICAL FIX: Execute basic movement immediately (synchronously)
+                            # Move player to new position and log movement
+                            dice_sum = sum(dice_roll)
+                            old_position = player.position
+                            old_square = self.board.get_square(old_position)
+                            new_position = (old_position + dice_sum) % len(self.board.squares)
+                            new_square = self.board.get_square(new_position)
+                            
+                            # Log movement start
+                            self.log_event(f"🚶 [MOVEMENT START] {player.name} moving {dice_sum} steps from position {old_position} ({old_square.name})...", "game_log_event")
+                            
+                            # Check for passing GO (but handle salary later in async context)
+                            passed_go = new_position < old_position
+                            if passed_go:
+                                self.log_event(f"🎯 [PASSING GO] {player.name} is passing GO while moving from {old_position} to {new_position}", "game_log_event")
+                            
+                            # Update player position
+                            player.position = new_position
+                            
+                            # Log movement completion
+                            self.log_event(f"🚶 [MOVEMENT END] {player.name} moved from {old_position} ({old_square.name}) to {new_position} ({new_square.name})", "game_log_event")
+                            self.log_event(f"🏁 [LANDING] {player.name} landed on {new_square.name} (position {new_position})", "game_log_event")
+                            
+                            # 🎯 CRITICAL FIX: Check immediate landing effects that need player decision
+                            # Some landing effects require immediate player action before async processing
+                            if isinstance(new_square, PurchasableSquare):
+                                if new_square.owner_id is None:
+                                    # Unowned purchasable property - player must decide to buy or auction
+                                    self.log_event(f"🏠 [PROPERTY DECISION] {player.name} must decide to buy or auction {new_square.name}", "game_log_event")
+                                    self._set_pending_decision("buy_or_auction_property", {"player_id": player_id, "property_id": new_position})
+                                elif new_square.owner_id != player_id and not new_square.is_mortgaged:
+                                    # Owned by another player - rent payment will be handled in async context
+                                    self.log_event(f"💰 [RENT PAYMENT] {player.name} will need to pay rent to player {new_square.owner_id}", "game_log_event")
+                                    # This will be handled by server loop async processing
+                                else:
+                                    # Owned by current player or mortgaged - no action needed
+                                    self.log_event(f"✅ [NO ACTION] {player.name} landed on own/mortgaged property", "game_log_event")
+                            
+                            # Set flags for async processing in server loop
+                            self.turn_phase = "post_roll"
+                            self.dice_roll_outcome_processed = False  # Landing and GO salary still need async processing
+                            if passed_go:
+                                # Mark that GO salary needs to be processed
+                                if not hasattr(player, '_needs_go_salary'):
+                                    player._needs_go_salary = True
+                            
+                            self.log_event(f"✅ [AUTO MOVEMENT] {player.name} basic movement completed, now at position {player.position}. Async landing processing needed.", "game_log_event")
+                            
+                            # After movement, get the new available actions (but landing effects will be processed by server loop)
                             return self.get_available_actions(player_id)
+                            
                         except Exception as e:
                             self.log_event(f"[ERROR] Auto dice roll failed for {player.name}: {e}", "error_log")
-                            # 🚨 CRITICAL: Dice rolling is MANDATORY - do not allow manual override
-                            # If auto dice roll fails, this is a system error that needs fixing
-                            # DO NOT add tool_roll_dice as fallback - fix the underlying issue instead
-                            self.log_event(f"[SYSTEM ERROR] Auto dice roll failed - game flow compromised", "error_log")
-                            actions.append("tool_resign_game")  # Only allow resignation if dice system broken
-                        
+                            # Fallback to manual dice rolling
+                            actions.append("tool_roll_dice")
+                            return actions
+                    
                     elif self.turn_phase == "post_roll":
                         # 🎲 Dice has been rolled and player has moved to new position
                         # Now player can do property management in "post-roll" phase
@@ -1079,9 +1198,13 @@ class GameControllerV2:
                             try:
                                 dice_roll = self.roll_dice()
                                 self.log_event(f"[Auto Dice Roll] {player.name} auto-rolled: {dice_roll}", "debug_bonus_turn")
-                                # After auto-rolling, the player should be able to do normal post-roll actions
-                                # Don't add any actions here - let the normal flow continue
-                                return self.get_available_actions(player_id)  # Recalculate actions after auto-roll
+                                
+                                # 🎯 CRITICAL FIX: After bonus roll, set appropriate phase and let server loop handle movement
+                                # Do NOT recursively call get_available_actions
+                                self.turn_phase = "post_roll"
+                                self.log_event(f"[Auto Bonus Roll] {player.name} bonus roll completed, turn phase set to post_roll", "debug_bonus_turn")
+                                
+                                # Continue with normal post-roll actions
                             except Exception as e:
                                 self.log_event(f"[ERROR] Auto dice roll failed for {player.name}: {e}", "error_log")
                                 # 🚨 CRITICAL: Dice rolling is MANDATORY - do not allow manual override
@@ -1093,6 +1216,10 @@ class GameControllerV2:
                         # In post-roll phase, player can end turn (but only if no bonus turn available or they choose to skip it)
                         actions.append("tool_end_turn")
                         actions.append("tool_resign_game")
+                    
+                    else:
+                        # Unknown turn phase - wait for turn to advance
+                        pass
                         
                     if not actions: 
                         actions.append("tool_wait") 

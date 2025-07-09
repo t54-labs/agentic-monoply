@@ -1154,6 +1154,111 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 action_this_segment_count += 1
                 action_sequence_this_gc_turn += 1
                 gc.log_event(f"Loop {loop_turn_count}, SegAct {action_this_segment_count}, P{active_player_id} ({current_acting_player.name}) Turn. GC.Pend: {gc.pending_decision_type}, GC.DiceDone: {gc.dice_roll_outcome_processed}", "debug_loop")
+                
+                # 🎯 CRITICAL: Handle async landing processing if needed
+                # This handles players who moved synchronously but need async landing effects
+                if (not gc.dice_roll_outcome_processed and 
+                    getattr(gc, 'turn_phase', None) == "post_roll" and 
+                    active_player_id == current_main_turn_player_id):
+                    
+                    print(f"{Fore.CYAN}[ASYNC LANDING] Processing deferred landing effects for {current_acting_player.name} at position {current_acting_player.position}{Style.RESET_ALL}")
+                    
+                    # Handle GO salary if needed
+                    if hasattr(current_acting_player, '_needs_go_salary'):
+                        print(f"{Fore.CYAN}[ASYNC LANDING] Processing deferred GO salary for {current_acting_player.name}{Style.RESET_ALL}")
+                        try:
+                            await gc._handle_go_passed(current_acting_player)
+                            delattr(current_acting_player, '_needs_go_salary')
+                            print(f"{Fore.GREEN}[ASYNC LANDING] GO salary processed for {current_acting_player.name}{Style.RESET_ALL}")
+                        except Exception as e:
+                            print(f"{Fore.RED}[ASYNC LANDING] Error processing GO salary for {current_acting_player.name}: {e}{Style.RESET_ALL}")
+                            if hasattr(current_acting_player, '_needs_go_salary'):
+                                delattr(current_acting_player, '_needs_go_salary')
+                    
+                    # Process landing on the square
+                    try:
+                        await gc.land_on_square(current_acting_player)
+                        print(f"{Fore.GREEN}[ASYNC LANDING] Landing effects processed for {current_acting_player.name}{Style.RESET_ALL}")
+                        
+                        # Record dice roll action for turn summary if not already recorded
+                        if not roll_action_taken_this_main_turn_segment:
+                            roll_action_taken_this_main_turn_segment = True
+                            dice_val = gc.dice
+                            if dice_val:
+                                current_turn_actions.append({
+                                    'type': 'auto_roll',
+                                    'player_name': current_acting_player.name,
+                                    'dice': dice_val,
+                                    'description': f"🎲 {current_acting_player.name} auto-rolled ({dice_val[0]}, {dice_val[1]})"
+                                })
+                                print(f"{Fore.BLUE}✅ [AUTO DICE] Recorded auto-dice action for player {current_acting_player.name} (P{active_player_id}) in turn {gc.turn_count}: {dice_val}{Style.RESET_ALL}")
+                        
+                        # Send property landing notification
+                        try:
+                            landed_square = gc.board.get_square(current_acting_player.position)
+                            square_name = landed_square.name
+                            
+                            from game_logic.board import PropertySquare, RailroadSquare, UtilitySquare
+                            if isinstance(landed_square, (PropertySquare, RailroadSquare, UtilitySquare)):
+                                owner_info = "Unowned (Available for purchase)"
+                                is_own_property = False
+                                
+                                if landed_square.owner_id is not None:
+                                    if landed_square.owner_id == current_acting_player.player_id:
+                                        owner_info = f"Own property"
+                                        is_own_property = True
+                                    else:
+                                        owner_name = gc.players[landed_square.owner_id].name
+                                        owner_info = f"Owned by {owner_name}"
+                                        is_own_property = False
+                                
+                                # Send Telegram notification
+                                try:
+                                    from admin import get_telegram_notifier
+                                    telegram_notifier = get_telegram_notifier()
+                                    if telegram_notifier and telegram_notifier.enabled:
+                                        property_status_msg = (
+                                            f"🎯 **Player Landing Analysis** 🎯\n\n"
+                                            f"🎮 Game: {game_uid}\n"
+                                            f"🎲 Turn: {gc.turn_count}\n"
+                                            f"👤 Player: {current_acting_player.name}\n"
+                                            f"🎯 Dice: ({gc.dice[0]}, {gc.dice[1]})\n"
+                                            f"📍 Landing Position: {square_name} (Position {current_acting_player.position})\n"
+                                            f"🏠 Property Status: {owner_info}\n"
+                                            f"🔧 Can Build: {'✅ Yes' if is_own_property else '❌ No'}\n\n"
+                                        )
+                                        
+                                        if is_own_property:
+                                            property_status_msg += (
+                                                f"⚠️ **Important Reminder**: Player landed on their own property!\n"
+                                                f"📋 Watch for correct usage of `build house` tool\n"
+                                            )
+                                            
+                                            if isinstance(landed_square, PropertySquare):
+                                                property_status_msg += (
+                                                    f"🏘️ Current Houses: {landed_square.num_houses}\n"
+                                                    f"🏨 Max Houses: 5 (5th is hotel)\n"
+                                                )
+                                        
+                                        if game_uid in game_instances:
+                                            game_instances[game_uid].send_message_safely({
+                                                'type': 'property_landing_notification',
+                                                'game_uid': game_uid,
+                                                'player_name': current_acting_player.name,
+                                                'message': property_status_msg
+                                            })
+                                            print(f"{Fore.GREEN}📱 [Telegram] Auto-landing property notification sent: {current_acting_player.name} landed on {square_name}{Style.RESET_ALL}")
+                                except Exception as telegram_error:
+                                    print(f"{Fore.YELLOW}📱 [Telegram] Failed to send auto-landing property notification: {telegram_error}{Style.RESET_ALL}")
+                            
+                        except Exception as property_check_error:
+                            print(f"{Fore.RED}📍 [Property Check] Error checking auto-landing property info: {property_check_error}{Style.RESET_ALL}")
+                        
+                    except Exception as e:
+                        print(f"{Fore.RED}[ASYNC LANDING] Error processing landing effects for {current_acting_player.name}: {e}{Style.RESET_ALL}")
+                        # Set processed to true to avoid infinite loop
+                        gc.dice_roll_outcome_processed = True
+
                 available_actions = gc.get_available_actions(active_player_id)
                 gc.log_event(f"P{active_player_id} AvailActions: {available_actions}", "debug_loop")
                 print(f"{Fore.CYAN}[DEBUG] Available actions for P{active_player_id}: {available_actions}{Style.RESET_ALL}")

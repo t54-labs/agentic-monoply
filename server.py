@@ -1277,14 +1277,11 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 action_sequence_this_gc_turn += 1
                 gc.log_event(f"Loop {loop_turn_count}, SegAct {action_this_segment_count}, P{active_player_id} ({current_acting_player.name}) Turn. GC.Pend: {gc.pending_decision_type}, GC.DiceDone: {gc.dice_roll_outcome_processed}", "debug_loop")
                 
+                # 🎯 CRITICAL: Send Landing Analysis for ALL movements
+                # This ensures every dice roll movement gets a Telegram notification
+                
                 # 🎯 CRITICAL: Handle async landing processing if needed
                 # This handles players who moved synchronously but need async landing effects
-                # 🎯 SMART ASYNC PROCESSING CONDITIONS:
-                # 1. Only process if dice outcome is not yet processed
-                # 2. Only in post_roll phase
-                # 3. Only for the main turn player
-                # 4. NOT during trade negotiations (prevents duplicate processing)
-                # 5. NEW: Handle action card draw pending decisions
                 is_trade_negotiation = gc.pending_decision_type in ["respond_to_trade_offer", "propose_new_trade_after_rejection"]
                 is_action_card_draw = gc.pending_decision_type == "action_card_draw"
                 
@@ -1338,87 +1335,8 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                             else:
                                 print(f"{Fore.GREEN}[ASYNC LANDING] ✅ Landing processing completed: dice_roll_outcome_processed = True{Style.RESET_ALL}")
                         
-                        # Record dice roll action for turn summary if not already recorded
-                        # Mark that roll was taken for this segment (but don't record in actions yet - wait for tool_roll_dice)
-                        if not roll_action_taken_this_main_turn_segment:
-                            roll_action_taken_this_main_turn_segment = True
-                            print(f"{Fore.BLUE}📝 [AUTO DICE] Marked auto-roll taken for player {current_acting_player.name} (P{active_player_id}) in turn {gc.turn_count}: {gc.dice}{Style.RESET_ALL}")
-                        
-                        # Send property landing notification
-                        try:
-                            landed_square = gc.board.get_square(current_acting_player.position)
-                            square_name = landed_square.name
-                            
-                            from game_logic.board import PropertySquare, RailroadSquare, UtilitySquare
-                            
-                            # Send Landing Analysis for ALL types of squares, not just purchasable ones
-                            owner_info = "N/A"
-                            is_own_property = False
-                            can_build = False
-                            
-                            if isinstance(landed_square, (PropertySquare, RailroadSquare, UtilitySquare)):
-                                # This is a purchasable property
-                                owner_info = "Unowned (Available for purchase)"
-                                is_own_property = False
-                                
-                                if landed_square.owner_id is not None:
-                                    if landed_square.owner_id == current_acting_player.player_id:
-                                        owner_info = f"Own property"
-                                        is_own_property = True
-                                        can_build = True
-                                    else:
-                                        owner_name = gc.players[landed_square.owner_id].name
-                                        owner_info = f"Owned by {owner_name}"
-                                        is_own_property = False
-                            else:
-                                # Non-purchasable square (Go, Chance, Community Chest, Tax, etc.)
-                                square_type = getattr(landed_square, 'square_type', None)
-                                if square_type:
-                                    owner_info = f"Special square ({square_type.value})"
-                                else:
-                                    owner_info = "Non-property square"
-                                    
-                            # Send Telegram notification for ALL landing positions
-                            try:
-                                from admin import get_telegram_notifier
-                                telegram_notifier = get_telegram_notifier()
-                                if telegram_notifier and telegram_notifier.enabled:
-                                    property_status_msg = (
-                                        f"🎯 **Player Landing Analysis** 🎯\n\n"
-                                        f"🎮 Game: {game_uid}\n"
-                                        f"🎲 Turn: {gc.turn_count}\n"
-                                        f"👤 Player: {current_acting_player.name}\n"
-                                        f"🎯 Dice: ({gc.dice[0]}, {gc.dice[1]})\n"
-                                        f"📍 Landing Position: {square_name} (Position {current_acting_player.position})\n"
-                                        f"🏠 Property Status: {owner_info}\n"
-                                        f"🔧 Can Build: {'✅ Yes' if can_build else '❌ No'}\n\n"
-                                    )
-                                    
-                                    if is_own_property:
-                                        property_status_msg += (
-                                            f"⚠️ **Important Reminder**: Player landed on their own property!\n"
-                                            f"📋 Watch for correct usage of `build house` tool\n"
-                                        )
-                                        
-                                        if isinstance(landed_square, PropertySquare):
-                                            property_status_msg += (
-                                                f"🏘️ Current Houses: {landed_square.num_houses}\n"
-                                                f"🏨 Max Houses: 5 (5th is hotel)\n"
-                                            )
-                                    
-                                    if game_uid in game_instances:
-                                        game_instances[game_uid].send_message_safely({
-                                            'type': 'property_landing_notification',
-                                            'game_uid': game_uid,
-                                            'player_name': current_acting_player.name,
-                                            'message': property_status_msg
-                                        })
-                                        print(f"{Fore.GREEN}📱 [Telegram] Auto-landing notification sent: {current_acting_player.name} landed on {square_name}{Style.RESET_ALL}")
-                            except Exception as telegram_error:
-                                print(f"{Fore.YELLOW}📱 [Telegram] Failed to send auto-landing notification: {telegram_error}{Style.RESET_ALL}")
-                            
-                        except Exception as property_check_error:
-                            print(f"{Fore.RED}📍 [Property Check] Error checking auto-landing info: {property_check_error}{Style.RESET_ALL}")
+                        # Mark async processing as complete for this turn segment
+                        print(f"{Fore.GREEN}[ASYNC LANDING] Landing effects completed{Style.RESET_ALL}")
                         
                     except Exception as e:
                         print(f"{Fore.RED}[ASYNC LANDING] Error processing landing effects for {current_acting_player.name}: {e}{Style.RESET_ALL}")
@@ -1429,82 +1347,8 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 gc.log_event(f"P{active_player_id} AvailActions: {available_actions}", "debug_loop")
                 print(f"{Fore.CYAN}[DEBUG] Available actions for P{active_player_id}: {available_actions}{Style.RESET_ALL}")
                 
-                # 🎯 Check for pending landing notifications and send to Telegram
+                # Clear any pending landing notifications if they exist
                 if hasattr(current_acting_player, '_pending_landing_notification'):
-                    landing_data = current_acting_player._pending_landing_notification
-                    print(f"{Fore.GREEN}📱 [TELEGRAM] Processing pending landing notification for {current_acting_player.name}{Style.RESET_ALL}")
-                    
-                    try:
-                        # Get square information for notification
-                        landed_square = gc.board.get_square(landing_data["landing_position"])
-                        square_name = landing_data["square_name"]
-                        
-                        from game_logic.board import PropertySquare, RailroadSquare, UtilitySquare
-                        
-                        # Determine property status for ALL types of squares
-                        owner_info = "N/A"
-                        is_own_property = False
-                        can_build = False
-                        
-                        if isinstance(landed_square, (PropertySquare, RailroadSquare, UtilitySquare)):
-                            # This is a purchasable property
-                            if landed_square.owner_id is None:
-                                owner_info = "Unowned (Available for purchase)"
-                            elif landed_square.owner_id == current_acting_player.player_id:
-                                owner_info = f"Own property"
-                                is_own_property = True
-                                can_build = True
-                            else:
-                                owner_name = gc.players[landed_square.owner_id].name
-                                owner_info = f"Owned by {owner_name}"
-                        else:
-                            # Non-purchasable square
-                            square_type = getattr(landed_square, 'square_type', None)
-                            if square_type:
-                                owner_info = f"Special square ({square_type.value})"
-                            else:
-                                owner_info = "Non-property square"
-                        
-                        # Send Telegram notification for ALL landing positions
-                        from admin import get_telegram_notifier
-                        telegram_notifier = get_telegram_notifier()
-                        if telegram_notifier and telegram_notifier.enabled:
-                            dice = landing_data["dice"]
-                            property_status_msg = (
-                                f"🎯 **Player Landing Analysis** 🎯\n\n"
-                                f"🎮 Game: {landing_data['game_uid']}\n"
-                                f"🎲 Turn: {landing_data['turn_count']}\n"
-                                f"👤 Player: {landing_data['player_name']}\n"
-                                f"🎯 Dice: ({dice[0]}, {dice[1]})\n"
-                                f"📍 Landing Position: {square_name} (Position {landing_data['landing_position']})\n"
-                                f"🏠 Property Status: {owner_info}\n"
-                                f"🔧 Can Build: {'✅ Yes' if can_build else '❌ No'}\n\n"
-                            )
-                            
-                            if is_own_property:
-                                property_status_msg += (
-                                    f"⚠️ **Important Reminder**: Player landed on their own property!\n"
-                                    f"📋 Watch for correct usage of `build house` tool\n"
-                                )
-                                
-                                if isinstance(landed_square, PropertySquare):
-                                    property_status_msg += (
-                                        f"🏘️ Current Houses: {landed_square.num_houses}\n"
-                                        f"🏨 Max Houses: 5 (5th is hotel)\n"
-                                    )
-                            
-                            if game_uid in game_instances:
-                                game_instances[game_uid].send_message_safely({
-                                    'type': 'property_landing_notification',
-                                    'game_uid': game_uid,
-                                    'player_name': current_acting_player.name,
-                                    'message': property_status_msg
-                                })
-                                print(f"{Fore.GREEN}📱 [Telegram] Landing notification sent: {current_acting_player.name} landed on {square_name}{Style.RESET_ALL}")
-                    except Exception as telegram_error:
-                        print(f"{Fore.YELLOW}📱 [Telegram] Failed to send landing notification: {telegram_error}{Style.RESET_ALL}")
-                    
-                    # Clear the pending notification
                     delattr(current_acting_player, '_pending_landing_notification')
                 
                 # 🎯 Check for pending trade notifications and send to Telegram

@@ -369,7 +369,7 @@ class GameControllerV2:
             self.dice_roll_outcome_processed = True
             self._clear_pending_decision()
             return
-
+        
         square = self.board.get_square(player.position)
         self.log_event(f"🏁 [SQUARE ANALYSIS] {player.name} landed on {square.name} (position {player.position}), type: {square.square_type}", "game_log_event")
         self._clear_pending_decision()  # Clear previous before specific handler potentially sets a new one.
@@ -393,7 +393,7 @@ class GameControllerV2:
             self.log_event(f"❓ [UNKNOWN SQUARE] No specific action for {player.name} on {square.name}. Outcome processed.", "game_log_event")
             self.dice_roll_outcome_processed = True
             self._clear_pending_decision()
-        
+            
     async def _handle_property_landing(self, player: Player, square: PurchasableSquare) -> None:
         """Handle landing on property with rent calculation and TPay payments"""
         self.log_event(f"Handling property landing: {square.name} for {player.name}")
@@ -957,15 +957,15 @@ class GameControllerV2:
         
         actions = []
         
-        if player.is_bankrupt:
+        if player.is_bankrupt: 
             return ["tool_wait"]
-            
+
         # Handle specific decision types that override normal turn actions
         if self.pending_decision_type == "jail_options":
             if self.pending_decision_context.get("player_id") == player_id: 
-                actions.extend(["tool_roll_to_get_out_of_jail", "tool_pay_to_get_out_of_jail"])
+                actions.extend(["tool_roll_for_doubles_to_get_out_of_jail", "tool_pay_bail"])
                 if getattr(player, 'has_chance_gooj_card', False) or getattr(player, 'has_community_gooj_card', False):
-                    actions.append("tool_use_card_to_get_out_of_jail")
+                    actions.append("tool_use_get_out_of_jail_card")
             else: 
                 self._clear_pending_decision()
         
@@ -995,7 +995,27 @@ class GameControllerV2:
 
         elif self.pending_decision_type == "buy_or_auction_property":
             if self.pending_decision_context.get("player_id") == player_id: 
-                actions.extend(["tool_buy_property", "tool_pass_on_buying_property"])
+                # Check if player has enough money to buy the property
+                property_id = self.pending_decision_context.get("property_id")
+                if property_id is not None:
+                    property_square = self.board.get_square(property_id)
+                    if isinstance(property_square, PurchasableSquare) and hasattr(property_square, 'price'):
+                        if player.money >= property_square.price:
+                            actions.append("tool_buy_property")
+                            self.log_event(f"[FUNDS CHECK] {player.name} can afford {property_square.name} for ${property_square.price} (has ${player.money})", "debug_funds")
+                        else:
+                            self.log_event(f"[FUNDS CHECK] {player.name} cannot afford {property_square.name} for ${property_square.price} (has ${player.money})", "debug_funds")
+                    else:
+                        # Fallback if property info not available
+                        actions.append("tool_buy_property")
+                        self.log_event(f"[FUNDS CHECK] Unable to verify property price for property_id {property_id}, allowing purchase attempt", "warning_log")
+                else:
+                    # Fallback if property_id not in context
+                    actions.append("tool_buy_property")
+                    self.log_event(f"[FUNDS CHECK] No property_id in context, allowing purchase attempt", "warning_log")
+                
+                # Always allow passing on buying
+                actions.append("tool_pass_on_buying_property")
             else: 
                 self._clear_pending_decision()
                 
@@ -1038,7 +1058,9 @@ class GameControllerV2:
                                 self.log_event(f"🎯 [DOUBLES] {player.name} rolled doubles! Streak: {self.doubles_streak}", "game_log_event")
                                 if self.doubles_streak == 3:
                                     self.log_event(f"🚨 [GO TO JAIL] {player.name} rolled 3 doubles in a row and goes to jail!", "game_log_event")
-                                    # After rolling, recalculate available actions (player is now in jail)
+                                    # Process jail immediately for 3 doubles
+                                    self._handle_go_to_jail_landing(player)
+                                    # Return jail options immediately - player is now in jail, turn should end
                                     return self.get_available_actions(player_id)
                             else:
                                 self.log_event(f"📊 [NO DOUBLES] {player.name} did not roll doubles, doubles streak reset", "game_log_event")
@@ -1066,9 +1088,17 @@ class GameControllerV2:
                             self.log_event(f"🚶 [MOVEMENT END] {player.name} moved from {old_position} ({old_square.name}) to {new_position} ({new_square.name})", "game_log_event")
                             self.log_event(f"🏁 [LANDING] {player.name} landed on {new_square.name} (position {new_position})", "game_log_event")
                             
-                            # 🎯 CRITICAL FIX: Check immediate landing effects that need player decision
-                            # Some landing effects require immediate player action before async processing
-                            if isinstance(new_square, PurchasableSquare):
+                            # 🎯 CRITICAL FIX: Check immediate landing effects that need player decision or immediate processing
+                            # Some landing effects require immediate player action or immediate state change before async processing
+                            
+                            # 🚔 GO TO JAIL: Process immediately (highest priority)
+                            if hasattr(new_square, 'square_type') and new_square.square_type.value == "GO_TO_JAIL":
+                                self.log_event(f"🚔 [GO TO JAIL IMMEDIATE] {player.name} landed on Go To Jail - processing immediately!", "game_log_event")
+                                self._handle_go_to_jail_landing(player)
+                                # Return jail options immediately - player is now in jail, turn should end
+                                return self.get_available_actions(player_id)
+                                
+                            elif isinstance(new_square, PurchasableSquare):
                                 if new_square.owner_id is None:
                                     # Unowned purchasable property - player must decide to buy or auction
                                     self.log_event(f"🏠 [PROPERTY DECISION] {player.name} must decide to buy or auction {new_square.name}", "game_log_event")
@@ -1099,7 +1129,7 @@ class GameControllerV2:
                             # Fallback to manual dice rolling
                             actions.append("tool_roll_dice")
                             return actions
-                    
+                        
                     elif self.turn_phase == "post_roll":
                         # 🎲 Dice has been rolled and player has moved to new position
                         # Now player can do property management in "post-roll" phase
@@ -1199,7 +1229,7 @@ class GameControllerV2:
                         if any(isinstance(sq := self.board.get_square(pid), PurchasableSquare) and sq.owner_id == player_id and sq.is_mortgaged and player.money >= int(sq.mortgage_value*1.1) for pid in player.properties_owned_ids): 
                             actions.append("tool_unmortgage_property")
                         # 🎯 Trading with turn-based limits
-                        if len([p_other for p_other in self.players if not p_other.is_bankrupt and p_other.player_id != player_id]) > 0:
+                        if len([p_other for p_other in self.players if not p_other.is_bankrupt and p_other.player_id != player_id]) > 0: 
                             # Check if player can still propose trades this turn
                             if self.trade_manager._check_turn_trade_limit(player_id):
                                 actions.append("tool_propose_trade")

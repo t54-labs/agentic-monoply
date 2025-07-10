@@ -69,9 +69,9 @@ class TelegramNotifier:
                 # Register message handler
                 self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
                 
-                print(f"✅ Telegram notifier initialized successfully with command handling")
+                print(f"[OK] Telegram notifier initialized successfully with command handling")
             except Exception as e:
-                print(f"❌ Failed to initialize Telegram bot: {e}")
+                print(f"[ERROR] Failed to initialize Telegram bot: {e}")
                 self.enabled = False
         else:
             missing = []
@@ -81,7 +81,7 @@ class TelegramNotifier:
                 missing.append("TELEGRAM_BOT_TOKEN")
             if not self.chat_id:
                 missing.append("TELEGRAM_CHAT_ID")
-            print(f"⚠️ Telegram notifier disabled. Missing: {', '.join(missing)}")
+            print(f"[WARNING] Telegram notifier disabled. Missing: {', '.join(missing)}")
     
     def register_command_handler(self, command: str, handler: Callable):
         """Register a command handler function"""
@@ -96,18 +96,18 @@ class TelegramNotifier:
             # Store the main event loop if not already stored
             if self.main_event_loop is None:
                 self.main_event_loop = asyncio.get_running_loop()
-                print(f"📡 Telegram notifier: Stored main event loop reference")
+                print(f"[INFO] Telegram notifier: Stored main event loop reference")
             
             # Start polling for updates
             await self.application.initialize()
             await self.application.start()
             
             # Start polling in background
-            print(f"🎧 Telegram bot started listening for commands...")
+            print(f"[INFO] Telegram bot started listening for commands...")
             await self.application.updater.start_polling()
             
         except Exception as e:
-            print(f"❌ Failed to start Telegram bot listening: {e}")
+            print(f"[ERROR] Failed to start Telegram bot listening: {e}")
     
     async def stop_listening(self):
         """Stop listening for messages"""
@@ -118,9 +118,9 @@ class TelegramNotifier:
             await self.application.updater.stop()
             await self.application.stop()
             await self.application.shutdown()
-            print(f"🛑 Telegram bot stopped listening")
+            print(f"[INFO] Telegram bot stopped listening")
         except Exception as e:
-            print(f"❌ Error stopping Telegram bot: {e}")
+            print(f"[ERROR] Error stopping Telegram bot: {e}")
     
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle incoming messages"""
@@ -132,7 +132,7 @@ class TelegramNotifier:
             return
         
         message_text = update.message.text.strip()
-        print(f"📨 Received Telegram command: {message_text}")
+        print(f"[INFO] Received Telegram command: {message_text}")
         
         # Parse commands
         await self._parse_and_execute_command(message_text, update)
@@ -491,7 +491,7 @@ Try again later for different randomly generated names.
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
-            print(f"❌ Failed to reply to message: {e}")
+            print(f"[ERROR] Failed to reply to message: {e}")
     
     async def send_message(self, message: str, disable_notification: bool = False) -> bool:
         """

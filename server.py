@@ -14,6 +14,11 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 
+# Log system import
+import logging
+import sys
+from pathlib import Path
+
 import tpay
 from tpay.tools import taudit_verifier
 
@@ -33,6 +38,117 @@ from admin.game_event_handler import initialize_game_event_handler, get_game_eve
 from database import create_db_and_tables, engine, games_table, players_table, game_turns_table, agent_actions_table, agents_table
 from sqlalchemy import insert, update, select, func
 from sqlalchemy.orm import Session 
+
+# === log system ===
+class LogFileManager:
+    """Class for managing log file output"""
+    def __init__(self):
+        self.log_file = None
+        self.setup_logging()
+    
+    def setup_logging(self):
+        """Set up log file system"""
+        try:
+            # Create logs directory
+            logs_dir = Path("logs")
+            logs_dir.mkdir(exist_ok=True)
+            
+            # Generate timestamped log file name
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_filename = f"monopoly_server_{timestamp}.log"
+            log_path = logs_dir / log_filename
+            
+            # Create log file
+            self.log_file = open(log_path, 'w', encoding='utf-8')
+            
+            # Use original print function to avoid recursion
+            import builtins
+            builtins.print(f"📝 Log file created successfully: {log_path}")
+            self.log_to_file(f"📝 Log file creation time: {datetime.datetime.now().isoformat()}")
+            self.log_to_file(f"📝 Server startup log started")
+            self.log_to_file("=" * 80)
+            
+        except Exception as e:
+            import builtins
+            builtins.print(f"❌ Failed to create log file: {e}")
+            self.log_file = None
+    
+    def log_to_file(self, message: str):
+        """Write message to log file"""
+        if self.log_file:
+            try:
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                self.log_file.write(f"[{timestamp}] {message}\n")
+                self.log_file.flush()  # Write immediately to file
+            except Exception as e:
+                # If log writing fails, only output error to console to avoid infinite loop
+                import builtins
+                builtins.print(f"❌ 日志写入失败: {e}", file=sys.__stderr__)
+    
+    def close(self):
+        """Close log file"""
+        if self.log_file:
+            try:
+                self.log_to_file("=" * 80)
+                self.log_to_file(f"📝 Server shutdown time: {datetime.datetime.now().isoformat()}")
+                self.log_to_file(f"📝 Log file ended")
+                self.log_file.close()
+                import builtins
+                builtins.print("📝 Log file closed")
+            except Exception as e:
+                import builtins
+                builtins.print(f"❌ Failed to close log file: {e}")
+
+# Create global log manager instance
+log_manager = LogFileManager()
+
+# Override print function to output to console and log file
+original_print = print
+def enhanced_print(*args, **kwargs):
+    """Enhanced print function that outputs to console and log file"""
+    # First call original print function to output to console
+    original_print(*args, **kwargs)
+    
+    # Then write to log file
+    try:
+        # Get printed content
+        if args:
+            # Convert all arguments to strings and join
+            sep = kwargs.get('sep', ' ')
+            message = sep.join(str(arg) for arg in args)
+            
+            # Write to log file
+            log_manager.log_to_file(message)
+    except Exception as e:
+        # If log writing fails, only output error to stderr to avoid recursion
+        original_print(f"❌ Log writing failed: {e}", file=sys.__stderr__)
+
+# Replace global print function
+print = enhanced_print
+
+# Signal handler to ensure log file is closed when program exits
+import signal
+import atexit
+
+def cleanup_logs():
+    """Function to clean up log file"""
+    try:
+        log_manager.close()
+    except Exception as e:
+        original_print(f"❌ Error cleaning up log file: {e}", file=sys.__stderr__)
+
+def signal_handler(signum, frame):
+    """Signal handler"""
+    original_print(f"\n📝 Received signal {signum}, closing log file...")
+    cleanup_logs()
+    sys.exit(0)
+
+# Register signal handler
+signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
+signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
+
+# Register cleanup function when program exits
+atexit.register(cleanup_logs)
 
 # Game simulation configuration
 CONCURRENT_GAMES_COUNT = 10  # Number of games to run simultaneously
@@ -1163,9 +1279,24 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 
                 # 🎯 CRITICAL: Handle async landing processing if needed
                 # This handles players who moved synchronously but need async landing effects
-                if (not gc.dice_roll_outcome_processed and 
-                    getattr(gc, 'turn_phase', None) == "post_roll" and 
-                    active_player_id == current_main_turn_player_id):
+                # 🎯 SMART ASYNC PROCESSING CONDITIONS:
+                # 1. Only process if dice outcome is not yet processed
+                # 2. Only in post_roll phase
+                # 3. Only for the main turn player
+                # 4. NOT during trade negotiations (prevents duplicate processing)
+                # 5. NEW: Handle action card draw pending decisions
+                is_trade_negotiation = gc.pending_decision_type in ["respond_to_trade_offer", "propose_new_trade_after_rejection"]
+                is_action_card_draw = gc.pending_decision_type == "action_card_draw"
+                
+                should_process_normal_async = (not gc.dice_roll_outcome_processed and 
+                                             getattr(gc, 'turn_phase', None) == "post_roll" and 
+                                             active_player_id == current_main_turn_player_id and
+                                             not is_trade_negotiation)
+                                             
+                should_process_action_card = (is_action_card_draw and 
+                                            gc.pending_decision_context.get("player_id") == current_main_turn_player_id)
+                
+                if should_process_normal_async or should_process_action_card:
                     
                     print(f"{Fore.CYAN}[ASYNC LANDING] Processing deferred landing effects for {current_acting_player.name} at position {current_acting_player.position}{Style.RESET_ALL}")
                     
@@ -1186,18 +1317,32 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                         await gc.land_on_square(current_acting_player)
                         print(f"{Fore.GREEN}[ASYNC LANDING] Landing effects processed for {current_acting_player.name}{Style.RESET_ALL}")
                         
+                        # 🎯 PROCESSING FLAG MANAGEMENT:
+                        # Check if this is a Chance/Community Chest card that still needs processing
+                        current_square = gc.board.get_square(current_acting_player.position)
+                        from game_logic.property import ActionSquare
+                        
+                        if isinstance(current_square, ActionSquare):
+                            print(f"{Fore.CYAN}[ASYNC LANDING] 🎴 Action square (Chance/Community Chest) processed{Style.RESET_ALL}")
+                            # Action squares should be fully processed by land_on_square
+                            # If dice_roll_outcome_processed is still False, it means a movement card was drawn
+                            if not gc.dice_roll_outcome_processed:
+                                print(f"{Fore.CYAN}[ASYNC LANDING] 🎴 Movement card detected - will need additional processing{Style.RESET_ALL}")
+                            else:
+                                print(f"{Fore.GREEN}[ASYNC LANDING] 🎴 Card effect completed successfully{Style.RESET_ALL}")
+                        else:
+                            # Non-action squares should be marked as processed to prevent loops
+                            if not gc.dice_roll_outcome_processed:
+                                gc.dice_roll_outcome_processed = True
+                                print(f"{Fore.GREEN}[ASYNC LANDING] ✅ Non-action square: marked dice outcome as processed{Style.RESET_ALL}")
+                            else:
+                                print(f"{Fore.GREEN}[ASYNC LANDING] ✅ Landing processing completed: dice_roll_outcome_processed = True{Style.RESET_ALL}")
+                        
                         # Record dice roll action for turn summary if not already recorded
+                        # Mark that roll was taken for this segment (but don't record in actions yet - wait for tool_roll_dice)
                         if not roll_action_taken_this_main_turn_segment:
                             roll_action_taken_this_main_turn_segment = True
-                            dice_val = gc.dice
-                            if dice_val:
-                                current_turn_actions.append({
-                                    'type': 'auto_roll',
-                                    'player_name': current_acting_player.name,
-                                    'dice': dice_val,
-                                    'description': f"🎲 {current_acting_player.name} auto-rolled ({dice_val[0]}, {dice_val[1]})"
-                                })
-                                print(f"{Fore.BLUE}✅ [AUTO DICE] Recorded auto-dice action for player {current_acting_player.name} (P{active_player_id}) in turn {gc.turn_count}: {dice_val}{Style.RESET_ALL}")
+                            print(f"{Fore.BLUE}📝 [AUTO DICE] Marked auto-roll taken for player {current_acting_player.name} (P{active_player_id}) in turn {gc.turn_count}: {gc.dice}{Style.RESET_ALL}")
                         
                         # Send property landing notification
                         try:
@@ -1205,7 +1350,14 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                             square_name = landed_square.name
                             
                             from game_logic.board import PropertySquare, RailroadSquare, UtilitySquare
+                            
+                            # Send Landing Analysis for ALL types of squares, not just purchasable ones
+                            owner_info = "N/A"
+                            is_own_property = False
+                            can_build = False
+                            
                             if isinstance(landed_square, (PropertySquare, RailroadSquare, UtilitySquare)):
+                                # This is a purchasable property
                                 owner_info = "Unowned (Available for purchase)"
                                 is_own_property = False
                                 
@@ -1213,52 +1365,60 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                                     if landed_square.owner_id == current_acting_player.player_id:
                                         owner_info = f"Own property"
                                         is_own_property = True
+                                        can_build = True
                                     else:
                                         owner_name = gc.players[landed_square.owner_id].name
                                         owner_info = f"Owned by {owner_name}"
                                         is_own_property = False
-                                
-                                # Send Telegram notification
-                                try:
-                                    from admin import get_telegram_notifier
-                                    telegram_notifier = get_telegram_notifier()
-                                    if telegram_notifier and telegram_notifier.enabled:
-                                        property_status_msg = (
-                                            f"🎯 **Player Landing Analysis** 🎯\n\n"
-                                            f"🎮 Game: {game_uid}\n"
-                                            f"🎲 Turn: {gc.turn_count}\n"
-                                            f"👤 Player: {current_acting_player.name}\n"
-                                            f"🎯 Dice: ({gc.dice[0]}, {gc.dice[1]})\n"
-                                            f"📍 Landing Position: {square_name} (Position {current_acting_player.position})\n"
-                                            f"🏠 Property Status: {owner_info}\n"
-                                            f"🔧 Can Build: {'✅ Yes' if is_own_property else '❌ No'}\n\n"
+                            else:
+                                # Non-purchasable square (Go, Chance, Community Chest, Tax, etc.)
+                                square_type = getattr(landed_square, 'square_type', None)
+                                if square_type:
+                                    owner_info = f"Special square ({square_type.value})"
+                                else:
+                                    owner_info = "Non-property square"
+                                    
+                            # Send Telegram notification for ALL landing positions
+                            try:
+                                from admin import get_telegram_notifier
+                                telegram_notifier = get_telegram_notifier()
+                                if telegram_notifier and telegram_notifier.enabled:
+                                    property_status_msg = (
+                                        f"🎯 **Player Landing Analysis** 🎯\n\n"
+                                        f"🎮 Game: {game_uid}\n"
+                                        f"🎲 Turn: {gc.turn_count}\n"
+                                        f"👤 Player: {current_acting_player.name}\n"
+                                        f"🎯 Dice: ({gc.dice[0]}, {gc.dice[1]})\n"
+                                        f"📍 Landing Position: {square_name} (Position {current_acting_player.position})\n"
+                                        f"🏠 Property Status: {owner_info}\n"
+                                        f"🔧 Can Build: {'✅ Yes' if can_build else '❌ No'}\n\n"
+                                    )
+                                    
+                                    if is_own_property:
+                                        property_status_msg += (
+                                            f"⚠️ **Important Reminder**: Player landed on their own property!\n"
+                                            f"📋 Watch for correct usage of `build house` tool\n"
                                         )
                                         
-                                        if is_own_property:
+                                        if isinstance(landed_square, PropertySquare):
                                             property_status_msg += (
-                                                f"⚠️ **Important Reminder**: Player landed on their own property!\n"
-                                                f"📋 Watch for correct usage of `build house` tool\n"
+                                                f"🏘️ Current Houses: {landed_square.num_houses}\n"
+                                                f"🏨 Max Houses: 5 (5th is hotel)\n"
                                             )
-                                            
-                                            if isinstance(landed_square, PropertySquare):
-                                                property_status_msg += (
-                                                    f"🏘️ Current Houses: {landed_square.num_houses}\n"
-                                                    f"🏨 Max Houses: 5 (5th is hotel)\n"
-                                                )
-                                        
-                                        if game_uid in game_instances:
-                                            game_instances[game_uid].send_message_safely({
-                                                'type': 'property_landing_notification',
-                                                'game_uid': game_uid,
-                                                'player_name': current_acting_player.name,
-                                                'message': property_status_msg
-                                            })
-                                            print(f"{Fore.GREEN}📱 [Telegram] Auto-landing property notification sent: {current_acting_player.name} landed on {square_name}{Style.RESET_ALL}")
-                                except Exception as telegram_error:
-                                    print(f"{Fore.YELLOW}📱 [Telegram] Failed to send auto-landing property notification: {telegram_error}{Style.RESET_ALL}")
+                                    
+                                    if game_uid in game_instances:
+                                        game_instances[game_uid].send_message_safely({
+                                            'type': 'property_landing_notification',
+                                            'game_uid': game_uid,
+                                            'player_name': current_acting_player.name,
+                                            'message': property_status_msg
+                                        })
+                                        print(f"{Fore.GREEN}📱 [Telegram] Auto-landing notification sent: {current_acting_player.name} landed on {square_name}{Style.RESET_ALL}")
+                            except Exception as telegram_error:
+                                print(f"{Fore.YELLOW}📱 [Telegram] Failed to send auto-landing notification: {telegram_error}{Style.RESET_ALL}")
                             
                         except Exception as property_check_error:
-                            print(f"{Fore.RED}📍 [Property Check] Error checking auto-landing property info: {property_check_error}{Style.RESET_ALL}")
+                            print(f"{Fore.RED}📍 [Property Check] Error checking auto-landing info: {property_check_error}{Style.RESET_ALL}")
                         
                     except Exception as e:
                         print(f"{Fore.RED}[ASYNC LANDING] Error processing landing effects for {current_acting_player.name}: {e}{Style.RESET_ALL}")
@@ -1268,6 +1428,325 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                 available_actions = gc.get_available_actions(active_player_id)
                 gc.log_event(f"P{active_player_id} AvailActions: {available_actions}", "debug_loop")
                 print(f"{Fore.CYAN}[DEBUG] Available actions for P{active_player_id}: {available_actions}{Style.RESET_ALL}")
+                
+                # 🎯 Check for pending landing notifications and send to Telegram
+                if hasattr(current_acting_player, '_pending_landing_notification'):
+                    landing_data = current_acting_player._pending_landing_notification
+                    print(f"{Fore.GREEN}📱 [TELEGRAM] Processing pending landing notification for {current_acting_player.name}{Style.RESET_ALL}")
+                    
+                    try:
+                        # Get square information for notification
+                        landed_square = gc.board.get_square(landing_data["landing_position"])
+                        square_name = landing_data["square_name"]
+                        
+                        from game_logic.board import PropertySquare, RailroadSquare, UtilitySquare
+                        
+                        # Determine property status for ALL types of squares
+                        owner_info = "N/A"
+                        is_own_property = False
+                        can_build = False
+                        
+                        if isinstance(landed_square, (PropertySquare, RailroadSquare, UtilitySquare)):
+                            # This is a purchasable property
+                            if landed_square.owner_id is None:
+                                owner_info = "Unowned (Available for purchase)"
+                            elif landed_square.owner_id == current_acting_player.player_id:
+                                owner_info = f"Own property"
+                                is_own_property = True
+                                can_build = True
+                            else:
+                                owner_name = gc.players[landed_square.owner_id].name
+                                owner_info = f"Owned by {owner_name}"
+                        else:
+                            # Non-purchasable square
+                            square_type = getattr(landed_square, 'square_type', None)
+                            if square_type:
+                                owner_info = f"Special square ({square_type.value})"
+                            else:
+                                owner_info = "Non-property square"
+                        
+                        # Send Telegram notification for ALL landing positions
+                        from admin import get_telegram_notifier
+                        telegram_notifier = get_telegram_notifier()
+                        if telegram_notifier and telegram_notifier.enabled:
+                            dice = landing_data["dice"]
+                            property_status_msg = (
+                                f"🎯 **Player Landing Analysis** 🎯\n\n"
+                                f"🎮 Game: {landing_data['game_uid']}\n"
+                                f"🎲 Turn: {landing_data['turn_count']}\n"
+                                f"👤 Player: {landing_data['player_name']}\n"
+                                f"🎯 Dice: ({dice[0]}, {dice[1]})\n"
+                                f"📍 Landing Position: {square_name} (Position {landing_data['landing_position']})\n"
+                                f"🏠 Property Status: {owner_info}\n"
+                                f"🔧 Can Build: {'✅ Yes' if can_build else '❌ No'}\n\n"
+                            )
+                            
+                            if is_own_property:
+                                property_status_msg += (
+                                    f"⚠️ **Important Reminder**: Player landed on their own property!\n"
+                                    f"📋 Watch for correct usage of `build house` tool\n"
+                                )
+                                
+                                if isinstance(landed_square, PropertySquare):
+                                    property_status_msg += (
+                                        f"🏘️ Current Houses: {landed_square.num_houses}\n"
+                                        f"🏨 Max Houses: 5 (5th is hotel)\n"
+                                    )
+                            
+                            if game_uid in game_instances:
+                                game_instances[game_uid].send_message_safely({
+                                    'type': 'property_landing_notification',
+                                    'game_uid': game_uid,
+                                    'player_name': current_acting_player.name,
+                                    'message': property_status_msg
+                                })
+                                print(f"{Fore.GREEN}📱 [Telegram] Landing notification sent: {current_acting_player.name} landed on {square_name}{Style.RESET_ALL}")
+                    except Exception as telegram_error:
+                        print(f"{Fore.YELLOW}📱 [Telegram] Failed to send landing notification: {telegram_error}{Style.RESET_ALL}")
+                    
+                    # Clear the pending notification
+                    delattr(current_acting_player, '_pending_landing_notification')
+                
+                # 🎯 Check for pending trade notifications and send to Telegram
+                if hasattr(gc, '_pending_trade_notifications') and gc._pending_trade_notifications:
+                    trade_notifications = gc._pending_trade_notifications
+                    gc._pending_trade_notifications = []  # Clear the list
+                    
+                    print(f"{Fore.GREEN}📱 [TELEGRAM] Processing {len(trade_notifications)} trade notifications{Style.RESET_ALL}")
+                    
+                    for notification in trade_notifications:
+                        try:
+                            notification_type = notification["type"]
+                            data = notification["data"]
+                            
+                            from admin import get_telegram_notifier
+                            telegram_notifier = get_telegram_notifier()
+                            
+                            if telegram_notifier and telegram_notifier.enabled:
+                                if notification_type == "trade_proposal":
+                                    # Format trade proposal message
+                                    message = f"🔄 **Trade Proposal** 🔄\n\n"
+                                    message += f"📋 Trade ID: {data['trade_id']}\n"
+                                    message += f"👤 From: {data['proposer_name']}\n"
+                                    message += f"👤 To: {data['recipient_name']}\n"
+                                    message += f"🎮 Game: {data['game_uid']}\n"
+                                    message += f"🎲 Turn: {data['turn_count']}\n\n"
+                                    
+                                    # Offering section
+                                    message += f"💰 **{data['proposer_name']} Offers:**\n"
+                                    if data['offered_properties']:
+                                        message += f"🏠 Properties: {', '.join(data['offered_properties'])}\n"
+                                    if data['offered_money'] > 0:
+                                        message += f"💵 Money: ${data['offered_money']}\n"
+                                    if data['offered_gooj_cards'] > 0:
+                                        message += f"🎫 Get Out of Jail Cards: {data['offered_gooj_cards']}\n"
+                                    if not data['offered_properties'] and data['offered_money'] == 0 and data['offered_gooj_cards'] == 0:
+                                        message += "🚫 Nothing\n"
+                                    
+                                    # Requesting section
+                                    message += f"\n🎯 **{data['proposer_name']} Wants:**\n"
+                                    if data['requested_properties']:
+                                        message += f"🏠 Properties: {', '.join(data['requested_properties'])}\n"
+                                    if data['requested_money'] > 0:
+                                        message += f"💵 Money: ${data['requested_money']}\n"
+                                    if data['requested_gooj_cards'] > 0:
+                                        message += f"🎫 Get Out of Jail Cards: {data['requested_gooj_cards']}\n"
+                                    if not data['requested_properties'] and data['requested_money'] == 0 and data['requested_gooj_cards'] == 0:
+                                        message += "🚫 Nothing\n"
+                                    
+                                    if data['message']:
+                                        message += f"\n💬 Message: {data['message']}\n"
+                                    
+                                    # Send to both Telegram and WebSocket (frontend)
+                                    if telegram_notifier and telegram_notifier.enabled:
+                                        await telegram_notifier.send_message(message)
+                                    
+                                    # Also send to frontend via WebSocket
+                                    if game_uid in game_instances:
+                                        game_instances[game_uid].send_message_safely({
+                                            'type': 'trade_proposal_notification',
+                                            'game_uid': game_uid,
+                                            'trade_id': data['trade_id'],
+                                            'proposer_name': data['proposer_name'],
+                                            'recipient_name': data['recipient_name'],
+                                            'message': message
+                                        })
+                                    
+                                    print(f"{Fore.MAGENTA}📱 [TELEGRAM SENT] Trade proposal {data['trade_id']}: {data['proposer_name']} → {data['recipient_name']}{Style.RESET_ALL}")
+                                    print(f"{Fore.GREEN}🌐 [WEBSOCKET SENT] Trade proposal to frontend for {game_uid}{Style.RESET_ALL}")
+                                    
+                                elif notification_type == "trade_acceptance":
+                                    message = f"✅ **Trade Accepted** ✅\n\n"
+                                    message += f"📋 Trade ID: {data['trade_id']}\n"
+                                    message += f"👤 {data['recipient_name']} accepted the trade from {data['proposer_name']}\n"
+                                    message += f"🎮 Game: {data['game_uid']}\n"
+                                    message += f"🎲 Turn: {data['turn_count']}\n\n"
+                                    message += f"🎉 Trade executed successfully!"
+                                    
+                                    # Send to both Telegram and WebSocket (frontend)
+                                    if telegram_notifier and telegram_notifier.enabled:
+                                        await telegram_notifier.send_message(message)
+                                    
+                                    # Also send to frontend via WebSocket
+                                    if game_uid in game_instances:
+                                        game_instances[game_uid].send_message_safely({
+                                            'type': 'trade_acceptance_notification',
+                                            'game_uid': game_uid,
+                                            'trade_id': data['trade_id'],
+                                            'proposer_name': data['proposer_name'],
+                                            'recipient_name': data['recipient_name'],
+                                            'message': message
+                                        })
+                                    
+                                    print(f"{Fore.MAGENTA}📱 [TELEGRAM SENT] Trade acceptance {data['trade_id']}: {data['recipient_name']} accepted{Style.RESET_ALL}")
+                                    print(f"{Fore.GREEN}🌐 [WEBSOCKET SENT] Trade acceptance to frontend for {game_uid}{Style.RESET_ALL}")
+                                    
+                                elif notification_type == "trade_rejection":
+                                    message = f"❌ **Trade Rejected** ❌\n\n"
+                                    message += f"📋 Trade ID: {data['trade_id']}\n"
+                                    message += f"👤 {data['recipient_name']} rejected the trade from {data['proposer_name']}\n"
+                                    message += f"🎮 Game: {data['game_uid']}\n"
+                                    message += f"🎲 Turn: {data['turn_count']}\n\n"
+                                    message += f"📊 Rejection count: {data['rejection_count']}/{data['max_rejections']}\n"
+                                    
+                                    if data['rejection_count'] >= data['max_rejections']:
+                                        message += f"🚫 Maximum rejections reached - trade negotiation ended"
+                                    else:
+                                        message += f"🔄 {data['proposer_name']} can propose a new trade"
+                                    
+                                    # Send to both Telegram and WebSocket (frontend)
+                                    if telegram_notifier and telegram_notifier.enabled:
+                                        await telegram_notifier.send_message(message)
+                                    
+                                    # Also send to frontend via WebSocket
+                                    if game_uid in game_instances:
+                                        game_instances[game_uid].send_message_safely({
+                                            'type': 'trade_rejection_notification',
+                                            'game_uid': game_uid,
+                                            'trade_id': data['trade_id'],
+                                            'proposer_name': data['proposer_name'],
+                                            'recipient_name': data['recipient_name'],
+                                            'rejection_count': data['rejection_count'],
+                                            'max_rejections': data['max_rejections'],
+                                            'message': message
+                                        })
+                                    
+                                    print(f"{Fore.MAGENTA}📱 [TELEGRAM SENT] Trade rejection {data['trade_id']}: {data['recipient_name']} rejected{Style.RESET_ALL}")
+                                    print(f"{Fore.GREEN}🌐 [WEBSOCKET SENT] Trade rejection to frontend for {game_uid}{Style.RESET_ALL}")
+                                    
+                                elif notification_type == "trade_counter":
+                                    message = f"🔄 **Trade Counter-Offer** 🔄\n\n"
+                                    message += f"📋 Original Trade ID: {data['original_trade_id']}\n"
+                                    message += f"📋 Counter Trade ID: {data['counter_trade_id']}\n"
+                                    message += f"👤 {data['recipient_name']} countered {data['proposer_name']}'s trade\n"
+                                    message += f"🎮 Game: {data['game_uid']}\n"
+                                    message += f"🎲 Turn: {data['turn_count']}\n\n"
+                                    
+                                    # Counter offer details
+                                    message += f"💰 **{data['recipient_name']} Counter-Offers:**\n"
+                                    if data['counter_offered_properties']:
+                                        message += f"🏠 Properties: {', '.join(data['counter_offered_properties'])}\n"
+                                    if data['counter_offered_money'] > 0:
+                                        message += f"💵 Money: ${data['counter_offered_money']}\n"
+                                    if data['counter_offered_gooj_cards'] > 0:
+                                        message += f"🎫 Get Out of Jail Cards: {data['counter_offered_gooj_cards']}\n"
+                                    if not data['counter_offered_properties'] and data['counter_offered_money'] == 0 and data['counter_offered_gooj_cards'] == 0:
+                                        message += "🚫 Nothing\n"
+                                    
+                                    message += f"\n🎯 **{data['recipient_name']} Wants:**\n"
+                                    if data['counter_requested_properties']:
+                                        message += f"🏠 Properties: {', '.join(data['counter_requested_properties'])}\n"
+                                    if data['counter_requested_money'] > 0:
+                                        message += f"💵 Money: ${data['counter_requested_money']}\n"
+                                    if data['counter_requested_gooj_cards'] > 0:
+                                        message += f"🎫 Get Out of Jail Cards: {data['counter_requested_gooj_cards']}\n"
+                                    if not data['counter_requested_properties'] and data['counter_requested_money'] == 0 and data['counter_requested_gooj_cards'] == 0:
+                                        message += "🚫 Nothing\n"
+                                    
+                                    if data['counter_message']:
+                                        message += f"\n💬 Message: {data['counter_message']}\n"
+                                    
+                                    # Send to both Telegram and WebSocket (frontend)
+                                    if telegram_notifier and telegram_notifier.enabled:
+                                        await telegram_notifier.send_message(message)
+                                    
+                                    # Also send to frontend via WebSocket
+                                    if game_uid in game_instances:
+                                        game_instances[game_uid].send_message_safely({
+                                            'type': 'trade_counter_notification',
+                                            'game_uid': game_uid,
+                                            'original_trade_id': data['original_trade_id'],
+                                            'counter_trade_id': data['counter_trade_id'],
+                                            'proposer_name': data['proposer_name'],
+                                            'recipient_name': data['recipient_name'],
+                                            'message': message
+                                        })
+                                    
+                                    print(f"{Fore.MAGENTA}📱 [TELEGRAM SENT] Trade counter {data['counter_trade_id']}: {data['recipient_name']} countered{Style.RESET_ALL}")
+                                    print(f"{Fore.GREEN}🌐 [WEBSOCKET SENT] Trade counter to frontend for {game_uid}{Style.RESET_ALL}")
+                                    
+                                elif notification_type == "trade_completion":
+                                    message = f"🎉 **Trade Completed** 🎉\n\n"
+                                    message += f"📋 Trade ID: {data['trade_id']}\n"
+                                    message += f"👥 Players: {data['proposer_name']} ↔ {data['recipient_name']}\n"
+                                    message += f"🎮 Game: {data['game_uid']}\n"
+                                    message += f"🎲 Turn: {data['turn_count']}\n\n"
+                                    
+                                    # Items transferred
+                                    prop_to_recip = data['items_transferred']['proposer_to_recipient']
+                                    recip_to_prop = data['items_transferred']['recipient_to_proposer']
+                                    
+                                    message += f"📦 **Items Transferred:**\n"
+                                    message += f"🔄 {data['proposer_name']} → {data['recipient_name']}:\n"
+                                    if prop_to_recip['properties']:
+                                        message += f"  🏠 Properties: {', '.join(prop_to_recip['properties'])}\n"
+                                    if prop_to_recip['money'] > 0:
+                                        message += f"  💵 Money: ${prop_to_recip['money']}\n"
+                                    if prop_to_recip['gooj_cards'] > 0:
+                                        message += f"  🎫 Get Out of Jail Cards: {prop_to_recip['gooj_cards']}\n"
+                                    
+                                    message += f"\n🔄 {data['recipient_name']} → {data['proposer_name']}:\n"
+                                    if recip_to_prop['properties']:
+                                        message += f"  🏠 Properties: {', '.join(recip_to_prop['properties'])}\n"
+                                    if recip_to_prop['money'] > 0:
+                                        message += f"  💵 Money: ${recip_to_prop['money']}\n"
+                                    if recip_to_prop['gooj_cards'] > 0:
+                                        message += f"  🎫 Get Out of Jail Cards: {recip_to_prop['gooj_cards']}\n"
+                                    
+                                    # Mortgaged properties warning
+                                    if data['mortgaged_properties']['received_by_recipient'] or data['mortgaged_properties']['received_by_proposer']:
+                                        message += f"\n⚠️ **Mortgaged Properties:**\n"
+                                        if data['mortgaged_properties']['received_by_recipient']:
+                                            message += f"  📍 {data['recipient_name']} received mortgaged properties\n"
+                                        if data['mortgaged_properties']['received_by_proposer']:
+                                            message += f"  📍 {data['proposer_name']} received mortgaged properties\n"
+                                    
+                                    # Send to both Telegram and WebSocket (frontend)
+                                    if telegram_notifier and telegram_notifier.enabled:
+                                        await telegram_notifier.send_message(message)
+                                    
+                                    # Also send to frontend via WebSocket
+                                    if game_uid in game_instances:
+                                        game_instances[game_uid].send_message_safely({
+                                            'type': 'trade_completion_notification',
+                                            'game_uid': game_uid,
+                                            'trade_id': data['trade_id'],
+                                            'proposer_name': data['proposer_name'],
+                                            'recipient_name': data['recipient_name'],
+                                            'items_transferred': data['items_transferred'],
+                                            'mortgaged_properties': data['mortgaged_properties'],
+                                            'message': message
+                                        })
+                                    
+                                    print(f"{Fore.MAGENTA}📱 [TELEGRAM SENT] Trade completion {data['trade_id']}: {data['proposer_name']} ↔ {data['recipient_name']}{Style.RESET_ALL}")
+                                    print(f"{Fore.GREEN}🌐 [WEBSOCKET SENT] Trade completion to frontend for {game_uid}{Style.RESET_ALL}")
+                                    
+                        except Exception as e:
+                            print(f"{Fore.RED}❌ [TELEGRAM ERROR] Failed to send trade notification {notification_type}: {e}{Style.RESET_ALL}")
+                            logger.error(f"Failed to send trade notification {notification_type}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                
                 if not available_actions: 
                     print(f"{Fore.YELLOW}[DEBUG] No actions available - ending segment{Style.RESET_ALL}")
                     await gc.send_event_to_frontend({"type":"warning_log", "message":f"[W] No actions for P{active_player_id} ({current_acting_player.name}). Pend:'{gc.pending_decision_type}', SegEnd."})
@@ -1439,77 +1918,8 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                                 await gc._move_player(current_acting_player, sum(dice_val))
                                 print(f"{Fore.CYAN}[DEBUG MOVE] {current_acting_player.name} moved {sum(dice_val)} steps from dice {dice_val} to position {current_acting_player.position}{Style.RESET_ALL}")
                                 
-                                # 🔥 Add Telegram notification: Check player landing position property info
-                                try:
-                                    # Get the square where player landed
-                                    landed_square = gc.board.get_square(current_acting_player.position)
-                                    square_name = landed_square.name
-                                    
-                                    # Check if it's a purchasable property
-                                    from game_logic.board import PropertySquare, RailroadSquare, UtilitySquare
-                                    if isinstance(landed_square, (PropertySquare, RailroadSquare, UtilitySquare)):
-                                        # This is a purchasable property
-                                        owner_info = "Unowned (Available for purchase)"
-                                        is_own_property = False
-                                        
-                                        if landed_square.owner_id is not None:
-                                            if landed_square.owner_id == current_acting_player.player_id:
-                                                owner_info = f"Own property"
-                                                is_own_property = True
-                                            else:
-                                                owner_name = gc.players[landed_square.owner_id].name
-                                                owner_info = f"Owned by {owner_name}"
-                                                is_own_property = False
-                                        
-                                        # Send Telegram notification
-                                        try:
-                                            from admin import get_telegram_notifier
-                                            telegram_notifier = get_telegram_notifier()
-                                            if telegram_notifier and telegram_notifier.enabled:
-                                                # Construct notification message
-                                                property_status_msg = (
-                                                    f"🎯 **Player Landing Analysis** 🎯\n\n"
-                                                    f"🎮 Game: {game_uid}\n"
-                                                    f"🎲 Turn: {gc.turn_count}\n"
-                                                    f"👤 Player: {current_acting_player.name}\n"
-                                                    f"🎯 Dice: ({dice_val[0]}, {dice_val[1]})\n"
-                                                    f"📍 Landing Position: {square_name} (Position {current_acting_player.position})\n"
-                                                    f"🏠 Property Status: {owner_info}\n"
-                                                    f"🔧 Can Build: {'✅ Yes' if is_own_property else '❌ No'}\n\n"
-                                                )
-                                                
-                                                # If it's own property, add extra reminder about build house tool usage
-                                                if is_own_property:
-                                                    property_status_msg += (
-                                                        f"⚠️ **Important Reminder**: Player landed on their own property!\n"
-                                                        f"📋 Watch for correct usage of `build house` tool\n"
-                                                    )
-                                                    
-                                                    # Check property details
-                                                    if isinstance(landed_square, PropertySquare):
-                                                        property_status_msg += (
-                                                            f"🏘️ Current Houses: {landed_square.num_houses}\n"
-                                                            f"🏨 Max Houses: 5 (5th is hotel)\n"
-                                                        )
-                                                
-                                                # Use thread-safe way to send notification
-                                                if game_uid in game_instances:
-                                                    game_instances[game_uid].send_message_safely({
-                                                        'type': 'property_landing_notification',
-                                                        'game_uid': game_uid,
-                                                        'player_name': current_acting_player.name,
-                                                        'message': property_status_msg
-                                                    })
-                                                    print(f"{Fore.GREEN}📱 [Telegram] Property landing notification sent: {current_acting_player.name} landed on {square_name}{Style.RESET_ALL}")
-                                        except Exception as telegram_error:
-                                            print(f"{Fore.YELLOW}📱 [Telegram] Failed to send property landing notification: {telegram_error}{Style.RESET_ALL}")
-                                    
-                                    else:
-                                        # Not a property, but can be logged (optional)
-                                        print(f"{Fore.CYAN}📍 [Property Check] {current_acting_player.name} landed on {square_name} (non-property square){Style.RESET_ALL}")
-                                        
-                                except Exception as property_check_error:
-                                    print(f"{Fore.RED}📍 [Property Check] Error checking landing property info: {property_check_error}{Style.RESET_ALL}")
+                                # Landing position info already sent in ASYNC LANDING section above
+                                print(f"{Fore.CYAN}📍 [LANDING] {current_acting_player.name} moved to {current_acting_player.position}{Style.RESET_ALL}")
                                     
                             elif not dice_val:
                                 gc.log_event(f"[E] No dice_roll in action_result for P{active_player_id}. Ending segment.", "error_log")
@@ -1637,17 +2047,17 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                     call_next_turn_flag = True
                 elif active_player_id == main_turn_player_for_next_step.player_id: 
                     is_in_jail_at_segment_end = main_turn_player_for_next_step.in_jail
-                    rolled_doubles_for_bonus = (roll_action_taken_this_main_turn_segment and 
-                                              gc.dice[0] == gc.dice[1] and gc.dice[0] != 0 and 
+                    # 🎯 CRITICAL FIX: Don't rely on roll_action_taken_this_main_turn_segment
+                    # Instead, check if current dice are doubles and player has valid streak
+                    rolled_doubles_for_bonus = (gc.dice[0] == gc.dice[1] and gc.dice[0] != 0 and 
                                               not is_in_jail_at_segment_end and 
-                                              gc.doubles_streak < 3 and gc.doubles_streak > 0)
+                                              gc.doubles_streak > 0 and gc.doubles_streak < 3)
                     print(f"{Fore.MAGENTA}    🎯 [DOUBLES DEBUG] Player {main_turn_player_for_next_step.name} dice analysis:{Style.RESET_ALL}")
                     print(f"{Fore.MAGENTA}       📊 Current dice: ({gc.dice[0]}, {gc.dice[1]}), streak: {gc.doubles_streak}{Style.RESET_ALL}")
-                    print(f"{Fore.MAGENTA}       ✓ Roll taken this segment: {roll_action_taken_this_main_turn_segment}{Style.RESET_ALL}")
                     print(f"{Fore.MAGENTA}       ✓ Dice are equal: {gc.dice[0] == gc.dice[1]}{Style.RESET_ALL}")
                     print(f"{Fore.MAGENTA}       ✓ Dice not zero: {gc.dice[0] != 0}{Style.RESET_ALL}")
                     print(f"{Fore.MAGENTA}       ✓ Not in jail: {not is_in_jail_at_segment_end}{Style.RESET_ALL}")
-                    print(f"{Fore.MAGENTA}       ✓ Streak valid (0 < {gc.doubles_streak} < 3): {gc.doubles_streak < 3 and gc.doubles_streak > 0}{Style.RESET_ALL}")
+                    print(f"{Fore.MAGENTA}       ✓ Streak valid (0 < {gc.doubles_streak} < 3): {gc.doubles_streak > 0 and gc.doubles_streak < 3}{Style.RESET_ALL}")
                     print(f"{Fore.MAGENTA}       🎯 FINAL DOUBLES BONUS: {rolled_doubles_for_bonus}{Style.RESET_ALL}")
                     
                     if rolled_doubles_for_bonus:
@@ -2003,6 +2413,12 @@ async def lifespan(app_instance: FastAPI):
         app_instance.state.active_games.clear()
 
     print("Server shutdown complete.")
+    
+    # Close log file
+    try:
+        log_manager.close()
+    except Exception as e:
+        print(f"❌ Error closing log file: {e}", file=sys.__stderr__)
 
 # 8. Instantiate FastAPI app
 app = FastAPI(lifespan=lifespan)

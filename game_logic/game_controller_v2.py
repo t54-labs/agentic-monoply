@@ -112,6 +112,7 @@ class GameControllerV2:
             self.payment_manager = LocalPaymentManager(self)
         else:
             self.payment_manager = PaymentManager(self)
+            
         self.property_manager = PropertyManager(self)
         self.trade_manager = TradeManager(self)
         self.state_manager = StateManager(self)
@@ -792,9 +793,69 @@ class GameControllerV2:
         # Log pre-roll state
         self.log_event(f"🎲 [DICE ROLL INITIATED] {current_player.name} is rolling dice...", "game_log_event")
         
+        # 🧪 TEST MODE INDICATOR (COMMENTED OUT - NORMAL GAME MODE)
+        # if self.turn_count <= 4:
+        #     self.log_event(f"🧪 ======= TEST MODE ACTIVE: TURN {self.turn_count}/4 =======", "game_log_event")
+        
         if current_player.in_jail:
             self.log_event(f"⚠️ [JAIL ROLL WARNING] roll_dice called for player in jail. Use jail-specific roll tool.", "game_log_event")
 
+        # 🧪 TEMPORARY TEST MODE: Force specific landing positions for testing (COMMENTED OUT)
+        # Turn 1: Force all players to Chance (position 7) 
+        # Turn 2: Force all players to Community Chest (position 17)
+        # Turn 3: Force all players near Go To Jail (position 29)
+        # Turn 4: Force all players to Go To Jail (position 30)
+        
+        # test_dice_result = None
+        # if self.turn_count <= 4:  # Only for first 4 turns
+        #     current_pos = current_player.position
+        #     target_pos = None
+        #     
+        #     if self.turn_count == 1:
+        #         target_pos = 7  # Chance card (7 steps from GO)
+        #         reason = "Chance card"
+        #     elif self.turn_count == 2:
+        #         target_pos = 2   # Community Chest card (2 steps from GO)  
+        #         reason = "Community Chest card"
+        #     elif self.turn_count == 3:
+        #         target_pos = 5   # Reading Railroad (5 steps from GO)
+        #         reason = "Railroad property (Reading Railroad)"
+        #     elif self.turn_count == 4:
+        #         target_pos = 12  # Electric Company (12 steps from GO - max dice roll)
+        #         reason = "Utility property (Electric Company)"
+        #     
+        #     if target_pos is not None:
+        #         # Calculate needed steps (handle wrap-around)
+        #         if target_pos >= current_pos:
+        #             steps_needed = target_pos - current_pos
+        #         else:
+        #             steps_needed = (40 + target_pos) - current_pos  # 40 squares on board
+        #         
+        #         self.log_event(f"🧪 [TEST CALC] Current pos: {current_pos}, Target pos: {target_pos}, Steps needed: {steps_needed}", "game_log_event")
+        #         
+        #         # Convert steps to dice roll (max 12 per roll, each die 1-6)
+        #         if steps_needed <= 12 and steps_needed >= 2:
+        #             # Find valid dice combination that sums to steps_needed
+        #             if steps_needed <= 7:
+        #                 # For steps 2-7, use (1, steps-1)
+        #                 test_dice_result = (1, steps_needed - 1)
+        #             else:
+        #                 # For steps 8-12, use (6, steps-6) or other combinations
+        #                 test_dice_result = (6, steps_needed - 6)
+        #             
+        #             self.log_event(f"🧪 [TEST MODE] Turn {self.turn_count}: Forcing {current_player.name} from pos {current_pos} to {target_pos} ({reason}) with dice {test_dice_result} (sum={sum(test_dice_result)})", "game_log_event")
+        #         elif steps_needed == 1:
+        #             # Special case: can't roll exactly 1, use 2 and adjust later
+        #             test_dice_result = (1, 1)  # Sum = 2, will be 1 over
+        #             self.log_event(f"🧪 [TEST MODE] Turn {self.turn_count}: {current_player.name} needs 1 step but minimum roll is 2, using (1,1)", "game_log_event")
+        #         elif steps_needed == 0:
+        #             # Already at target, use small roll
+        #             test_dice_result = (1, 1)
+        #             self.log_event(f"🧪 [TEST MODE] Turn {self.turn_count}: {current_player.name} already at target {target_pos}, using (1,1)", "game_log_event")
+        #         else:
+        #             self.log_event(f"🧪 [TEST MODE] Turn {self.turn_count}: Cannot force {current_player.name} to {target_pos} in one roll (need {steps_needed} steps), using random", "game_log_event")
+        
+        # 🎲 NORMAL DICE ROLL - Always use random dice now
         self.dice = (random.randint(1, 6), random.randint(1, 6))
         dice_sum = self.dice[0] + self.dice[1]
         
@@ -1033,7 +1094,15 @@ class GameControllerV2:
             if self.pending_decision_context.get("player_to_bid_id") == player_id and player_id in [p.player_id for p in self.auction_active_bidders]: 
                 actions.extend(["tool_bid_on_auction", "tool_pass_auction_bid"]) 
             elif player_id in [p.player_id for p in self.auction_active_bidders]: 
-                actions.append("tool_wait") 
+                actions.append("tool_wait")
+                
+        elif self.pending_decision_type == "action_card_draw":
+            if self.pending_decision_context.get("player_id") == player_id:
+                # Player is waiting for card draw processing
+                actions.append("tool_wait")
+                self.log_event(f"🎴 [CARD WAIT] {player.name} waiting for {self.pending_decision_context.get('square_name', 'action')} card draw", "debug_async")
+            else:
+                self._clear_pending_decision() 
 
         # --- General Turn Actions (if no specific decision is pending) ---
         if not actions and self.pending_decision_type is None: 
@@ -1097,6 +1166,22 @@ class GameControllerV2:
                                 self._handle_go_to_jail_landing(player)
                                 # Return jail options immediately - player is now in jail, turn should end
                                 return self.get_available_actions(player_id)
+                                
+                            elif isinstance(new_square, ActionSquare):
+                                # 🎴 CHANCE/COMMUNITY CHEST: Need to draw card - handled by async processing
+                                self.log_event(f"🎴 [CARD DRAW] {player.name} landed on {new_square.name} - card will be drawn", "game_log_event")
+                                
+                                # 🎯 CRITICAL FIX: Set pending decision to block player actions until card is processed
+                                self._set_pending_decision("action_card_draw", {
+                                    "player_id": player_id, 
+                                    "square_id": new_position, 
+                                    "square_name": new_square.name,
+                                    "square_type": new_square.square_type.value
+                                })
+                                
+                                # Mark that async processing is needed
+                                self.dice_roll_outcome_processed = False
+                                self.log_event(f"🎴 [ASYNC REQUIRED] Card draw requires async processing for {player.name} on {new_square.name}", "debug_async")
                                 
                             elif isinstance(new_square, PurchasableSquare):
                                 if new_square.owner_id is None:

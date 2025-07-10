@@ -61,7 +61,7 @@ class BaseAgent(ABC):
 
 class OpenAIAgent(BaseAgent):
     @taudit_verifier
-    def __init__(self, agent_uid: str, player_id: int, name: str, model_name: str = "gpt-4o-mini", api_key: str = None):
+    def __init__(self, agent_uid: str, player_id: int, name: str, personality: str = "", model_name: str = "gpt-4o-mini", api_key: str = None):
         super().__init__(player_id, name)
 
         load_dotenv()
@@ -76,6 +76,7 @@ class OpenAIAgent(BaseAgent):
         self.client = openai.OpenAI(api_key=self.api_key)
 
         self.agent_uid = agent_uid
+        self.personality = personality
 
         self.model_name = model_name
         self.last_prompt: str = ""
@@ -101,6 +102,12 @@ class OpenAIAgent(BaseAgent):
         # Introduction and Goal
         prompt = f"You are an AI player named {self.name} (Player ID: {self.player_id}) in a game of Monopoly.\n"
         prompt += "Your primary goal is to maximize your wealth and bankrupt other players. Make strategic decisions to achieve this.\n"
+        
+        # Add personality if available
+        if self.personality:
+            prompt += f"\n--- Your Personality & Playing Style ---\n"
+            prompt += f"{self.personality}\n"
+            prompt += "Always stay true to your personality while making strategic decisions.\n"
 
         # Current Player's Status
         prompt += "\n--- My Current Status ---\n"
@@ -244,15 +251,13 @@ class OpenAIAgent(BaseAgent):
         prompt += "\n--- Your Action Required ---\n"
         if game_state.get('current_turn_player_id') != self.player_id and game_state.get('pending_decision_type') not in ["respond_to_trade_offer", "auction_bid", "propose_new_trade_after_rejection"] :
              prompt += "Warning: It appears it is NOT my main turn. I should usually 'wait' unless I have a specific decision like responding to a trade or bidding in an auction.\n"
-        
-        # add strategy note for building houses
+
+        # Building houses guidance (concise)
         if "tool_build_house" in available_actions:
             prompt += "\n🏠 IMPORTANT STRATEGY NOTE: Building houses is one of the most profitable actions in Monopoly!\n"
             prompt += "- Houses significantly increase rent income from properties\n"
             prompt += "- Building houses reduces the housing supply for other players\n"
             prompt += "- You should prioritize building houses when you can afford them\n"
-            prompt += "- RULE: Houses can only be built AFTER you have rolled dice and moved this turn\n"
-            prompt += "- Building houses is done during the property management phase, not before rolling\n"
             
             # 🎯 ADD CRITICAL BUILDING RULES
             prompt += "\n🚨 CRITICAL BUILDING RULES - READ CAREFULLY:\n"
@@ -265,12 +270,10 @@ class OpenAIAgent(BaseAgent):
             prompt += "   - You cannot build a 3rd house until all have 2 houses, etc.\n"
             prompt += "3. 💰 MONEY REQUIREMENT: You need enough money to pay the house price\n"
             prompt += "4. 🚫 NO MORTGAGED PROPERTIES: All properties in the color group must be unmortgaged\n"
-            prompt += "5. 🎯 TIMING: Building can only happen in the post-roll phase (after you've rolled dice and moved)\n\n"
             
             prompt += "💡 BUILDING STRATEGY PRIORITY:\n"
             prompt += "- If tool_build_house is available, it means you CAN build (all requirements met)\n"
             prompt += "- Building houses should be your #1 priority when available\n"
-            prompt += "- Houses dramatically increase rent and help you win\n"
             prompt += "- If you can't build houses, focus on completing color groups through trading\n\n"
         
         # 🎯 CONDITIONAL: add strategy note for trading (only in later game stages)
@@ -288,18 +291,9 @@ class OpenAIAgent(BaseAgent):
         
         if "tool_propose_trade" in available_actions:
             if is_later_stage:
-                prompt += "\n🤝 MONOPOLY STRATEGY: TRADING FOR COLOR GROUP MONOPOLIES!\n"
-                prompt += "=== WHY TRADING BECOMES IMPORTANT ===\n"
-                prompt += "- You CANNOT build houses without owning ALL properties in a color group\n"
-                prompt += "- Complete color groups allow you to build houses and charge monopoly rent\n"
-                prompt += "- Monopoly rent is 2x base rent (without houses) and much higher with houses\n"
-                prompt += "- Trading is often the ONLY way to complete color groups\n"
-                prompt += "- 🎯 KEY INSIGHT: If you landed on your own property but can't build houses, you need more properties in that color group!\n\n"
+                prompt += "\n🤝 TRADING FOCUS: Complete color groups to build houses and charge monopoly rent.\n"
             else:
-                prompt += "\n🏠 EARLY GAME FOCUS: PROPERTY ACQUISITION\n"
-                prompt += "- Early game priority: Buy unowned properties when you land on them\n"
-                prompt += "- Trading becomes more valuable once players own multiple properties\n"
-                prompt += "- Focus on cash flow and property collection first\n\n"
+                prompt += "\n💰 EARLY GAME: Focus on buying unowned properties first. Trade when beneficial.\n"
             
             # analyze current color group situation
             color_group_analysis = {}
@@ -321,11 +315,10 @@ class OpenAIAgent(BaseAgent):
                 missing_props = [sq for sq in total_props_in_group if sq['id'] not in owned_ids]
                 color_group_analysis[color_group]['missing'] = missing_props
             
-            # generate specific trading suggestions (only in later stages)
+            # Trading analysis (concise)
             if color_group_analysis and is_later_stage:
-                prompt += "=== YOUR COLOR GROUP ANALYSIS ===\n"
-                prompt += "🎯 REMEMBER: You need COMPLETE color groups to build houses and charge monopoly rent!\n"
-                trade_opportunities = []
+                prompt += "\n--- Color Group Status ---\n"
+                trade_targets = []
                 
                 for color_group, analysis in color_group_analysis.items():
                     owned_count = len(analysis['owned'])
@@ -335,111 +328,48 @@ class OpenAIAgent(BaseAgent):
                     prompt += f"• {color_group}: You own {owned_count}/{total_count} properties"
                     
                     if missing_count == 0:
-                        prompt += " ✅ COMPLETE MONOPOLY - BUILD HOUSES NOW!\n"
+                        prompt += f"• {color_group}: COMPLETE - Build houses!\n"
                     elif missing_count == 1:
                         missing_prop = analysis['missing'][0]
                         owner_id = missing_prop.get('owner_id')
                         if owner_id is not None and owner_id != game_state.get('my_player_id'):
-                            owner_name = "Unknown Player"
-                            for p_info in game_state.get('other_players', []):
-                                if p_info['player_id'] == owner_id:
-                                    owner_name = p_info['name']
-                                    break
-                            prompt += f" ⚠️ MISSING 1: {missing_prop['name']} (owned by {owner_name})\n"
-                            prompt += f"   🎯 HIGH PRIORITY: Trade with P{owner_id} ({owner_name}) to complete this monopoly!\n"
-                            trade_opportunities.append({
-                                'target_player': owner_id,
-                                'target_name': owner_name,
-                                'needed_property': missing_prop,
-                                'color_group': color_group,
-                                'priority': 'HIGH'
-                            })
-                        else:
-                            prompt += f" ⚠️ MISSING 1: {missing_prop['name']} (unowned)\n"
-                            prompt += f"   💰 Consider buying when you land on it!\n"
+                            owner_name = next((p['name'] for p in game_state.get('other_players', []) if p['player_id'] == owner_id), "Unknown")
+                            prompt += f"• {color_group}: Need {missing_prop['name']} from P{owner_id} ({owner_name})\n"
+                            trade_targets.append(f"P{owner_id} for {missing_prop['name']}")
                     else:
-                        prompt += f" ❌ MISSING {missing_count} properties\n"
-                        for missing_prop in analysis['missing']:
-                            owner_id = missing_prop.get('owner_id')
-                            if owner_id is not None and owner_id != game_state.get('my_player_id'):
-                                owner_name = "Unknown Player"
-                                for p_info in game_state.get('other_players', []):
-                                    if p_info['player_id'] == owner_id:
-                                        owner_name = p_info['name']
-                                        break
-                                prompt += f"     - {missing_prop['name']} (owned by {owner_name})\n"
-            
-                if trade_opportunities:
-                    prompt += "\n🎯 IMMEDIATE TRADE OPPORTUNITIES:\n"
-                    for opp in trade_opportunities:
-                        prompt += f"• Target P{opp['target_player']} ({opp['target_name']}) for {opp['needed_property']['name']} to complete {opp['color_group']} monopoly\n"
-                        prompt += f"  Consider offering: money, other properties, or favorable terms\n"
-                    
-                    prompt += "\n💡 TRADE STRATEGY TIPS:\n"
-                    prompt += "- Offer properties that help THEM complete a color group too (win-win)\n"
-                    prompt += "- Add money to make the deal more attractive\n"
-                    prompt += "- Be generous - completing a monopoly is worth significant money\n"
-                    prompt += "- Include a persuasive message explaining mutual benefits\n"
-                    prompt += "- Don't be afraid to overpay - monopoly rent will recover the cost quickly\n"
-        
-        # analyze other players' needs for properties
-        prompt += "\n🤝 REVERSE ANALYSIS: What other players might want from you:\n"
-        for other_player in game_state.get('other_players', []):
-            if other_player.get('is_bankrupt', False):
-                continue
-            player_id = other_player['player_id']
-            player_name = other_player['name']
-            
-            # analyze their color group completion status
-            other_properties = other_player.get('properties_owned', [])
-            if other_properties:
-                prompt += f"• P{player_id} ({player_name}): {len(other_properties)} properties\n"
+                        prompt += f"• {color_group}: Need {missing_count} more properties\n"
                 
-                # Group their properties by color group
+                if trade_targets:
+                    prompt += f"Priority trades: {', '.join(trade_targets)}\n"
+        
+        # Other players analysis (simplified)
+        if is_later_stage:
+            monopoly_threats = []
+            for other_player in game_state.get('other_players', []):
+                if other_player.get('is_bankrupt', False):
+                    continue
+                player_name = other_player['name']
+                other_properties = other_player.get('properties_owned', [])
+                
+                # Check for near-complete monopolies
                 other_color_groups = {}
                 for prop in other_properties:
                     color_group = prop.get('color_group')
                     if color_group and color_group != 'N/A':
-                        if color_group not in other_color_groups:
-                            other_color_groups[color_group] = []
-                        other_color_groups[color_group].append(prop)
+                        other_color_groups[color_group] = other_color_groups.get(color_group, 0) + 1
                 
-                if other_color_groups:
-                    prompt += f"  Color groups they're working on:\n"
-                    for color_group, props in other_color_groups.items():
-                        # Count total properties in this color group from board
-                        total_in_group = len([sq for sq in game_state.get('board_squares', []) 
-                                            if sq.get('color_group') == color_group and sq.get('type') == 'PROPERTY'])
-                        owned_count = len(props)
-                        if owned_count > 0:
-                            if owned_count == total_in_group:
-                                prompt += f"    - {color_group}: COMPLETE MONOPOLY ({owned_count}/{total_in_group})\n"
-                            else:
-                                prompt += f"    - {color_group}: {owned_count}/{total_in_group} properties\n"
-                                # Show which properties they need
-                                missing = total_in_group - owned_count
-                                if missing == 1:
-                                    prompt += f"      → They need 1 more property to complete this group!\n"
-                                    prompt += f"      → Consider offering properties in {color_group} group\n"
-                else:
-                    prompt += f"  No complete color groups yet\n"
-            else:
-                prompt += f"• P{player_id} ({player_name}): No properties\n"
+                for color_group, count in other_color_groups.items():
+                    total_in_group = len([sq for sq in game_state.get('board_squares', []) 
+                                        if sq.get('color_group') == color_group and sq.get('type') == 'PROPERTY'])
+                    if count == total_in_group:
+                        monopoly_threats.append(f"{player_name} has {color_group} monopoly")
+                    elif count == total_in_group - 1:
+                        monopoly_threats.append(f"{player_name} needs 1 more for {color_group}")
+            
+            if monopoly_threats:
+                prompt += f"\n--- Threats: {', '.join(monopoly_threats)}\n"
         
-        # 🎯 Conditional trading advice based on game stage
-        if is_later_stage:
-            prompt += "\n🚨 WHEN TO PROPOSE TRADES (LATER GAME):\n"
-            prompt += "- ANYTIME you can complete a color group (even if expensive)\n"
-            prompt += "- When you land on your own property but can't build (need complete group)\n"
-            prompt += "- When other players land on properties you need\n"
-            prompt += "- During your property management phase (after rolling dice)\n"
-            prompt += "- Be strategic! Trading becomes crucial for color group completion\n\n"
-        else:
-            prompt += "\n💰 EARLY GAME TRADE CONSIDERATIONS:\n"
-            prompt += "- Only trade if it clearly benefits your position\n"
-            prompt += "- Focus on buying unowned properties first\n"
-            prompt += "- Trading is less urgent until players have established property bases\n"
-            prompt += "- Conserve cash for property purchases\n\n"
+
         
         current_pending_decision = game_state.get('pending_decision_type', 'None')
         prompt += f"Current pending decision: {current_pending_decision}\n"
@@ -509,7 +439,7 @@ class OpenAIAgent(BaseAgent):
                 elif decision_context.get("roll_failed"): 
                      prompt += f"Your last roll to get out of jail ({decision_context.get('last_roll_dice')}) failed. You have {3 - decision_context.get('jail_turns_attempted_this_incarceration',0)} roll attempts left this incarceration.\n"
 
-        prompt += f"Dice roll outcome processed by game logic: {game_state.get('dice_roll_outcome_processed')}\n"
+
         
         prompt += "\nAvailable actions for you now are:\n"
         for i, action_name in enumerate(available_actions):
@@ -588,41 +518,29 @@ class OpenAIAgent(BaseAgent):
         prompt += "\nINSTRUCTIONS FOR YOUR RESPONSE:\n"
         prompt += "You must respond with a single JSON object containing your action and thoughts.\n"
         prompt += "The JSON object MUST have these keys:\n"
-        prompt += "1. 'thoughts': A string containing your step-by-step thinking process and strategy\n"
-        prompt += "2. 'tool_name': The exact name of the chosen action from the available actions list\n"
+        prompt += "1. 'thoughts': Your reasoning process"
+        if self.personality:
+            prompt += " - ALWAYS consider how your personality influences this decision"
+        prompt += "\n2. 'tool_name': The exact name of the chosen action from the available actions list\n"
         prompt += "3. 'parameters': A JSON object containing the action parameters (use {} if no parameters needed)\n"        
-        # 🎯 Add error handling and failure recovery guidance
-        prompt += "\n🚨 CRITICAL ERROR HANDLING AND STRATEGY ADJUSTMENT:\n"
-        prompt += "If your previous action FAILED (you see error messages), you MUST:\n"
-        prompt += "1. READ the error message carefully for specific reasons (e.g., 'You don't own property X')\n"
-        prompt += "2. ADJUST your strategy based on the error:\n"
-        prompt += "   • Property ownership errors → Check actual property ownership before trading\n"
-        prompt += "   • Money errors → Reduce money amounts or offer different items\n"
-        prompt += "   • Invalid recipient → Choose a different player who's not bankrupt\n"
-        prompt += "3. NEVER repeat the exact same failed action with identical parameters\n"
-        prompt += "4. If multiple trade attempts fail, consider tool_end_trade_negotiation\n"
-        prompt += "5. For other repeated failures, try tool_end_turn to move forward\n"
-        prompt += "6. LEARN from error messages - they contain specific guidance to fix your approach\n\n"
+        # Error handling
+        prompt += "\n🚨 If previous actions failed: Read error messages and adjust parameters. Don't repeat failed actions.\n"
         
         prompt += "\nExamples:\n"
-        prompt += "For 'tool_propose_trade' with thoughts and message:\n"
-        prompt += '{"thoughts": "I want Baltic Avenue to complete my brown set. Maybe Player B will accept this offer if I explain my reasoning.", "tool_name": "tool_propose_trade", "parameters": {"recipient_id": 1, "offered_property_ids": [1], "offered_money": 50, "requested_property_ids": [3], "message": "Baltic would complete my set! How about this deal?"}}\n'
-        prompt += "\nFor 'tool_build_house' with thoughts:\n"
-        prompt += '{"thoughts": "I own the complete color group and have enough money. Building houses will increase rent significantly!", "tool_name": "tool_build_house", "parameters": {"property_id": 9}}\n'
-        prompt += "\nFor 'tool_end_turn' with thoughts:\n"
-        prompt += '{"thoughts": "I have completed my property management for this turn. Time to end my turn and let the next player go.", "tool_name": "tool_end_turn", "parameters": {}}\n'
+        if self.personality:
+            prompt += '{"thoughts": "Based on my personality, I should [decision]. This aligns with my playing style of [behavior].", "tool_name": "tool_action", "parameters": {...}}\n'
+        else:
+            prompt += '{"thoughts": "My reasoning for this action...", "tool_name": "tool_action", "parameters": {...}}\n'
         prompt += "\nRespond ONLY with the JSON object. Ensure it contains all three required keys and is valid JSON."
 
         self.last_prompt = prompt
 
-        # Use the detailed prompt we built above instead of simplified version
+        # Concise system prompt
         system_prompt = (
-            "You are an expert Monopoly AI player. Your goal is to win by bankrupting all other players while avoiding bankruptcy yourself. "
-            "Follow the detailed game state analysis and tool parameter specifications provided. "
-            "MONOPOLY RULE SEQUENCE: 1) Dice roll (AUTOMATIC), 2) Move to new position, 3) Handle landing effects, 4) Then optional property management. "
-            "IMPORTANT: Dice rolling is AUTOMATIC - the game handles it for you. Your decisions come AFTER dice are rolled and you've moved. "
-            "You MUST respond with a valid JSON object containing 'tool_name' and 'parameters' keys. "
-            "Use EXACT parameter names as specified in the tool descriptions."
+            "You are an expert Monopoly AI player. Your goal: win by bankrupting opponents while avoiding bankruptcy. "
+            "Respond with valid JSON: {'thoughts': 'reasoning', 'tool_name': 'action', 'parameters': {}}. "
+            "Building houses and completing monopolies are highest priorities. "
+            "Use exact property IDs from the provided information - never guess."
         )
         
         messages = [

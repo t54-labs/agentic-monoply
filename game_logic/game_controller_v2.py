@@ -150,6 +150,23 @@ class GameControllerV2:
         # Always add to game log first - this is the most important part
         self.game_log.append(formatted_message)
         
+        # 🎯 CRITICAL FIX: Print important game events to console for debugging
+        # Only print game events that are relevant for gameplay flow
+        if event_type in ["game_log_event", "debug_dice", "error_log", "warning_log"]:
+            # Use colored output for better visibility
+            color_prefix = ""
+            if event_type == "game_log_event":
+                color_prefix = "\033[96m"  # Cyan for game events
+            elif event_type == "debug_dice": 
+                color_prefix = "\033[93m"  # Yellow for dice events
+            elif event_type == "error_log":
+                color_prefix = "\033[91m"  # Red for errors
+            elif event_type == "warning_log":
+                color_prefix = "\033[93m"  # Yellow for warnings
+            
+            reset_color = "\033[0m"
+            print(f"{color_prefix}[{event_type.upper()}] {formatted_message}{reset_color}")
+        
         # Try to send via WebSocket, but don't let failures break logging
         try:
             if hasattr(self, '_threaded_game_instance') and self._threaded_game_instance:

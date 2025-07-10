@@ -172,7 +172,8 @@ class AgentManager:
                             agent_instance = OpenAIAgent(
                                 agent_uid=agent_dict['agent_uid'],
                                 player_id=-1,  # Will be set when joining a game
-                                name=agent_dict['name']
+                                name=agent_dict['name'],
+                                personality=agent_dict.get('personality_prompt', '')
                             )
                             self.agent_instances[agent_uid] = agent_instance
                             new_agents_count += 1
@@ -969,7 +970,12 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
             else:
                 print(f"{Fore.RED}[Agent Error] Could not find agent instance for {agent_data['agent_uid']}{Style.RESET_ALL}")
                 # Fallback: create new agent instance
-                agent_instance = OpenAIAgent(player_id=i, name=agent_data['name'], agent_uid=agent_data['agent_uid'])
+                agent_instance = OpenAIAgent(
+                    player_id=i, 
+                    name=agent_data['name'], 
+                    agent_uid=agent_data['agent_uid'],
+                    personality=agent_data.get('personality_prompt', '')
+                )
                 agents.append(agent_instance)
         
         await gc.send_event_to_frontend({"type": "init_log", "message": f"Initialized {len(agents)} persistent agents for G:{game_uid}."})

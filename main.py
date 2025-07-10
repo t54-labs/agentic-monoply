@@ -432,8 +432,8 @@ def run_game_cli_simulation(interactive_mode=False, game_uid_for_server: Optiona
             elif gc.pending_decision_type == "asset_liquidation_for_debt":
                 if chosen_tool_name == "tool_confirm_asset_liquidation_actions_done" or current_acting_player.money >=0:
                     player_turn_segment_active = False 
-            elif gc.pending_decision_type == "handle_received_mortgaged_property":
-                if gc.pending_decision_type != "handle_received_mortgaged_property": 
+            elif gc.pending_decision_type == "handle_received_mortgaged_properties":
+                if gc.pending_decision_type != "handle_received_mortgaged_properties": 
                     player_turn_segment_active = False
             elif gc.auction_in_progress and gc.pending_decision_type == "auction_bid": 
                 player_turn_segment_active = False 

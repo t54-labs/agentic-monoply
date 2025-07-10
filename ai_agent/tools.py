@@ -749,7 +749,7 @@ def tool_pay_mortgage_interest_fee(gc: Any, player_id: int, property_id: Optiona
     try:
         target_property_id = property_id
         if target_property_id is None:
-            if gc.pending_decision_type == "handle_received_mortgaged_property" and gc.pending_decision_context.get("property_id_to_handle"):
+            if gc.pending_decision_type == "handle_received_mortgaged_properties" and gc.pending_decision_context.get("property_id_to_handle"):
                 target_property_id = gc.pending_decision_context["property_id_to_handle"]
             else: return {"status": "failure", "message": "Property ID missing or not in handle_mortgaged_property phase for 10% fee."}
         
@@ -767,7 +767,7 @@ def tool_unmortgage_property_immediately(gc: Any, player_id: int, property_id: O
     try:
         target_property_id = property_id
         if target_property_id is None:
-            if gc.pending_decision_type == "handle_received_mortgaged_property" and gc.pending_decision_context.get("property_id_to_handle"):
+            if gc.pending_decision_type == "handle_received_mortgaged_properties" and gc.pending_decision_context.get("property_id_to_handle"):
                 target_property_id = gc.pending_decision_context["property_id_to_handle"]
             else: return {"status": "failure", "message": "Property ID missing or not in handle_mortgaged_property phase for unmortgage."}
 

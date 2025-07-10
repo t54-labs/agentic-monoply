@@ -233,9 +233,156 @@ class GameControllerV2:
         self.state_manager.resolve_current_action_segment()
 
     def _check_for_game_over_condition(self) -> None:
-        """Delegate to StateManager"""
-        self.state_manager.check_for_game_over_condition()
+        """Check if game should end due to game over conditions (preserved from original)"""
+        non_bankrupt_players = [p for p in self.players if not p.is_bankrupt]
+        if len(non_bankrupt_players) <= 1:
+            self.game_over = True
+            self.log_event(f"Game Over: Only {len(non_bankrupt_players)} non-bankrupt players remaining", "game_over_event")
+    
+    def _handle_received_mortgaged_property_action(self, player_id: int, property_id: int, action: str) -> bool:
+        """
+        Handle player action on a mortgaged property received from trade.
         
+        Args:
+            player_id: ID of the player handling the property
+            property_id: ID of the mortgaged property
+            action: "pay_fee" or "unmortgage_now"
+            
+        Returns:
+            bool: True if action completed successfully, False otherwise
+        """
+        if not (0 <= player_id < len(self.players)):
+            self.log_event(f"Invalid player_id: {player_id}", "error_mortgage")
+            return False
+            
+        player = self.players[player_id]
+        
+        # Get the property
+        property_square = self.board.get_square(property_id)
+        if not hasattr(property_square, 'is_mortgaged'):
+            self.log_event(f"Property {property_id} is not mortgageable", "error_mortgage")
+            return False
+            
+        # Verify player owns this property
+        if property_square.owner_id != player_id:
+            self.log_event(f"{player.name} doesn't own property {property_square.name}", "error_mortgage")
+            return False
+            
+        # Verify property is mortgaged
+        if not property_square.is_mortgaged:
+            self.log_event(f"Property {property_square.name} is not mortgaged", "error_mortgage")
+            return False
+            
+        # Find this property in player's pending list
+        property_task = None
+        for i, task in enumerate(player.pending_mortgaged_properties_to_handle):
+            if task.get("property_id") == property_id:
+                property_task = task
+                break
+                
+        if not property_task:
+            self.log_event(f"Property {property_id} not found in {player.name}'s pending mortgage list", "error_mortgage")
+            return False
+        
+        mortgage_value = property_square.price // 2
+        
+        if action == "pay_fee":
+            # Pay 10% fee to keep property mortgaged
+            fee_amount = int(mortgage_value * 0.1)
+            
+            if player.money < fee_amount:
+                self.log_event(f"{player.name} cannot afford ${fee_amount} mortgage fee for {property_square.name}", "error_mortgage")
+                return False
+                
+            # Execute payment (synchronous version)
+            try:
+                import asyncio
+                loop = asyncio.get_running_loop()
+                payment_success = asyncio.run_coroutine_threadsafe(
+                    self.payment_manager.create_tpay_payment_player_to_system(
+                        payer=player,
+                        amount=float(fee_amount),
+                        reason=f"mortgage interest fee for {property_square.name}",
+                        event_description=f"{player.name} paid mortgage fee for {property_square.name}"
+                    ), loop
+                ).result()
+            except RuntimeError:
+                payment_success = asyncio.run(
+                    self.payment_manager.create_tpay_payment_player_to_system(
+                        payer=player,
+                        amount=float(fee_amount),
+                        reason=f"mortgage interest fee for {property_square.name}",
+                        event_description=f"{player.name} paid mortgage fee for {property_square.name}"
+                    )
+                )
+                
+            if payment_success:
+                self.log_event(f"{player.name} paid ${fee_amount} mortgage fee for {property_square.name}", "success_mortgage")
+            else:
+                self.log_event(f"Payment failed for mortgage fee on {property_square.name}", "error_mortgage")
+                return False
+                
+        elif action == "unmortgage_now":
+            # Pay 110% of mortgage value to unmortgage immediately
+            unmortgage_cost = int(mortgage_value * 1.1)
+            
+            if player.money < unmortgage_cost:
+                self.log_event(f"{player.name} cannot afford ${unmortgage_cost} to unmortgage {property_square.name}", "error_mortgage")
+                return False
+                
+            # Execute payment (synchronous version)
+            try:
+                import asyncio
+                loop = asyncio.get_running_loop()
+                payment_success = asyncio.run_coroutine_threadsafe(
+                    self.payment_manager.create_tpay_payment_player_to_system(
+                        payer=player,
+                        amount=float(unmortgage_cost),
+                        reason=f"unmortgage payment for {property_square.name}",
+                        event_description=f"{player.name} unmortgaged {property_square.name}"
+                    ), loop
+                ).result()
+            except RuntimeError:
+                payment_success = asyncio.run(
+                    self.payment_manager.create_tpay_payment_player_to_system(
+                        payer=player,
+                        amount=float(unmortgage_cost),
+                        reason=f"unmortgage payment for {property_square.name}",
+                        event_description=f"{player.name} unmortgaged {property_square.name}"
+                    )
+                )
+                
+            if payment_success:
+                # Unmortgage the property
+                property_square.is_mortgaged = False
+                self.log_event(f"{player.name} unmortgaged {property_square.name} for ${unmortgage_cost}", "success_mortgage")
+            else:
+                self.log_event(f"Payment failed for unmortgaging {property_square.name}", "error_mortgage")
+                return False
+        else:
+            self.log_event(f"Invalid action '{action}' for mortgaged property handling", "error_mortgage")
+            return False
+        
+        # Remove this property from pending list
+        player.pending_mortgaged_properties_to_handle.remove(property_task)
+        self.log_event(f"Removed {property_square.name} from {player.name}'s pending mortgage list", "debug_mortgage")
+        
+        # Check if all mortgaged properties are handled
+        if not player.pending_mortgaged_properties_to_handle:
+            self.log_event(f"{player.name} has handled all mortgaged properties, clearing pending decision", "debug_mortgage")
+            self._resolve_current_action_segment()
+        else:
+            # Set context for the next property to handle
+            next_property = player.pending_mortgaged_properties_to_handle[0]
+            self._set_pending_decision("handle_received_mortgaged_properties", {
+                "player_id": player_id,
+                "property_id_to_handle": next_property["property_id"],
+                "mortgaged_properties": player.pending_mortgaged_properties_to_handle.copy()
+            })
+            self.log_event(f"{player.name} still has {len(player.pending_mortgaged_properties_to_handle)} mortgaged properties to handle", "debug_mortgage")
+        
+        return True
+
     def next_turn(self) -> None:
         """Delegate to StateManager"""
         self.state_manager.next_turn()
@@ -1101,6 +1248,19 @@ class GameControllerV2:
                 # Player is waiting for card draw processing
                 actions.append("tool_wait")
                 self.log_event(f"🎴 [CARD WAIT] {player.name} waiting for {self.pending_decision_context.get('square_name', 'action')} card draw", "debug_async")
+            else:
+                self._clear_pending_decision()
+                
+        elif self.pending_decision_type == "handle_received_mortgaged_properties":
+            if self.pending_decision_context.get("player_id") == player_id:
+                # Player needs to handle mortgaged properties received from trades
+                mortgaged_properties = self.pending_decision_context.get("mortgaged_properties", [])
+                self.log_event(f"💰 [MORTGAGE DECISION] {player.name} must handle {len(mortgaged_properties)} mortgaged properties", "debug_mortgage")
+                
+                # For each mortgaged property, player can either pay 10% fee or unmortgage immediately
+                actions.extend(["tool_pay_mortgage_interest_fee", "tool_unmortgage_property_immediately"])
+                
+                self.log_event(f"💰 [MORTGAGE OPTIONS] {player.name} can pay 10% fee or unmortgage immediately", "debug_mortgage")
             else:
                 self._clear_pending_decision() 
 

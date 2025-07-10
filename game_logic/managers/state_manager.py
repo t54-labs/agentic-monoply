@@ -116,10 +116,13 @@ class StateManager(BaseManager):
             return
             
         # Set pending decision for handling mortgaged properties
+        # Start with the first property that needs handling
+        first_property = player.pending_mortgaged_properties_to_handle[0]
         self.set_pending_decision(
             "handle_received_mortgaged_properties",
             context={
                 "player_id": player.player_id,
+                "property_id_to_handle": first_property["property_id"],
                 "mortgaged_properties": player.pending_mortgaged_properties_to_handle.copy()
             },
             outcome_processed=False

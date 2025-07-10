@@ -1973,9 +1973,9 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                     if chosen_tool_name == "tool_confirm_asset_liquidation_actions_done" or current_acting_player.money >=0:
                          player_turn_segment_active = False 
                 
-                elif gc.pending_decision_type == "handle_received_mortgaged_property":
+                elif gc.pending_decision_type == "handle_received_mortgaged_properties":
                     # If all mortgaged props handled, GC clears pending_decision & sets dice_roll_outcome_processed=True.
-                    if gc.pending_decision_type != "handle_received_mortgaged_property": 
+                    if gc.pending_decision_type != "handle_received_mortgaged_properties": 
                         player_turn_segment_active = False
                 
                 elif gc.auction_in_progress and gc.pending_decision_type == "auction_bid": 

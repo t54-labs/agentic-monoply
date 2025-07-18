@@ -108,6 +108,322 @@ def reset_agent_game_balance(agent_id: str,
         print(f"[Utils] Error resetting balance for agent {agent_id}: {e}")
         return False
 
+async def _wait_for_payment_completion(payment_result: dict, timeout_seconds: int = 60) -> bool:
+    """
+    Wait for a TPay payment to complete.
+    
+    Args:
+        payment_result: The payment result from create_payment
+        timeout_seconds: Maximum time to wait for completion
+        
+    Returns:
+        bool: True if payment completed successfully, False otherwise
+    """
+    if not payment_result or not payment_result.get('id'):
+        print(f"[Utils] No payment ID to wait for")
+        return False
+        
+    payment_id = payment_result['id']
+    print(f"[Utils] Waiting for payment {payment_id} to complete...")
+    
+    import time
+    import asyncio
+    import tpay
+    
+    # Create TPay agent instance for status checking
+    tpay_agent = tpay.agent.AsyncTPayAgent()
+    
+    start_time = time.time()
+    poll_interval = 2.0  # poll every 2 seconds
+    last_status = "unknown"
+    
+    while time.time() - start_time < timeout_seconds:
+        try:
+            # async query payment status
+            status_result = await tpay_agent.get_payment_status(payment_id)
+            
+            if status_result and 'status' in status_result:
+                status = status_result['status']
+                if status != last_status:
+                    print(f"[Utils] Payment {payment_id} status changed: {last_status} -> {status}")
+                    last_status = status
+                
+                if status in ['success', 'completed']:
+                    print(f"[Utils] ✅ Payment {payment_id} completed successfully (status: {status})")
+                    return True
+                elif status in ['failed', 'rejected', 'cancelled']:
+                    print(f"[Utils] ❌ Payment {payment_id} failed (status: {status})")
+                    return False
+                elif status in ['pending', 'processing', 'initiated', 'created', 'submitted', 'approved', 'pending_confirmation']:
+                    # async wait - approved means approved for blockchain submission, still in progress
+                    # pending_confirmation means waiting for blockchain confirmation
+                    await asyncio.sleep(poll_interval)
+                    continue
+                else:
+                    print(f"[Utils] ❓ Unknown payment status: {status}")
+                    print(f"[Utils] 🔍 Please check if '{status}' should be treated as success, failure, or in-progress")
+                    return False
+            else:
+                print(f"[Utils] ⚠️ Failed to get payment status for {payment_id}")
+                await asyncio.sleep(poll_interval)
+                
+        except Exception as e:
+            print(f"[Utils] 💥 Error checking payment status: {e}")
+            await asyncio.sleep(poll_interval)
+    
+    print(f"[Utils] ⏰ Payment {payment_id} TIMED OUT after {timeout_seconds}s. Last status: {last_status}")
+    print(f"[Utils] 🚨 CRITICAL: Payment may have succeeded but status check failed. Manual verification needed.")
+    return False
+
+async def balance_agent_game_balance_via_payments(agent_id: str, 
+                                                treasury_agent_id: str,
+                                                target_balance: float = GAME_INITIAL_BALANCE,
+                                                game_token: str = GAME_TOKEN_SYMBOL,
+                                                game_uid: str = "unknown",
+                                                agent_name: str = "Unknown Agent") -> dict:
+    """
+    Balance an agent's game token balance to target amount via real TPay payments
+    
+    Args:
+        agent_id: TPay agent ID of the player
+        treasury_agent_id: TPay agent ID of the treasury
+        target_balance: Target balance to achieve (default 1500)
+        game_token: Game token symbol
+        game_uid: Game unique identifier
+        agent_name: Human-readable agent name
+        
+    Returns:
+        Dict with status, action taken, amounts, and details
+    """
+    try:
+        import tpay
+        import datetime
+        
+        # Query current balance
+        current_balance = tpay.get_agent_asset_balance(
+            agent_id=agent_id, 
+            network="solana", 
+            asset=game_token
+        )
+        
+        if current_balance is None:
+            return {
+                "success": False,
+                "error": f"Failed to query balance for agent {agent_id}",
+                "agent_id": agent_id,
+                "agent_name": agent_name
+            }
+        
+        balance_difference = current_balance - target_balance
+        
+        # Create TPay agent instance
+        tpay_agent = tpay.agent.AsyncTPayAgent()
+        
+        if abs(balance_difference) < 0.01:  # Already balanced (within 1 cent)
+            return {
+                "success": True,
+                "action": "no_action_needed",
+                "current_balance": current_balance,
+                "target_balance": target_balance,
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "message": f"{agent_name} already has correct balance ({current_balance})"
+            }
+        
+        elif balance_difference > 0:  # Agent has excess, needs to pay treasury
+            amount_to_pay = balance_difference
+            
+            # Build comprehensive trace context for excess payment
+            trace_context = {
+                "payment_type": "game_initialization_excess_balance",
+                "game_context": {
+                    "game_uid": game_uid,
+                    "initialization_phase": "pre_game_balance_adjustment",
+                    "target_balance": target_balance,
+                    "current_balance": current_balance,
+                    "balance_difference": balance_difference,
+                    "action_required": "excess_payment_to_treasury"
+                },
+                "agent_context": {
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "role": "player_agent",
+                    "balance_status": "excess"
+                },
+                "treasury_context": {
+                    "treasury_agent_id": treasury_agent_id,
+                    "role": "system_treasury",
+                    "purpose": "collect_excess_player_balance"
+                },
+                "transaction": {
+                    "reason": "game_initialization_balance_adjustment",
+                    "description": f"Player {agent_name} paying excess balance to treasury before game start",
+                    "amount": float(amount_to_pay),
+                    "currency": game_token,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "network": "solana"
+                },
+                "regulatory_context": {
+                    "transaction_type": "balance_normalization",
+                    "compliance_note": "Pre-game balance adjustment to ensure fair gameplay",
+                    "audit_trail": f"Agent {agent_id} had {current_balance} {game_token}, required {target_balance}",
+                    "business_logic": "All players must start with equal balance of 1500 AMN tokens"
+                },
+                "operational_metadata": {
+                    "system_component": "game_initialization",
+                    "process_step": "balance_equalization",
+                    "automated": True,
+                    "requires_approval": False
+                }
+            }
+            
+            # Execute payment from agent to treasury
+            payment_result = await tpay_agent.create_payment(
+                agent_id=agent_id,
+                receiving_agent_id=treasury_agent_id,
+                amount=amount_to_pay,
+                currency=game_token,
+                settlement_network="solana",
+                func_stack_hashes=tpay.tools.get_current_stack_function_hashes(),
+                debug_mode=False,
+                trace_context=trace_context
+            )
+            
+            if payment_result:
+                # 🚨 CRITICAL FIX: Wait for payment completion
+                payment_success = await _wait_for_payment_completion(payment_result)
+                
+                if payment_success:
+                    return {
+                        "success": True,
+                        "action": "excess_paid_to_treasury",
+                        "amount_paid": amount_to_pay,
+                        "from_balance": current_balance,
+                        "to_balance": target_balance,
+                        "payment_id": payment_result.get('id'),
+                        "agent_id": agent_id,
+                        "agent_name": agent_name,
+                        "message": f"{agent_name} paid {amount_to_pay} excess to treasury"
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"Payment from {agent_name} to treasury failed to complete",
+                        "amount_attempted": amount_to_pay,
+                        "payment_id": payment_result.get('id'),
+                        "agent_id": agent_id,
+                        "agent_name": agent_name
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Failed to create payment from {agent_name} to treasury",
+                    "amount_attempted": amount_to_pay,
+                    "agent_id": agent_id,
+                    "agent_name": agent_name
+                }
+                
+        else:  # Agent has deficit, treasury needs to pay agent
+            amount_to_receive = -balance_difference
+            
+            # Build comprehensive trace context for deficit payment
+            trace_context = {
+                "payment_type": "game_initialization_deficit_balance",
+                "game_context": {
+                    "game_uid": game_uid,
+                    "initialization_phase": "pre_game_balance_adjustment",
+                    "target_balance": target_balance,
+                    "current_balance": current_balance,
+                    "balance_difference": balance_difference,
+                    "action_required": "deficit_payment_from_treasury"
+                },
+                "agent_context": {
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "role": "player_agent",
+                    "balance_status": "deficit"
+                },
+                "treasury_context": {
+                    "treasury_agent_id": treasury_agent_id,
+                    "role": "system_treasury",
+                    "purpose": "provide_deficit_player_balance"
+                },
+                "transaction": {
+                    "reason": "game_initialization_balance_adjustment",
+                    "description": f"Treasury providing deficit balance to player {agent_name} before game start",
+                    "amount": float(amount_to_receive),
+                    "currency": game_token,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "network": "solana"
+                },
+                "regulatory_context": {
+                    "transaction_type": "balance_normalization",
+                    "compliance_note": "Pre-game balance adjustment to ensure fair gameplay",
+                    "audit_trail": f"Agent {agent_id} had {current_balance} {game_token}, required {target_balance}",
+                    "business_logic": "All players must start with equal balance of 1500 AMN tokens"
+                },
+                "operational_metadata": {
+                    "system_component": "game_initialization",
+                    "process_step": "balance_equalization",
+                    "automated": True,
+                    "requires_approval": False
+                }
+            }
+            
+            # Execute payment from treasury to agent
+            payment_result = await tpay_agent.create_payment(
+                agent_id=treasury_agent_id,
+                receiving_agent_id=agent_id,
+                amount=amount_to_receive,
+                currency=game_token,
+                settlement_network="solana",
+                func_stack_hashes=tpay.tools.get_current_stack_function_hashes(),
+                debug_mode=False,
+                trace_context=trace_context
+            )
+            
+            if payment_result:
+                # 🚨 CRITICAL FIX: Wait for payment completion
+                payment_success = await _wait_for_payment_completion(payment_result)
+                
+                if payment_success:
+                    return {
+                        "success": True,
+                        "action": "deficit_paid_by_treasury",
+                        "amount_received": amount_to_receive,
+                        "from_balance": current_balance,
+                        "to_balance": target_balance,
+                        "payment_id": payment_result.get('id'),
+                        "agent_id": agent_id,
+                        "agent_name": agent_name,
+                        "message": f"Treasury paid {amount_to_receive} deficit to {agent_name}"
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"Payment from treasury to {agent_name} failed to complete",
+                        "amount_attempted": amount_to_receive,
+                        "payment_id": payment_result.get('id'),
+                        "agent_id": agent_id,
+                        "agent_name": agent_name
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Failed to create payment from treasury to {agent_name}",
+                    "amount_attempted": amount_to_receive,
+                    "agent_id": agent_id,
+                    "agent_name": agent_name
+                }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Exception during balance adjustment for agent {agent_id}: {str(e)}",
+            "agent_id": agent_id,
+            "agent_name": agent_name
+        }
+
 def generate_random_agents(count: int = 4) -> List[Dict[str, str]]:
     """
     Generate random agent data using GPT-4o mini

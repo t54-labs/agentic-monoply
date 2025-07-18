@@ -296,25 +296,32 @@ class PropertyManager(BaseManager):
             bool: True if property was purchased successfully, False otherwise
         """
         if not (0 <= player_id < len(self.players)):
-            self.log_event(f"Invalid player_id: {player_id}", "error_property")
+            self.log_event(f"❌ Invalid player_id: {player_id}", "error_property")
             return False
             
         player = self.players[player_id]
         property_square = self.board.get_square(property_id_to_buy)
         
+        self.log_event(f"🏠 [BUY ATTEMPT] {player.name} attempting to buy {property_square.name} (ID: {property_id_to_buy})", "debug_property")
+        self.log_event(f"💰 [BUY PRE-CHECK] Player money: ${player.money}, Property price: ${property_square.price if hasattr(property_square, 'price') else 'N/A'}", "debug_property")
+        
         if not isinstance(property_square, PurchasableSquare):
-            self.log_event(f"Square {property_id_to_buy} is not purchasable", "error_property")
+            self.log_event(f"❌ Square {property_id_to_buy} is not purchasable", "error_property")
             return False
             
         if property_square.owner_id is not None:
-            self.log_event(f"Property {property_square.name} is already owned", "error_property")
+            owner_name = self.players[property_square.owner_id].name if 0 <= property_square.owner_id < len(self.players) else f"Player {property_square.owner_id}"
+            self.log_event(f"❌ Property {property_square.name} is already owned by {owner_name}", "error_property")
             return False
             
         if player.money < property_square.price:
-            self.log_event(f"{player.name} cannot afford ${property_square.price} for {property_square.name}", "error_property")
+            self.log_event(f"❌ {player.name} cannot afford ${property_square.price} for {property_square.name} (has ${player.money})", "error_property")
             return False
             
         # Execute TPay payment for property purchase
+        print(f"🏠 [PROPERTY PURCHASE] {player.name} attempting to buy {property_square.name} for ${property_square.price}")
+        self.log_event(f"💳 [PAYMENT START] Initiating TPay payment: {player.name} -> Treasury ${property_square.price}", "debug_property")
+        
         payment_success = await self.gc.payment_manager.create_tpay_payment_player_to_system(
             payer=player,
             amount=float(property_square.price),
@@ -322,15 +329,22 @@ class PropertyManager(BaseManager):
             event_description=f"{player.name} bought {property_square.name}"
         )
         
+        print(f"🏠 [PAYMENT RESULT] Payment result: {payment_success}")
+        self.log_event(f"💳 [PAYMENT RESULT] Payment success: {payment_success}", "debug_property")
+        
         if payment_success:
             # Complete the purchase
             property_square.owner_id = player_id
             player.add_property_id(property_id_to_buy)
             
-            self.log_event(f"{player.name} successfully bought {property_square.name} for ${property_square.price}", "success_property")
+            print(f"🏠 [PURCHASE COMPLETE] {player.name} successfully purchased {property_square.name}!")
+            self.log_event(f"✅ {player.name} successfully bought {property_square.name} for ${property_square.price}", "success_property")
+            self.log_event(f"🏠 [OWNERSHIP UPDATED] Property {property_square.name} now owned by {player.name} (ID: {player_id})", "debug_property")
             return True
         else:
-            self.log_event(f"Payment failed for buying {property_square.name}", "error_property")
+            print(f"🏠 [PURCHASE FAILED] {player.name} failed to purchase {property_square.name}")
+            self.log_event(f"❌ Payment failed for buying {property_square.name}", "error_property")
+            self.log_event(f"🚨 [PAYMENT FAILURE] Player money after failed payment: ${player.money}", "debug_property")
             return False
     
     def calculate_rent(self, property_square: PurchasableSquare, dice_roll: Optional[int] = None) -> int:

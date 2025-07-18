@@ -18,9 +18,12 @@ class PaymentManager(BaseManager):
         
     def initialize(self) -> None:
         """Initialize TPay agent if not already done"""
+        print(f"🏦 [REAL PAYMENT MANAGER] Initialized - will use real TPay payments")
         if not hasattr(self.gc, 'tpay_agent') or self.gc.tpay_agent is None:
             self.gc.tpay_agent = tpay.agent.AsyncTPayAgent()
             self.log_event("TPay agent initialized by PaymentManager", "debug_payment")
+        else:
+            self.log_event("TPay agent already exists, reusing", "debug_payment")
     
     async def create_tpay_payment_player_to_player(self, payer: Player, recipient: Player, amount: float, reason: str, 
                                                   agent_decision_context: Optional[Dict[str, Any]] = None) -> bool:
@@ -140,7 +143,7 @@ class PaymentManager(BaseManager):
                 currency=utils.GAME_TOKEN_SYMBOL,
                 settlement_network="solana",
                 func_stack_hashes=func_stack_hashes,
-                debug_mode=True,
+                debug_mode=False,
                 trace_context=trace_context
             )
             
@@ -178,6 +181,8 @@ class PaymentManager(BaseManager):
         Returns:
             bool: True if payment was successful, False otherwise
         """
+        print(f"🏦 [REAL PAYMENT MANAGER] Starting TPay payment: {payer.name} -> Treasury ${amount:.2f} ({reason})")
+        self.log_event(f"🏦 [REAL PAYMENT MANAGER] Starting TPay payment: {payer.name} -> Treasury ${amount:.2f} ({reason})", "debug_payment")
         self.log_event(f"Initiating system payment: {payer.name} -> Treasury ${amount} ({reason})", "debug_payment")
         
         # Build payment context matching original GameController format exactly
@@ -261,20 +266,23 @@ class PaymentManager(BaseManager):
                 currency=utils.GAME_TOKEN_SYMBOL,
                 settlement_network="solana",
                 func_stack_hashes=func_stack_hashes,
-                debug_mode=True,
+                debug_mode=False,
                 trace_context=trace_context
             )
             
             if payment_result:
                 self.log_event(f"System payment initiated: {payer.name} -> Treasury ${amount}", "debug_payment")
+                print(f"💳 [PAYMENT CREATED] Payment ID: {payment_result.get('id', 'Unknown')} - Now waiting for completion...")
                 
                 # Wait for payment completion
                 payment_success = await self._wait_for_payment_completion(payment_result)
                 
                 if payment_success:
+                    print(f"✅ [PAYMENT SUCCESS] {payer.name} -> Treasury ${amount} completed successfully!")
                     self.log_event(f"System payment completed: {payer.name} -> Treasury ${amount}", "success_payment")
                     return True
                 else:
+                    print(f"❌ [PAYMENT FAILED] {payer.name} -> Treasury ${amount} failed to complete!")
                     self.log_event(f"System payment failed to complete: {payer.name} -> Treasury ${amount}", "error_payment")
                     return False
             else:
@@ -377,7 +385,7 @@ class PaymentManager(BaseManager):
                 currency=utils.GAME_TOKEN_SYMBOL,
                 settlement_network="solana",
                 func_stack_hashes=func_stack_hashes,
-                debug_mode=True,
+                debug_mode=False,
                 trace_context=trace_context
             )
             
@@ -401,7 +409,7 @@ class PaymentManager(BaseManager):
             self.log_event(f"System payment exception: Treasury -> {recipient.name} ${amount} - {str(e)}", "error_payment")
             return False
     
-    async def _wait_for_payment_completion(self, payment_result: Dict[str, Any], timeout_seconds: int = 30) -> bool:
+    async def _wait_for_payment_completion(self, payment_result: Dict[str, Any], timeout_seconds: int = 120) -> bool:
         """
         Wait for a TPay payment to complete.
         
@@ -414,15 +422,18 @@ class PaymentManager(BaseManager):
         """
         # Use original logic from GameController
         if not payment_result or not payment_result.get('id'):
+            print(f"❌ [PAYMENT ERROR] No payment ID to wait for")
             self.log_event("No payment ID to wait for", "error_payment")
             return False
             
         payment_id = payment_result['id']
+        print(f"⏳ [PAYMENT WAIT] Waiting for payment {payment_id} to complete (max {timeout_seconds}s)...")
         self.log_event(f"Waiting for payment {payment_id} to complete...", "debug_payment")
         
         import time
         start_time = time.time()
-        poll_interval = 5.0  # poll every 5 seconds
+        poll_interval = 3.0  # poll every 3 seconds for faster response
+        last_status = "unknown"
         
         while time.time() - start_time < timeout_seconds:
             try:
@@ -431,30 +442,45 @@ class PaymentManager(BaseManager):
                 
                 if status_result and 'status' in status_result:
                     status = status_result['status']
-                    self.log_event(f"Payment {payment_id} status: {status}", "debug_payment")
+                    if status != last_status:
+                        print(f"🔄 [PAYMENT STATUS] Payment {payment_id} status changed: {last_status} -> {status}")
+                        self.log_event(f"Payment {payment_id} status changed: {last_status} -> {status}", "debug_payment")
+                        last_status = status
                     
-                    if status == 'success':
-                        self.log_event(f"Payment {payment_id} completed successfully", "debug_payment")
+                    if status in ['success', 'completed']:
+                        print(f"✅ [PAYMENT COMPLETE] Payment {payment_id} completed successfully (status: {status})")
+                        self.log_event(f"✅ Payment {payment_id} completed successfully (status: {status})", "success_payment")
                         return True
-                    elif status == 'failed':
-                        self.log_event(f"Payment {payment_id} failed", "error_payment")
+                    elif status in ['failed', 'rejected', 'cancelled']:
+                        print(f"❌ [PAYMENT FAILED] Payment {payment_id} failed (status: {status})")
+                        self.log_event(f"❌ Payment {payment_id} failed (status: {status})", "error_payment")
                         return False
-                    elif status in ['pending', 'processing', 'initiated']:
-                        # async wait
-                        await asyncio.sleep(poll_interval)
+                    elif status in ['pending', 'processing', 'initiated', 'created', 'submitted', 'approved', 'pending_confirmation']:
+                        # async wait - approved means approved for blockchain submission, still in progress
+                        # pending_confirmation means waiting for blockchain confirmation
+                        if status == 'pending_confirmation':
+                            # Use shorter poll interval for blockchain confirmation phase
+                            await asyncio.sleep(2.0)  
+                        else:
+                            await asyncio.sleep(poll_interval)
                         continue
                     else:
-                        self.log_event(f"Unknown payment status: {status}", "error_payment")
+                        print(f"❓ [UNKNOWN STATUS] Payment {payment_id} has unknown status: {status}")
+                        self.log_event(f"❓ Unknown payment status: {status}", "error_payment")
+                        self.log_event(f"🔍 Please check if '{status}' should be treated as success, failure, or in-progress", "error_payment")
                         return False
                 else:
-                    self.log_event(f"Failed to get payment status for {payment_id}", "error_payment")
+                    self.log_event(f"⚠️ Failed to get payment status for {payment_id}", "error_payment")
                     await asyncio.sleep(poll_interval)
                     
             except Exception as e:
-                self.log_event(f"Error checking payment status: {e}", "error_payment")
+                self.log_event(f"💥 Error checking payment status: {e}", "error_payment")
                 await asyncio.sleep(poll_interval)
         
-        self.log_event(f"Payment {payment_id} timed out after {timeout_seconds}s", "error_payment")
+        print(f"⏰ [PAYMENT TIMEOUT] Payment {payment_id} TIMED OUT after {timeout_seconds}s. Last status: {last_status}")
+        self.log_event(f"⏰ Payment {payment_id} TIMED OUT after {timeout_seconds}s. Last status: {last_status}", "error_payment")
+        print(f"🚨 [CRITICAL WARNING] Payment may have succeeded but status check failed. Manual verification needed.")
+        self.log_event(f"🚨 CRITICAL: Payment may have succeeded but status check failed. Manual verification needed.", "error_payment")
         return False
     
     def _get_position_explanation(self, player: Player) -> str:

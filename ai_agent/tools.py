@@ -61,6 +61,13 @@ def tool_end_turn(gc: Any, player_id: int) -> Dict[str, Any]:
 @tradar_verifier
 def tool_buy_property(gc: Any, player_id: int, property_id: Optional[int] = None) -> Dict[str, Any]:
     """Player attempts to buy an unowned property. If property_id is None, it tries to buy the one set in pending_decision_context."""
+    
+    # 🚨 CRITICAL DEBUG: This should print every time tool_buy_property is called
+    print("🏠 TOOL_BUY_PROPERTY CALLED!")
+    print(f"🏠 Player ID: {player_id}, Property ID: {property_id}")
+    print(f"🏠 GameController type: {type(gc).__name__}")
+    print(f"🏠 PaymentManager type: {type(gc.payment_manager).__name__}")
+    
     player = gc.players[player_id]
     try:
         target_property_id = property_id if property_id is not None else gc.pending_decision_context.get("property_id")
@@ -71,6 +78,26 @@ def tool_buy_property(gc: Any, player_id: int, property_id: Optional[int] = None
             return {"status": "failure", "message": "Not in correct state to buy property or property_id missing."}
         
         square_to_buy = gc.board.get_square(target_property_id)
+        
+        # 🚨 CRITICAL FIX: Check if property is already owned before attempting purchase
+        if square_to_buy.owner_id is not None:
+            owner_name = gc.players[square_to_buy.owner_id].name if 0 <= square_to_buy.owner_id < len(gc.players) else f"Player {square_to_buy.owner_id}"
+            gc.log_event(f"🚨 [STATE RESET] Property {square_to_buy.name} already owned by {owner_name}. Clearing stuck pending decision.", "warning_property")
+            
+            # Clear the stuck state and resolve the segment
+            gc._resolve_current_action_segment()
+            
+            return {"status": "failure", "message": f"Property {square_to_buy.name} is already owned by {owner_name}. State has been reset."}
+        
+        # 🚨 ADDITIONAL CHECK: If player doesn't have enough money, clear stuck state
+        if player.money < square_to_buy.price:
+            gc.log_event(f"🚨 [STATE RESET] {player.name} cannot afford {square_to_buy.name} (${square_to_buy.price}, has ${player.money}). Clearing stuck pending decision.", "warning_property")
+            
+            # Clear the stuck state and resolve the segment
+            gc._resolve_current_action_segment()
+            
+            return {"status": "failure", "message": f"Cannot afford {square_to_buy.name}. Need ${square_to_buy.price}, have ${player.money}. State has been reset."}
+        
         # Call async GC method 
         import asyncio
         try:
@@ -87,6 +114,10 @@ def tool_buy_property(gc: Any, player_id: int, property_id: Optional[int] = None
         if success:
             # Purchase successful - clear pending decision and send success notification
             gc._resolve_current_action_segment()
+            
+            # Reset failure count on successful purchase
+            if hasattr(gc, '_buy_property_failure_count') and player_id in gc._buy_property_failure_count:
+                gc._buy_property_failure_count[player_id] = 0
             
             # Send special event notification for successful purchase
             if hasattr(gc, '_threaded_game_instance') and gc._threaded_game_instance:
@@ -110,6 +141,21 @@ def tool_buy_property(gc: Any, player_id: int, property_id: Optional[int] = None
             else:
                 status_msg += " (Reasons in GC log or property already owned/invalid state)"
             
+            # 🚨 NEW: If this is the 3rd+ consecutive failure, force clear the stuck state
+            if not hasattr(gc, '_buy_property_failure_count'):
+                gc._buy_property_failure_count = {}
+            
+            if player_id not in gc._buy_property_failure_count:
+                gc._buy_property_failure_count[player_id] = 0
+                
+            gc._buy_property_failure_count[player_id] += 1
+            
+            if gc._buy_property_failure_count[player_id] >= 3:
+                gc.log_event(f"🚨 [FORCE STATE RESET] {player.name} has failed to buy property {gc._buy_property_failure_count[player_id]} times. Forcing state reset.", "warning_property")
+                gc._buy_property_failure_count[player_id] = 0  # Reset counter
+                gc._resolve_current_action_segment()  # Force clear stuck state
+                status_msg += " - State forcefully reset after multiple failures"
+            
             # Send special event notification for failed purchase
             if hasattr(gc, '_threaded_game_instance') and gc._threaded_game_instance:
                 gc._threaded_game_instance.send_message_safely({
@@ -121,7 +167,8 @@ def tool_buy_property(gc: Any, player_id: int, property_id: Optional[int] = None
                         'property_name': square_to_buy.name,
                         'property_price': square_to_buy.price,
                         'player_money': player.money,
-                        'reason': status_msg
+                        'reason': status_msg,
+                        'failure_count': gc._buy_property_failure_count.get(player_id, 0)
                     }
                 })
             

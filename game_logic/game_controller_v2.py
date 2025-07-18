@@ -65,6 +65,13 @@ class GameControllerV2:
                  game_db_id: Optional[int] = None, participants: Optional[List[Dict[str, Any]]] = None,
                  treasury_agent_id: Optional[str] = None):
         
+        # 🚨 CRITICAL DEBUG: This should ALWAYS print when GameController is created
+        print("=" * 80)
+        print(f"🎮 GAME CONTROLLER V2 INITIALIZATION STARTED")
+        print(f"🎮 Game UID: {game_uid}")
+        print(f"🎮 Treasury Agent ID: {treasury_agent_id}")
+        print("=" * 80)
+        
         self.game_uid = game_uid 
         self.ws_manager = ws_manager 
         self.game_db_id = game_db_id 
@@ -72,7 +79,9 @@ class GameControllerV2:
         self.treasury_agent_id = treasury_agent_id  # System/bank agent ID for payments
         
         # Initialize TPayAgent for payment processing
+        print(f"🔗 INITIALIZING TPay AGENT...")
         self.tpay_agent: tpay.agent.AsyncTPayAgent = tpay.agent.AsyncTPayAgent()
+        print(f"✅ TPay AGENT INITIALIZED")
         
         try:
             self.loop = asyncio.get_running_loop()
@@ -107,11 +116,19 @@ class GameControllerV2:
         
         # Initialize managers for modular architecture FIRST
         # Use LocalPaymentManager in test environment to avoid TPay dependencies
-        if os.getenv("RUN_CONTEXT") == "test":
+        run_context = os.getenv("RUN_CONTEXT")
+        print(f"🔍 [GAME CONTROLLER INIT] RUN_CONTEXT = '{run_context}'")
+        self.log_event(f"🔍 [INIT DEBUG] RUN_CONTEXT = '{run_context}'", "game_log_event")
+        
+        if run_context == "test":
             from .managers.local_payment_manager import LocalPaymentManager
             self.payment_manager = LocalPaymentManager(self)
+            print(f"💳 [GAME CONTROLLER INIT] Using LocalPaymentManager (test environment)")
+            self.log_event(f"💳 [PAYMENT MANAGER] Using LocalPaymentManager (test environment)", "game_log_event")
         else:
             self.payment_manager = PaymentManager(self)
+            print(f"💳 [GAME CONTROLLER INIT] Using PaymentManager (production environment)")
+            self.log_event(f"💳 [PAYMENT MANAGER] Using PaymentManager (production environment)", "game_log_event")
             
         self.property_manager = PropertyManager(self)
         self.trade_manager = TradeManager(self)
@@ -404,7 +421,7 @@ class GameControllerV2:
         """Delegate to PaymentManager"""
         return await self.payment_manager.create_tpay_payment_system_to_player(recipient, amount, reason, event_description)
         
-    async def _wait_for_payment_completion(self, payment_result: Dict[str, Any], timeout_seconds: int = 30) -> bool:
+    async def _wait_for_payment_completion(self, payment_result: Dict[str, Any], timeout_seconds: int = 120) -> bool:
         """Delegate to PaymentManager"""
         return await self.payment_manager._wait_for_payment_completion(payment_result, timeout_seconds)
         

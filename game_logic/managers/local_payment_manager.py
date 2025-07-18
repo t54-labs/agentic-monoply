@@ -23,7 +23,9 @@ class LocalPaymentManager(BaseManager):
         return "LocalPaymentManager"
     
     def initialize(self) -> None:
-        """Initialize local payment tracking"""
+        """Initialize the local payment manager"""
+        print(f"🧪 [LOCAL PAYMENT MANAGER] Initialized - payments will be simulated locally")
+        self.log_event("Local payment manager initialized - no real TPay calls", "debug_payment")
         if not hasattr(self.gc, '_local_payment_history'):
             self.gc._local_payment_history = []
         if not hasattr(self.gc, '_local_payment_id_counter'):
@@ -97,6 +99,9 @@ class LocalPaymentManager(BaseManager):
         """
         payment_id = self._generate_payment_id()
         
+        # Log that we're using local payment manager
+        self.log_event(f"[LOCAL PAYMENT] Using LocalPaymentManager for {payer.name} -> System ${amount:.2f} ({reason})", "debug_payment")
+        
         try:
             # Check if payer has sufficient funds
             if payer.money < amount:
@@ -105,10 +110,13 @@ class LocalPaymentManager(BaseManager):
                 return False
             
             # Execute payment by reducing player balance
+            old_balance = payer.money
             payer.money -= amount
             
             # Update cached balance
             payer._cached_money = payer.money
+            
+            self.log_event(f"[LOCAL PAY] ✅ Payment completed instantly: {payer.name} ${old_balance:.2f} -> ${payer.money:.2f} (−${amount:.2f})", "success_payment")
             
             self._record_payment("player_to_system", payer, None, amount, reason, payment_id, True)
             return True

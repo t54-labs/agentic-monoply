@@ -713,34 +713,132 @@ global_app_instance: Optional[FastAPI] = None
 _game_maintenance_lock = threading.RLock()
 
 async def initialize_agent_tpay_balances(available_agents: List[Dict[str, Any]], game_uid: str):
-    """Initialize game token accounts for agents at game start"""
-    # Extract tpay account IDs from available agents
-    agent_tpay_ids = []
-    agent_names = []
+    """Initialize game token accounts for agents at game start via real TPay payments"""
+    
+    print(f"{Fore.CYAN}[TPay] Balancing {utils.GAME_TOKEN_SYMBOL} accounts for {len(available_agents)} agents in game {game_uid} via real payments{Style.RESET_ALL}")
+    
+    # Extract tpay account IDs and names from available agents
+    agent_data_list = []
     
     for agent_data in available_agents:
         tpay_account_id = agent_data.get('tpay_account_id')
         if not tpay_account_id:
-            print(f"{Fore.YELLOW}[TPay] Agent {agent_data['name']} has no tpay account, skipping game token setup{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}[TPay] Agent {agent_data['name']} has no tpay account, skipping balance adjustment{Style.RESET_ALL}")
             continue
         
-        agent_tpay_ids.append(tpay_account_id)
-        agent_names.append(agent_data['name'])
+        agent_data_list.append({
+            'tpay_id': tpay_account_id,
+            'name': agent_data['name'],
+            'db_id': agent_data.get('id', None)
+        })
     
-    print(f"{Fore.CYAN}[TPay] Resetting {utils.GAME_TOKEN_SYMBOL} accounts for {len(agent_tpay_ids)} agents in game {game_uid}{Style.RESET_ALL}")
+    if not agent_data_list:
+        print(f"{Fore.RED}[TPay] No agents with valid TPay accounts found for game {game_uid}{Style.RESET_ALL}")
+        return
     
     try:
-        # reset game token accounts for all agents
-        for agent_id in agent_tpay_ids:
-            result = utils.reset_agent_game_balance(
+        # Get treasury agent ID
+        treasury_agent_id = os.getenv('TREASURY_AGENT_ID')
+        if not treasury_agent_id:
+            print(f"{Fore.RED}[TPay] No TREASURY_AGENT_ID configured, cannot balance agent accounts{Style.RESET_ALL}")
+            return
+        
+        # Track results for summary reporting
+        success_count = 0
+        failure_count = 0
+        no_action_count = 0
+        total_excess_collected = 0.0
+        total_deficit_provided = 0.0
+        detailed_results = []
+        
+        # Process each agent's balance adjustment
+        for agent_info in agent_data_list:
+            agent_id = agent_info['tpay_id']
+            agent_name = agent_info['name']
+            
+            print(f"{Fore.BLUE}[TPay] Processing balance adjustment for {agent_name} ({agent_id}){Style.RESET_ALL}")
+            
+            # Call the new balance adjustment function
+            result = await utils.balance_agent_game_balance_via_payments(
                 agent_id=agent_id,
+                treasury_agent_id=treasury_agent_id,
+                target_balance=utils.GAME_INITIAL_BALANCE,
+                game_token=utils.GAME_TOKEN_SYMBOL,
+                game_uid=game_uid,
+                agent_name=agent_name
             )
-            if result:
-                print(f"{Fore.GREEN}[TPay] Successfully reset {utils.GAME_TOKEN_SYMBOL} balance for agent {agent_id}{Style.RESET_ALL}")
+            
+            detailed_results.append(result)
+            
+            if result['success']:
+                action = result.get('action', 'unknown')
+                
+                if action == 'no_action_needed':
+                    no_action_count += 1
+                    print(f"{Fore.GREEN}[TPay] ✓ {agent_name}: {result['message']}{Style.RESET_ALL}")
+                    
+                elif action == 'excess_paid_to_treasury':
+                    success_count += 1
+                    amount = result.get('amount_paid', 0)
+                    total_excess_collected += amount
+                    payment_id = result.get('payment_id', 'N/A')
+                    print(f"{Fore.GREEN}[TPay] ✓ {agent_name}: Paid {amount:.2f} excess to treasury (Payment ID: {payment_id}) - COMPLETED{Style.RESET_ALL}")
+                    
+                elif action == 'deficit_paid_by_treasury':
+                    success_count += 1
+                    amount = result.get('amount_received', 0)
+                    total_deficit_provided += amount
+                    payment_id = result.get('payment_id', 'N/A')
+                    print(f"{Fore.GREEN}[TPay] ✓ {agent_name}: Received {amount:.2f} from treasury (Payment ID: {payment_id}) - COMPLETED{Style.RESET_ALL}")
+                    
+                else:
+                    success_count += 1
+                    print(f"{Fore.GREEN}[TPay] ✓ {agent_name}: Balance adjusted successfully{Style.RESET_ALL}")
+                    
             else:
-                print(f"{Fore.RED}[TPay] Failed to reset {utils.GAME_TOKEN_SYMBOL} balance for agent {agent_id}{Style.RESET_ALL}")        
+                failure_count += 1
+                error_msg = result.get('error', 'Unknown error')
+                payment_id = result.get('payment_id')
+                
+                if payment_id:
+                    print(f"{Fore.RED}[TPay] ✗ {agent_name}: {error_msg} (Payment ID: {payment_id}){Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.RED}[TPay] ✗ {agent_name}: {error_msg}{Style.RESET_ALL}")
+                
+                # Log additional details for payment failures
+                amount_attempted = result.get('amount_attempted')
+                if amount_attempted:
+                    print(f"{Fore.YELLOW}[TPay]   → Amount attempted: ${amount_attempted:.2f} {utils.GAME_TOKEN_SYMBOL}{Style.RESET_ALL}")
+        
+        # Print comprehensive summary
+        print(f"{Fore.CYAN}[TPay] ========== BALANCE ADJUSTMENT SUMMARY FOR GAME {game_uid} =========={Style.RESET_ALL}")
+        print(f"{Fore.GREEN}[TPay] ✓ Successful adjustments: {success_count}{Style.RESET_ALL}")
+        print(f"{Fore.BLUE}[TPay] ≈ No action needed: {no_action_count}{Style.RESET_ALL}")
+        print(f"{Fore.RED}[TPay] ✗ Failed adjustments: {failure_count}{Style.RESET_ALL}")
+        
+        if total_excess_collected > 0:
+            print(f"{Fore.YELLOW}[TPay] 💰 Total excess collected by treasury: {total_excess_collected:.2f} {utils.GAME_TOKEN_SYMBOL}{Style.RESET_ALL}")
+            
+        if total_deficit_provided > 0:
+            print(f"{Fore.YELLOW}[TPay] 💸 Total deficit provided by treasury: {total_deficit_provided:.2f} {utils.GAME_TOKEN_SYMBOL}{Style.RESET_ALL}")
+            
+        net_treasury_change = total_excess_collected - total_deficit_provided
+        if net_treasury_change != 0:
+            direction = "gained" if net_treasury_change > 0 else "spent"
+            print(f"{Fore.MAGENTA}[TPay] 🏦 Net treasury change: {direction} {abs(net_treasury_change):.2f} {utils.GAME_TOKEN_SYMBOL}{Style.RESET_ALL}")
+        
+        print(f"{Fore.CYAN}[TPay] ================================================================{Style.RESET_ALL}")
+        
+        # Store detailed results for potential debugging or auditing
+        if hasattr(utils, 'last_balance_adjustment_results'):
+            utils.last_balance_adjustment_results[game_uid] = detailed_results
+        else:
+            utils.last_balance_adjustment_results = {game_uid: detailed_results}
+            
     except Exception as e:
-        print(f"{Fore.RED}[TPay] Error initializing game token accounts for {game_uid}: {e}{Style.RESET_ALL}")
+        print(f"{Fore.RED}[TPay] Critical error during balance adjustment for game {game_uid}: {e}{Style.RESET_ALL}")
+        import traceback
+        traceback.print_exc()
 
 async def update_agent_game_statistics(available_agents: List[Dict[str, Any]], gc: GameControllerV2, 
                                       game_db_id: int):
@@ -2129,9 +2227,9 @@ async def lifespan(app_instance: FastAPI):
     tpay.tpay_initialize(api_key=TLEDGER_API_KEY, api_secret=TLEDGER_API_SECRET, project_id=TLEDGER_PROJECT_ID, base_url=TLEDGER_BASE_URL, timeout=1000000)
 
     # Initialize treasury agent
-    print(f"Initializing treasury agent with agent_id: {TREASURY_AGENT_ID}")
-    result = utils.reset_agent_game_balance(agent_id=TREASURY_AGENT_ID, new_balance=10000000000000)
-    print(f"Treasury agent initialized: {result}")
+    # print(f"Initializing treasury agent with agent_id: {TREASURY_AGENT_ID}")
+    # result = utils.reset_agent_game_balance(agent_id=TREASURY_AGENT_ID, new_balance=10000000000000)
+    # print(f"Treasury agent initialized: {result}")
 
     # Initialize agent manager and load agents from database
     print("Initializing Agent Manager...")
@@ -2526,110 +2624,81 @@ async def update_config_api(request: Request):
         raise HTTPException(status_code=500, detail="Failed to update configuration")
 
 @app.post("/api/admin/agents/create_random")
-async def create_random_agents_api(request: Request):
-    """Create random agents using GPT-4o mini (generates 4 random agents each time)"""
+async def create_random_agents_api():
+    """Create 4 new random agents using OpenAI GPT-4o mini"""
     try:
-        agent_count = 4
-        print(f"{Fore.CYAN}[API] Generating {agent_count} random agents using GPT-4o mini...{Style.RESET_ALL}")
+        new_agents = utils.generate_random_agents(count=4)
         
-        random_agents = utils.generate_random_agents(agent_count)
+        if new_agents:
+            # Create TPay accounts for the new agents
+            utils.create_game_token_accounts_for_agents(new_agents)
+            
+            return {"success": True, "agents": new_agents, "count": len(new_agents)}
+        else:
+            return {"success": False, "error": "Failed to generate random agents", "agents": [], "count": 0}
+    except Exception as e:
+        return {"success": False, "error": str(e), "agents": [], "count": 0}
+
+@app.post("/api/admin/balance/test_adjustment")
+async def test_balance_adjustment_api():
+    """Test the new balance adjustment mechanism for a sample set of agents"""
+    try:
+        import time
         
-        created_agents = []
-        skipped_agents = []
+        # Get all available agents for testing
+        from database import engine, agents_table
+        from sqlalchemy import select
+        from sqlalchemy.orm import Session
         
         with Session(engine) as session:
-            for agent_data in random_agents:
-                # Check if agent with the same name already exists
-                existing_agent_stmt = select(agents_table).where(agents_table.c.name == agent_data['name'])
-                existing_agent = session.execute(existing_agent_stmt).fetchone()
-                
-                if existing_agent:
-                    print(f"{Fore.YELLOW}[Agent Creation] Skipping '{agent_data['name']}' - agent with this name already exists{Style.RESET_ALL}")
-                    skipped_agents.append({
-                        "name": agent_data['name'],
-                        "reason": "Agent with this name already exists",
-                        "existing_id": existing_agent.id,
-                        "existing_status": existing_agent.status
-                    })
-                    continue
-                
-                agent_uid = f"agent_{agent_data['name'].lower().replace(' ', '_')}_{uuid.uuid4().hex[:6]}"
-                
-                # Create tpay account for this agent
-                tpay_account_id = None
-                try:
-                    print(f"{Fore.CYAN}[TPay] Creating account for agent: {agent_data['name']} {Style.RESET_ALL}")
-                    
-                    tpay_agent_data = tpay.create_agent(
-                        name=agent_data['name'],
-                        description=f"Monopoly AI agent: {agent_data['personality']}",
-                        agent_daily_limit=10000.0,  # High limit for monopoly transactions
-                        agent_type="autonomous_agent"
-                    )
-                    
-                    if tpay_agent_data and 'id' in tpay_agent_data:
-                        tpay_account_id = tpay_agent_data['id']
-                        print(f"{Fore.GREEN}[TPay] Successfully created account for {agent_data['name']} with ID: {tpay_account_id}{Style.RESET_ALL}")
-                    else:
-                        print(f"{Fore.RED}[TPay] Failed to create account for {agent_data['name']} - no ID returned{Style.RESET_ALL}")
-                        
-                except Exception as tpay_error:
-                    print(f"{Fore.RED}[TPay] Error creating account for {agent_data['name']}: {tpay_error}{Style.RESET_ALL}")
-                
-                if tpay_account_id:
-                    # Create agent record in database (even if tpay failed)
-                    agent_values = {
-                        "agent_uid": agent_uid,
-                        "name": agent_data['name'],
-                        "personality_prompt": agent_data['personality'],
-                        "memory_data": {},
-                        "preferences": {},
-                        "total_games_played": 0,
-                        "total_wins": 0,
-                        "tpay_account_id": tpay_account_id,  # Will be None if tpay creation failed
-                        "status": "active"
-                    }
-                    
-                    stmt = insert(agents_table).values(agent_values).returning(agents_table.c.id)
-                    result = session.execute(stmt)
-                    agent_id = result.scalar_one_or_none()
-                    
-                    if agent_id:
-                        created_agents.append({
-                            "id": agent_id,
-                            "agent_uid": agent_uid,
-                            "name": agent_data['name'],
-                            "personality": agent_data['personality'],
-                            "tpay_account_id": tpay_account_id,
-                            "tpay_status": "created" if tpay_account_id else "failed"
-                        })
-            
-            session.commit()
+            stmt = select(agents_table).limit(5)  # Test with up to 5 agents
+            result = session.execute(stmt)
+            agents = [dict(row._mapping) for row in result]
         
-        # Reload agents in agent manager
-        await agent_manager.initialize_agents_from_database()
+        if not agents:
+            return {
+                "success": False,
+                "error": "No agents found in database for testing",
+                "details": []
+            }
         
-        successful_tpay = len([a for a in created_agents if a['tpay_account_id']])
+        # Test the balance adjustment function
+        test_game_uid = f"balance_test_{int(time.time())}"
+        
+        print(f"{Fore.YELLOW}[Admin API] Testing balance adjustment for {len(agents)} agents{Style.RESET_ALL}")
+        
+        # Call our new balance adjustment function
+        await initialize_agent_tpay_balances(agents, test_game_uid)
+        
+        # Return the results
+        test_results = utils.last_balance_adjustment_results.get(test_game_uid, []) if hasattr(utils, 'last_balance_adjustment_results') else []
+        
+        successful_adjustments = [r for r in test_results if r.get('success', False)]
+        failed_adjustments = [r for r in test_results if not r.get('success', False)]
         
         return {
             "success": True,
-            "message": f"Created {len(created_agents)} random agents ({successful_tpay} with tpay accounts), skipped {len(skipped_agents)} existing agents",
-            "created_agents": created_agents,
-            "skipped_agents": skipped_agents,
-            "tpay_success_count": successful_tpay,
-            "tpay_total_count": len(created_agents),
-            "total_processed": len(random_agents),
+            "test_game_uid": test_game_uid,
+            "total_agents_tested": len(agents),
+            "successful_adjustments": len(successful_adjustments),
+            "failed_adjustments": len(failed_adjustments),
+            "details": test_results,
             "summary": {
-                "created": len(created_agents),
-                "skipped": len(skipped_agents),
-                "with_tpay": successful_tpay,
-                "without_tpay": len(created_agents) - successful_tpay
+                "excess_payments": [r for r in successful_adjustments if r.get('action') == 'excess_paid_to_treasury'],
+                "deficit_payments": [r for r in successful_adjustments if r.get('action') == 'deficit_paid_by_treasury'],
+                "no_action_needed": [r for r in successful_adjustments if r.get('action') == 'no_action_needed'],
+                "failures": failed_adjustments
             }
         }
-    
+        
     except Exception as e:
-        print(f"{Fore.RED}[API E] Error creating random agents: {e}{Style.RESET_ALL}")
-        raise HTTPException(status_code=500, detail="Failed to create random agents")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": f"Exception during balance adjustment test: {str(e)}",
+            "details": []
+        }
 
 @app.get("/api/admin/agents")
 async def get_agents_api():
@@ -2703,53 +2772,6 @@ async def create_game_token_accounts_api(request: Request):
     except Exception as e:
         print(f"{Fore.RED}[API E] Error creating game token accounts: {e}{Style.RESET_ALL}")
         raise HTTPException(status_code=500, detail="Failed to create game token accounts")
-
-@app.post("/api/admin/agents/{agent_id}/reset_game_balance")
-async def reset_agent_game_balance_api(agent_id: int, request: Request):
-    """Reset a specific agent's game token balance"""
-    try:
-        data = await request.json() if hasattr(request, 'json') else {}
-        game_token = data.get('game_token', utils.GAME_TOKEN_SYMBOL)
-        new_balance = data.get('new_balance', utils.GAME_INITIAL_BALANCE)
-        
-        # Get agent's tpay account ID
-        with Session(engine) as session:
-            stmt = select(agents_table).where(agents_table.c.id == agent_id)
-            result = session.execute(stmt)
-            agent_row = result.fetchone()
-        
-        if not agent_row:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        
-        if not agent_row.tpay_account_id:
-            raise HTTPException(status_code=400, detail="Agent has no tpay account")
-        
-        print(f"{Fore.CYAN}[API] Resetting {game_token} balance for agent {agent_row.name} to ${new_balance}{Style.RESET_ALL}")
-        
-        success = utils.reset_agent_game_balance(
-            agent_id=agent_row.tpay_account_id,
-            game_token=game_token,
-            new_balance=new_balance
-        )
-        
-        if success:
-            return {
-                "success": True,
-                "message": f"Successfully reset {game_token} balance for {agent_row.name}",
-                "agent_name": agent_row.name,
-                "agent_id": agent_id,
-                "tpay_account_id": agent_row.tpay_account_id,
-                "game_token": game_token,
-                "new_balance": new_balance
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Failed to reset agent balance")
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"{Fore.RED}[API E] Error resetting agent balance: {e}{Style.RESET_ALL}")
-        raise HTTPException(status_code=500, detail="Failed to reset agent balance")
 
 # Import Telegram command handlers from separate module
 from admin import (

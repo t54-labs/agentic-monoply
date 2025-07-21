@@ -737,36 +737,168 @@ Thank you for participating! 🎮
         return await self.send_message(message)
     
     async def notify_action_error(self, error_data: Dict[str, Any]) -> bool:
-        """Notify when an agent action fails during gameplay"""
+        """Notify when an agent action fails during gameplay with enhanced debugging information"""
         if not self.enabled:
             return False
         
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        # 🔍 ENHANCED ERROR NOTIFICATION with comprehensive debugging data
         
+        # Basic information
         game_uid = error_data.get('game_uid', 'unknown')
-        player_name = error_data.get('player_name', 'unknown player')
-        action_name = error_data.get('action_name', 'unknown action')
-        error_message = error_data.get('error_message', 'unknown error')
         turn_number = error_data.get('turn_number', '?')
+        action_sequence = error_data.get('action_sequence', '?')
+        timestamp = error_data.get('timestamp', datetime.now().strftime("%H:%M:%S"))
         
-        # Truncate long error messages
-        if len(error_message) > 100:
-            error_message = error_message[:97] + "..."
+        # Player information
+        player_name = error_data.get('player_name', 'unknown player')
+        player_id = error_data.get('player_id', '?')
+        player_money = error_data.get('player_money', '?')
+        player_position = error_data.get('player_position', '?')
+        player_properties_count = error_data.get('player_properties_count', '?')
+        player_in_jail = error_data.get('player_in_jail', False)
+        player_bankrupt = error_data.get('player_bankrupt', False)
         
-        message = f"""
-⚠️ <b>Agent Action Failed</b>
-
-🎮 Game: <code>{game_uid}</code>
-🤖 Player: <b>{player_name}</b>
-🎯 Action: <code>{action_name}</code>
-🔄 Turn: {turn_number}
-
-📝 Error: {error_message}
-
-⏰ Time: {timestamp}
-        """.strip()
+        # Action information
+        action_name = error_data.get('action_name', 'unknown action')
+        action_parameters = error_data.get('action_parameters', 'N/A')
+        available_actions = error_data.get('available_actions', 'N/A')
+        error_message = error_data.get('error_message', 'unknown error')
+        action_status = error_data.get('action_status', 'Unknown')
         
-        return await self.send_message(message, disable_notification=True)  # Silent notification
+        # Game state information
+        pending_decision = error_data.get('pending_decision', 'None')
+        dice_processed = error_data.get('dice_processed', '?')
+        auction_active = error_data.get('auction_active', '?')
+        current_dice = error_data.get('current_dice', 'N/A')
+        
+        # Context information
+        property_info = error_data.get('property_info', '')
+        trade_info = error_data.get('trade_info', '')
+        last_mortgage_error = error_data.get('last_mortgage_error', '')
+        agent_thoughts = error_data.get('agent_thoughts', '')
+        
+        # Build the comprehensive error message
+        message_parts = []
+        
+        # Header
+        message_parts.append("🚨 <b>AGENT ACTION FAILED</b> 🚨")
+        message_parts.append("")
+        
+        # Basic info section
+        message_parts.append("📋 <b>Basic Information:</b>")
+        message_parts.append(f"🎮 Game: <code>{game_uid}</code>")
+        message_parts.append(f"🔄 Turn: {turn_number} (Action #{action_sequence})")
+        message_parts.append(f"⏰ Time: {timestamp}")
+        message_parts.append("")
+        
+        # Player info section
+        player_status_emoji = "💸" if player_bankrupt else ("🏛️" if player_in_jail else "💰")
+        message_parts.append("👤 <b>Player Information:</b>")
+        message_parts.append(f"{player_status_emoji} <b>{player_name}</b> (P{player_id})")
+        message_parts.append(f"💵 Money: ${player_money}")
+        message_parts.append(f"📍 Position: {player_position}")
+        message_parts.append(f"🏠 Properties: {player_properties_count}")
+        if player_in_jail:
+            message_parts.append("🏛️ Status: In Jail")
+        if player_bankrupt:
+            message_parts.append("💸 Status: Bankrupt")
+        message_parts.append("")
+        
+        # Action info section
+        message_parts.append("🎯 <b>Action Details:</b>")
+        message_parts.append(f"🔧 Action: <code>{action_name}</code>")
+        message_parts.append(f"📊 Status: <code>{action_status}</code>")
+        if action_parameters and action_parameters != "N/A":
+            # Format parameters for better readability
+            params_display = action_parameters
+            if len(params_display) > 60:
+                params_display = params_display[:57] + "..."
+            message_parts.append(f"⚙️ Parameters: <code>{params_display}</code>")
+        message_parts.append("")
+        
+        # Error details section
+        message_parts.append("❌ <b>Error Details:</b>")
+        # Format error message with line breaks if too long
+        if len(error_message) > 80:
+            error_lines = []
+            words = error_message.split()
+            current_line = ""
+            for word in words:
+                if len(current_line + word + " ") <= 80:
+                    current_line += word + " "
+                else:
+                    if current_line:
+                        error_lines.append(current_line.strip())
+                    current_line = word + " "
+            if current_line:
+                error_lines.append(current_line.strip())
+            
+            for line in error_lines:
+                message_parts.append(f"📝 {line}")
+        else:
+            message_parts.append(f"📝 {error_message}")
+        message_parts.append("")
+        
+        # Context information
+        context_added = False
+        if property_info:
+            if not context_added:
+                message_parts.append("🔍 <b>Context Information:</b>")
+                context_added = True
+            message_parts.append(f"🏠 Property: {property_info}")
+        
+        if trade_info:
+            if not context_added:
+                message_parts.append("🔍 <b>Context Information:</b>")
+                context_added = True
+            message_parts.append(f"🤝 Trade: {trade_info}")
+        
+        if last_mortgage_error:
+            if not context_added:
+                message_parts.append("🔍 <b>Context Information:</b>")
+                context_added = True
+            message_parts.append(f"🏛️ Mortgage: {last_mortgage_error}")
+        
+        if context_added:
+            message_parts.append("")
+        
+        # Game state section
+        message_parts.append("🎲 <b>Game State:</b>")
+        message_parts.append(f"🎯 Pending: {pending_decision}")
+        message_parts.append(f"🎲 Dice Done: {dice_processed}")
+        message_parts.append(f"🎪 Auction: {auction_active}")
+        if current_dice != "N/A":
+            message_parts.append(f"🎲 Current Dice: {current_dice}")
+        message_parts.append("")
+        
+        # Available actions
+        if available_actions and available_actions != "None":
+            message_parts.append("🛠️ <b>Available Actions:</b>")
+            # Format available actions with line breaks if too long
+            actions_display = available_actions
+            if len(actions_display) > 60:
+                # Split by comma and format nicely
+                action_list = [a.strip() for a in actions_display.split(',')]
+                if len(action_list) > 3:
+                    actions_display = ', '.join(action_list[:3]) + f", +{len(action_list)-3} more"
+                else:
+                    actions_display = ', '.join(action_list)
+            message_parts.append(f"⚙️ {actions_display}")
+            message_parts.append("")
+        
+        # Agent thoughts (if available and short enough)
+        if agent_thoughts and len(agent_thoughts) > 10:
+            message_parts.append("🧠 <b>AI Thoughts (excerpt):</b>")
+            thoughts_display = agent_thoughts
+            if len(thoughts_display) > 150:
+                thoughts_display = thoughts_display[:147] + "..."
+            message_parts.append(f"💭 {thoughts_display}")
+        
+        # Join all parts together
+        message = "\n".join(message_parts)
+        
+        # Send with silent notification to avoid spam
+        return await self.send_message(message, disable_notification=True)
     
     async def notify_server_status(self, status_data: Dict[str, Any]) -> bool:
         """Notify about server status updates"""

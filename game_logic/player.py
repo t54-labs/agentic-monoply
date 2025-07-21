@@ -181,6 +181,14 @@ class Player:
         if self.pending_mortgaged_properties_to_handle:
             return self.pending_mortgaged_properties_to_handle[0]
         return None
+    
+    def add_property_id(self, property_id: int) -> None:
+        """Add a property to the player's owned properties."""
+        self.properties_owned_ids.add(property_id)
+    
+    def remove_property_id(self, property_id: int) -> None:
+        """Remove a property from the player's owned properties."""
+        self.properties_owned_ids.discard(property_id)
 
     def resolve_pending_mortgaged_property_task(self, property_id: int) -> None:
         """Removes a specific mortgaged property task after it has been handled."""

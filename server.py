@@ -1807,12 +1807,94 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                         from admin import get_telegram_notifier
                         telegram_notifier = get_telegram_notifier()
                         if telegram_notifier and telegram_notifier.enabled:
+                            # 🔍 ENHANCED ERROR DATA: Include comprehensive debugging information
+                            
+                            # Get agent thoughts for more context
+                            agent_thoughts = ""
+                            try:
+                                agent_thoughts = agent_to_act.get_player_thought_process()
+                                if len(agent_thoughts) > 300:  # Truncate if too long
+                                    agent_thoughts = agent_thoughts[:300] + "..."
+                            except:
+                                agent_thoughts = "Could not retrieve agent thoughts"
+                            
+                            # Get available actions for context
+                            available_actions_str = ", ".join(available_actions) if available_actions else "None"
+                            
+                            # Get property information if relevant
+                            property_info = ""
+                            if "property_id" in params:
+                                try:
+                                    prop_id = params["property_id"]
+                                    if 0 <= prop_id < len(gc.board.squares):
+                                        prop_square = gc.board.get_square(prop_id)
+                                        property_info = f"{prop_square.name} (ID: {prop_id})"
+                                        if hasattr(prop_square, 'owner_id'):
+                                            if prop_square.owner_id is None:
+                                                property_info += " [Unowned]"
+                                            elif prop_square.owner_id == active_player_id:
+                                                property_info += " [Owned by player]"
+                                            else:
+                                                owner_name = gc.players[prop_square.owner_id].name if 0 <= prop_square.owner_id < len(gc.players) else f"Player {prop_square.owner_id}"
+                                                property_info += f" [Owned by {owner_name}]"
+                                        if hasattr(prop_square, 'is_mortgaged'):
+                                            property_info += f" [{'Mortgaged' if prop_square.is_mortgaged else 'Not mortgaged'}]"
+                                except:
+                                    property_info = f"Property ID: {params.get('property_id', 'Unknown')}"
+                            
+                            # Get trade information if relevant
+                            trade_info = ""
+                            if chosen_tool_name in ["tool_propose_trade", "tool_accept_trade", "tool_reject_trade"]:
+                                if "recipient_id" in params:
+                                    recipient_id = params["recipient_id"]
+                                    if 0 <= recipient_id < len(gc.players):
+                                        trade_info = f"Trading with: {gc.players[recipient_id].name}"
+                                if "offered_property_ids" in params or "requested_property_ids" in params:
+                                    offered = params.get("offered_property_ids", [])
+                                    requested = params.get("requested_property_ids", [])
+                                    trade_info += f" | Offering: {len(offered)} props, Requesting: {len(requested)} props"
+                            
+                            # Get last mortgage error if relevant
+                            last_mortgage_error = ""
+                            if chosen_tool_name == "tool_mortgage_property" and hasattr(gc, '_last_mortgage_error'):
+                                last_mortgage_error = gc._last_mortgage_error or "No specific error recorded"
+                            
                             error_data = {
                                 'game_uid': game_uid,
+                                'turn_number': gc.turn_count,
+                                'loop_iteration': loop_turn_count,
+                                'action_sequence': action_sequence_this_gc_turn,
+                                
+                                # Player information
                                 'player_name': current_acting_player.name,
+                                'player_id': active_player_id,
+                                'player_money': current_acting_player.money,
+                                'player_position': current_acting_player.position,
+                                'player_properties_count': len(current_acting_player.properties_owned_ids),
+                                'player_in_jail': current_acting_player.in_jail,
+                                'player_bankrupt': current_acting_player.is_bankrupt,
+                                
+                                # Action information
                                 'action_name': chosen_tool_name,
+                                'action_parameters': str(params)[:200],  # Truncate if too long
+                                'available_actions': available_actions_str,
                                 'error_message': action_result.get('message', 'Unknown error'),
-                                'turn_number': gc.turn_count
+                                'action_status': action_result.get('status', 'Unknown'),
+                                
+                                # Game state information
+                                'pending_decision': gc.pending_decision_type or 'None',
+                                'dice_processed': gc.dice_roll_outcome_processed,
+                                'auction_active': gc.auction_in_progress,
+                                'current_dice': str(gc.dice) if hasattr(gc, 'dice') else 'N/A',
+                                
+                                # Context information
+                                'property_info': property_info,
+                                'trade_info': trade_info,
+                                'last_mortgage_error': last_mortgage_error,
+                                'agent_thoughts': agent_thoughts,
+                                
+                                # Technical information
+                                'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             }
                             # Use the threaded game instance to send message safely
                             if game_uid in game_instances:

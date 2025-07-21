@@ -59,8 +59,12 @@ class BankruptcyManager(BaseManager):
                 total_value += property_square.price // 2  # Mortgage value is 50% of price
                 
             # Add house sale value if applicable
-            if hasattr(property_square, 'houses') and property_square.houses > 0:
-                house_value = property_square.houses * (property_square.house_cost // 2)  # Houses sell for 50%
+            if hasattr(property_square, 'num_houses') and property_square.num_houses > 0:
+                # Houses sell for 50% of purchase price
+                if property_square.num_houses == 5:  # Hotel (represented as 5 houses)
+                    house_value = 4 * (property_square.house_price // 2)  # 4 houses worth + hotel conversion
+                else:
+                    house_value = property_square.num_houses * (property_square.house_price // 2)
                 total_value += house_value
                 
         return total_value
@@ -109,8 +113,49 @@ class BankruptcyManager(BaseManager):
         
         if player.money >= debt_amount:
             self.log_event(f"{player.name} successfully liquidated enough assets to pay ${debt_amount} debt", "bankruptcy_event")
-            # TODO: Execute the actual debt payment here
-            self.gc._resolve_current_action_segment()
+            
+            # Execute the actual debt payment
+            import asyncio
+            try:
+                if creditor:
+                    # Pay to another player
+                    payment_success = asyncio.run(
+                        self.gc.payment_manager.create_tpay_payment_player_to_player(
+                            payer=player,
+                            recipient=creditor,
+                            amount=float(debt_amount),
+                            reason=f"debt payment after asset liquidation",
+                            agent_decision_context={
+                                "bankruptcy_context": "asset_liquidation_debt_payment",
+                                "original_debt": debt_amount,
+                                "liquidated_assets": True
+                            }
+                        )
+                    )
+                else:
+                    # Pay to system/bank
+                    payment_success = asyncio.run(
+                        self.gc.payment_manager.create_tpay_payment_player_to_system(
+                            payer=player,
+                            amount=float(debt_amount),
+                            reason=f"debt payment after asset liquidation",
+                            agent_decision_context={
+                                "bankruptcy_context": "asset_liquidation_debt_payment",
+                                "original_debt": debt_amount,
+                                "liquidated_assets": True
+                            }
+                        )
+                    )
+                
+                if payment_success:
+                    self.log_event(f"✅ {player.name} successfully paid ${debt_amount} debt after asset liquidation", "bankruptcy_event")
+                    self.gc._resolve_current_action_segment()
+                else:
+                    self.log_event(f"❌ {player.name} debt payment failed after asset liquidation - proceeding to bankruptcy", "bankruptcy_event")
+                    self._finalize_bankruptcy_declaration(player, creditor)
+            except Exception as e:
+                self.log_event(f"❌ Error executing debt payment for {player.name}: {e} - proceeding to bankruptcy", "error_bankruptcy")
+                self._finalize_bankruptcy_declaration(player, creditor)
         else:
             self.log_event(f"{player.name} still cannot pay ${debt_amount} debt after liquidation (has ${player.money})", "bankruptcy_event")
             self._finalize_bankruptcy_declaration(player, creditor)
@@ -151,10 +196,8 @@ class BankruptcyManager(BaseManager):
                 # Return to bank (no owner)
                 property_square.owner_id = None
                 # Remove any houses/hotels
-                if hasattr(property_square, 'houses'):
-                    property_square.houses = 0
-                if hasattr(property_square, 'has_hotel'):
-                    property_square.has_hotel = False
+                if hasattr(property_square, 'num_houses'):
+                    property_square.num_houses = 0
                 # Unmortgage properties returned to bank
                 if hasattr(property_square, 'is_mortgaged'):
                     property_square.is_mortgaged = False
@@ -167,9 +210,34 @@ class BankruptcyManager(BaseManager):
         
         # Transfer any remaining money to creditor
         if player.money > 0 and creditor:
-            # TODO: Execute TPay transfer of remaining money
-            self.log_event(f"${player.money} transferred from {player.name} to {creditor.name}", "bankruptcy_event")
-            creditor.money += player.money
+            # Execute TPay transfer of remaining money
+            import asyncio
+            try:
+                remaining_money = player.money
+                payment_success = asyncio.run(
+                    self.gc.payment_manager.create_tpay_payment_player_to_player(
+                        payer=player,
+                        recipient=creditor,
+                        amount=float(remaining_money),
+                        reason=f"bankruptcy asset transfer",
+                        agent_decision_context={
+                            "bankruptcy_context": "final_asset_transfer",
+                            "transfer_type": "remaining_money"
+                        }
+                    )
+                )
+                
+                if payment_success:
+                    self.log_event(f"✅ ${remaining_money} transferred from {player.name} to {creditor.name}", "bankruptcy_event")
+                else:
+                    self.log_event(f"❌ Failed to transfer ${remaining_money} from {player.name} to {creditor.name}", "error_bankruptcy")
+                    # Even if transfer fails, still clear player money as they're bankrupt
+                    player.money = 0
+            except Exception as e:
+                self.log_event(f"❌ Error transferring money from {player.name} to {creditor.name}: {e}", "error_bankruptcy")
+                player.money = 0
+        else:
+            # Clear player money (either no creditor or no money to transfer)
             player.money = 0
         
         # Clear player state

@@ -49,6 +49,11 @@ def tool_end_turn(gc: Any, player_id: int) -> Dict[str, Any]:
     """Player explicitly ends their turn or current segment of complex actions."""
     player = gc.players[player_id]
     try:
+        # 🚨 DEADLOCK PREVENTION: Clear failed actions when ending turn
+        if hasattr(gc, 'clear_failed_actions_for_player'):
+            gc.clear_failed_actions_for_player(player_id)
+            gc.log_event(f"🔄 [TURN END] Cleared failed action history for {player.name}", "debug_log")
+        
         # GC.get_available_actions should primarily gate this.
         # This tool just signals intent; GC resolves the state.
         gc._resolve_current_action_segment()
@@ -265,6 +270,103 @@ def tool_sell_house(gc: Any, player_id: int, property_id: int) -> Dict[str, Any]
 def tool_mortgage_property(gc: Any, player_id: int, property_id: int) -> Dict[str, Any]:
     """Player attempts to mortgage one of their properties."""
     try:
+        # 🚨 DEADLOCK PREVENTION: Check if this action has failed repeatedly
+        action_params = {"property_id": property_id}
+        if hasattr(gc, 'check_repeated_failure') and gc.check_repeated_failure(player_id, "tool_mortgage_property", action_params):
+            player_name = gc.players[player_id].name if 0 <= player_id < len(gc.players) else f"Player {player_id}"
+            
+            # Get property name for better error message
+            property_name = "Unknown Property"
+            try:
+                if 0 <= property_id < len(gc.board.squares):
+                    property_square = gc.board.get_square(property_id)
+                    property_name = property_square.name
+                    is_mortgaged = getattr(property_square, 'is_mortgaged', False)
+                    if is_mortgaged:
+                        property_name += " (ALREADY MORTGAGED)"
+            except:
+                pass
+            
+            blocked_message = f"🚨 DEADLOCK PREVENTION: {player_name} has tried to mortgage {property_name} multiple times and failed. This action is now BLOCKED to prevent infinite loop. Try a different action like tool_end_turn or tool_resign_game."
+            print(blocked_message)
+            gc.log_event(blocked_message, "error_log")
+            
+            result = {"status": "failure", "message": blocked_message}
+            _log_agent_action(gc, player_id, "tool_mortgage_property", action_params, result)
+            return result
+        
+        # 🔍 ENHANCED VALIDATION AND DEBUGGING
+        player = gc.players[player_id]
+        
+        # Validate property ID
+        if not (0 <= property_id < len(gc.board.squares)):
+            error_msg = f"Invalid property ID {property_id}. Valid range: 0-{len(gc.board.squares)-1}"
+            result = {"status": "failure", "message": error_msg}
+            _log_agent_action(gc, player_id, "tool_mortgage_property", action_params, result)
+            return result
+        
+        # Get property details
+        try:
+            property_square = gc.board.get_square(property_id)
+            property_name = property_square.name
+        except Exception as e:
+            error_msg = f"Failed to get property {property_id} details: {e}"
+            result = {"status": "failure", "message": error_msg}
+            _log_agent_action(gc, player_id, "tool_mortgage_property", action_params, result)
+            return result
+        
+        # 🎯 COMPREHENSIVE PRE-VALIDATION
+        print(f"🏦 [MORTGAGE DEBUG] {player.name} attempting to mortgage {property_name} (ID: {property_id})")
+        print(f"🏦 [MORTGAGE DEBUG] Player properties: {player.properties_owned_ids}")
+        print(f"🏦 [MORTGAGE DEBUG] Property owner: {getattr(property_square, 'owner_id', 'N/A')}")
+        print(f"🏦 [MORTGAGE DEBUG] Property mortgaged: {getattr(property_square, 'is_mortgaged', 'N/A')}")
+        
+        # Check ownership
+        if property_id not in player.properties_owned_ids:
+            owned_props = [f"{pid}:{gc.board.get_square(pid).name}" for pid in player.properties_owned_ids]
+            error_msg = f"You don't own {property_name} (ID: {property_id}). Your properties: {owned_props}"
+            result = {"status": "failure", "message": error_msg}
+            _log_agent_action(gc, player_id, "tool_mortgage_property", action_params, result)
+            return result
+        
+        # Check if already mortgaged
+        if hasattr(property_square, 'is_mortgaged') and property_square.is_mortgaged:
+            error_msg = f"{property_name} is already mortgaged. Cannot mortgage an already mortgaged property."
+            result = {"status": "failure", "message": error_msg}
+            _log_agent_action(gc, player_id, "tool_mortgage_property", action_params, result)
+            return result
+        
+        # Check if property has houses/hotels (must sell first)
+        if hasattr(property_square, 'num_houses') and property_square.num_houses > 0:
+            houses_str = f"{property_square.num_houses} houses" if property_square.num_houses < 5 else "1 hotel"
+            error_msg = f"{property_name} has {houses_str}. You must sell all houses/hotels before mortgaging. Use tool_sell_house first."
+            result = {"status": "failure", "message": error_msg}
+            _log_agent_action(gc, player_id, "tool_mortgage_property", action_params, result)
+            return result
+        
+        # Check if other properties in color group have houses (must be even)
+        from game_logic.board import PropertySquare
+        if isinstance(property_square, PropertySquare):
+            color_group = property_square.color_group
+            group_properties = [
+                gc.board.get_square(pid) for pid in player.properties_owned_ids 
+                if isinstance(gc.board.get_square(pid), PropertySquare) and 
+                gc.board.get_square(pid).color_group == color_group
+            ]
+            
+            properties_with_houses = [prop for prop in group_properties if prop.num_houses > 0]
+            if properties_with_houses:
+                house_info = [f"{prop.name}({prop.num_houses})" for prop in properties_with_houses]
+                error_msg = f"Cannot mortgage {property_name} - other properties in {color_group} group have houses: {house_info}. Must sell houses evenly first."
+                result = {"status": "failure", "message": error_msg}
+                _log_agent_action(gc, player_id, "tool_mortgage_property", action_params, result)
+                return result
+        
+        # Get mortgage value for debugging
+        mortgage_value = getattr(property_square, 'mortgage_value', getattr(property_square, 'price', 0) // 2)
+        print(f"🏦 [MORTGAGE DEBUG] Pre-validation passed. Mortgage value: ${mortgage_value}")
+        
+        # 🎯 Call the actual GameController method
         import asyncio
         try:
             # If we're already in an async context, use await
@@ -278,12 +380,35 @@ def tool_mortgage_property(gc: Any, player_id: int, property_id: int) -> Dict[st
             success = asyncio.run(gc.mortgage_property_for_player(player_id, property_id))
         
         status = "success" if success else "failure"
-        message = f"Mortgage property {property_id}: {status}."
+        
+        if success:
+            message = f"Successfully mortgaged {property_name} for ${mortgage_value}. Your money: ${player.money}"
+            print(f"🏦 [MORTGAGE SUCCESS] {player.name} mortgaged {property_name} for ${mortgage_value}")
+        else:
+            # Get more detailed error from GameController if available
+            last_error = getattr(gc, '_last_mortgage_error', 'Unknown reason')
+            message = f"Failed to mortgage {property_name}. Reason: {last_error}. Check property status and game rules."
+            print(f"🏦 [MORTGAGE FAILURE] {player.name} failed to mortgage {property_name}. Error: {last_error}")
+        
         result = {"status": status, "message": message}
-        _log_agent_action(gc, player_id, "tool_mortgage_property", {"property_id": property_id}, result)
+        
+        # 🚨 DEADLOCK PREVENTION: Track failed actions
+        if not success and hasattr(gc, 'track_failed_action'):
+            gc.track_failed_action(player_id, "tool_mortgage_property", action_params)
+        elif success and hasattr(gc, 'clear_failed_actions_for_player'):
+            # Clear failed actions on success
+            gc.clear_failed_actions_for_player(player_id)
+            
+        _log_agent_action(gc, player_id, "tool_mortgage_property", action_params, result)
         return result
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        error_msg = f"Exception in tool_mortgage_property: {str(e)}"
+        print(f"🏦 [MORTGAGE EXCEPTION] {error_msg}")
+        import traceback
+        traceback.print_exc()
+        result = {"status": "error", "message": error_msg}
+        _log_agent_action(gc, player_id, "tool_mortgage_property", {"property_id": property_id}, result)
+        return result
 
 @tradar_verifier
 def tool_unmortgage_property(gc: Any, player_id: int, property_id: int) -> Dict[str, Any]:

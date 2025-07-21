@@ -114,6 +114,10 @@ class GameControllerV2:
         self.next_trade_id: int = 1
         self.MAX_TRADE_REJECTIONS: int = 3
         
+        # 🚨 ANTI-DEADLOCK: Track repeated failed actions to prevent infinite loops
+        self.failed_action_tracker: Dict[int, List[Dict[str, Any]]] = {}  # player_id -> [{"action": "tool_name", "params": {...}, "timestamp": float}]
+        self.MAX_REPEATED_FAILURES: int = 3  # Max times same action can fail before forced change
+        
         # Initialize managers for modular architecture FIRST
         # Use LocalPaymentManager in test environment to avoid TPay dependencies
         run_context = os.getenv("RUN_CONTEXT")
@@ -248,6 +252,113 @@ class GameControllerV2:
     def _resolve_current_action_segment(self) -> None:
         """Delegate to StateManager"""
         self.state_manager.resolve_current_action_segment()
+    
+    def track_failed_action(self, player_id: int, action_name: str, parameters: Dict[str, Any]) -> None:
+        """
+        Track a failed action to detect infinite loops.
+        
+        Args:
+            player_id: ID of the player who attempted the action
+            action_name: Name of the failed action (e.g., 'tool_mortgage_property')
+            parameters: Parameters passed to the action
+        """
+        import time
+        
+        # Initialize tracker for player if not exists
+        if player_id not in self.failed_action_tracker:
+            self.failed_action_tracker[player_id] = []
+        
+        # Add current failure
+        failure_record = {
+            "action": action_name,
+            "params": parameters,
+            "timestamp": time.time()
+        }
+        self.failed_action_tracker[player_id].append(failure_record)
+        
+        # Clean up old failures (older than 5 minutes) to prevent memory leak
+        current_time = time.time()
+        self.failed_action_tracker[player_id] = [
+            record for record in self.failed_action_tracker[player_id]
+            if current_time - record["timestamp"] < 300  # 5 minutes
+        ]
+        
+        player_name = self.players[player_id].name if 0 <= player_id < len(self.players) else f"Player {player_id}"
+        self.log_event(f"🚨 [FAILURE TRACKED] {player_name} failed action: {action_name} with params {parameters}", "warning_log")
+    
+    def check_repeated_failure(self, player_id: int, action_name: str, parameters: Dict[str, Any]) -> bool:
+        """
+        Check if a player is about to repeat a recently failed action.
+        
+        Args:
+            player_id: ID of the player attempting the action
+            action_name: Name of the action to check
+            parameters: Parameters for the action
+            
+        Returns:
+            bool: True if this action has failed repeatedly (should be blocked), False otherwise
+        """
+        if player_id not in self.failed_action_tracker:
+            return False
+        
+        # Count recent failures of the exact same action with same parameters
+        import time
+        current_time = time.time()
+        recent_failures = [
+            record for record in self.failed_action_tracker[player_id]
+            if (current_time - record["timestamp"] < 60 and  # Within last minute
+                record["action"] == action_name and
+                record["params"] == parameters)
+        ]
+        
+        if len(recent_failures) >= self.MAX_REPEATED_FAILURES:
+            player_name = self.players[player_id].name if 0 <= player_id < len(self.players) else f"Player {player_id}"
+            print(f"🚨 [DEADLOCK PREVENTION] {player_name} tried {action_name} {len(recent_failures)} times - BLOCKING to prevent infinite loop!")
+            self.log_event(f"🚨 [DEADLOCK PREVENTION] {player_name} tried {action_name} {len(recent_failures)} times with same params - BLOCKING!", "error_log")
+            return True
+        
+        return False
+    
+    def clear_failed_actions_for_player(self, player_id: int) -> None:
+        """Clear failed action history for a player (e.g., on successful action or turn end)"""
+        if player_id in self.failed_action_tracker:
+            del self.failed_action_tracker[player_id]
+    
+    def _should_add_mortgage_action(self, player_id: int) -> bool:
+        """
+        Check if tool_mortgage_property should be added to available actions.
+        Returns False if player has repeatedly failed mortgage attempts (deadlock prevention).
+        """
+        player = self.players[player_id]
+        
+        # First check if player has mortgageable properties
+        has_mortgageable = any(
+            isinstance(sq := self.board.get_square(pid), PurchasableSquare) 
+            and sq.owner_id == player_id 
+            and not sq.is_mortgaged 
+            and not (isinstance(sq, PropertySquare) and sq.num_houses > 0) 
+            for pid in player.properties_owned_ids
+        )
+        
+        if not has_mortgageable:
+            return False
+        
+        # 🚨 DEADLOCK PREVENTION: Check if player has been trying to mortgage repeatedly
+        if player_id in self.failed_action_tracker:
+            # Count recent mortgage failures
+            import time
+            current_time = time.time()
+            recent_mortgage_failures = [
+                record for record in self.failed_action_tracker[player_id]
+                if (current_time - record["timestamp"] < 60 and  # Within last minute
+                    record["action"] == "tool_mortgage_property")
+            ]
+            
+            if len(recent_mortgage_failures) >= self.MAX_REPEATED_FAILURES:
+                self.log_event(f"🚨 [DEADLOCK PREVENTION] {player.name} has failed mortgage {len(recent_mortgage_failures)} times - NOT adding tool_mortgage_property", "warning_log")
+                return False
+        
+        return True
 
     def _check_for_game_over_condition(self) -> None:
         """Check if game should end due to game over conditions (preserved from original)"""
@@ -1246,11 +1357,42 @@ class GameControllerV2:
                 
         elif self.pending_decision_type == "asset_liquidation_for_debt":
             if self.pending_decision_context.get("player_id") == player_id:
-                if any(isinstance(sq := self.board.get_square(pid), PropertySquare) and sq.owner_id == player_id and sq.num_houses > 0 for pid in player.properties_owned_ids): 
-                    actions.append("tool_sell_house")
-                if any(isinstance(sq := self.board.get_square(pid), PurchasableSquare) and sq.owner_id == player_id and not sq.is_mortgaged and not (isinstance(sq, PropertySquare) and sq.num_houses > 0) for pid in player.properties_owned_ids): 
-                    actions.append("tool_mortgage_property")
-                actions.append("tool_confirm_asset_liquidation_actions_done") 
+                player = self.players[player_id]
+                debt_amount = self.pending_decision_context.get("debt_amount", 0)
+                
+                # Check if player already has enough money to pay debt
+                if player.money >= debt_amount:
+                    self.log_event(f"💰 [DEBT CLEARED] {player.name} now has ${player.money} >= ${debt_amount} needed", "bankruptcy_event")
+                    actions.append("tool_confirm_asset_liquidation_actions_done")
+                else:
+                    # Player still needs to raise money
+                    can_liquidate_assets = False
+                    
+                    # Check for houses to sell
+                    if any(isinstance(sq := self.board.get_square(pid), PropertySquare) and sq.owner_id == player_id and sq.num_houses > 0 for pid in player.properties_owned_ids): 
+                        actions.append("tool_sell_house")
+                        can_liquidate_assets = True
+                        
+                    # Check for properties to mortgage
+                    if self._should_add_mortgage_action(player_id):
+                        actions.append("tool_mortgage_property")
+                        can_liquidate_assets = True
+                    
+                    # Check if player can still propose trades (last resort before bankruptcy)
+                    other_players_available = [p_other for p_other in self.players if not p_other.is_bankrupt and p_other.player_id != player_id]
+                    if len(other_players_available) > 0 and self.trade_manager._check_turn_trade_limit(player_id):
+                        actions.append("tool_propose_trade")
+                        self.log_event(f"💡 [TRADE OPTION] {player.name} can still propose trades to raise ${debt_amount - player.money} more", "bankruptcy_event")
+                    
+                    # If no options available, force bankruptcy decision
+                    if not can_liquidate_assets and (len(other_players_available) == 0 or not self.trade_manager._check_turn_trade_limit(player_id)):
+                        self.log_event(f"🚨 [NO OPTIONS] {player.name} has no more assets to liquidate or trades to propose - forcing bankruptcy", "bankruptcy_event")
+                        # Force bankruptcy immediately - no more options
+                        self.bankruptcy_manager._finalize_bankruptcy_declaration(player, self.players[self.pending_decision_context.get("creditor_id")] if self.pending_decision_context.get("creditor_id") is not None else None)
+                        return []  # Return empty actions as player is now bankrupt
+                    
+                    # Always provide option to confirm done (even if they can't pay - will trigger bankruptcy)
+                    actions.append("tool_confirm_asset_liquidation_actions_done")
             else: 
                 self._clear_pending_decision()
                 
@@ -1486,7 +1628,7 @@ class GameControllerV2:
                         # Other property management actions (post-roll only)
                         if any(isinstance(sq := self.board.get_square(pid), PropertySquare) and sq.owner_id == player_id and sq.num_houses > 0 for pid in player.properties_owned_ids): 
                             actions.append("tool_sell_house")
-                        if any(isinstance(sq := self.board.get_square(pid), PurchasableSquare) and sq.owner_id == player_id and not sq.is_mortgaged and not (isinstance(sq, PropertySquare) and sq.num_houses > 0) for pid in player.properties_owned_ids): 
+                        if self._should_add_mortgage_action(player_id):
                             actions.append("tool_mortgage_property")
                         if any(isinstance(sq := self.board.get_square(pid), PurchasableSquare) and sq.owner_id == player_id and sq.is_mortgaged and player.money >= int(sq.mortgage_value*1.1) for pid in player.properties_owned_ids): 
                             actions.append("tool_unmortgage_property")

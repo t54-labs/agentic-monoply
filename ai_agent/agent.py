@@ -123,14 +123,34 @@ class OpenAIAgent(BaseAgent):
         if not game_state.get('my_properties_owned_ids', []):
             prompt += "  (None)\n"
         else:
+            # 🎯 ENHANCED: Group properties by mortgage status for clarity
+            mortgaged_properties = []
+            unmortgaged_properties = []
+            
             for prop_id in game_state.get('my_properties_owned_ids', []):
                 prop = next((sq for sq in game_state.get('board_squares',[]) if sq['id'] == prop_id), None)
                 if prop:
-                    mortgaged_status = " (Mortgaged)" if prop.get('is_mortgaged') else ""
                     houses_str = ""
                     if prop.get('type') == 'PROPERTY' and prop.get('num_houses', 0) > 0:
                         houses_str = f", {prop['num_houses']} houses" if prop['num_houses'] < 5 else ", HOTEL"
-                    prompt += f"  - {prop['name']} (ID: {prop_id}){houses_str}{mortgaged_status}\n"
+                    
+                    property_line = f"  - {prop['name']} (ID: {prop_id}){houses_str}"
+                    
+                    if prop.get('is_mortgaged'):
+                        mortgaged_properties.append(property_line + " [MORTGAGED]")
+                    else:
+                        unmortgaged_properties.append(property_line + " [UNMORTGAGED]")
+            
+            # Display unmortgaged properties first, then mortgaged
+            if unmortgaged_properties:
+                prompt += "  💰 UNMORTGAGED (can be mortgaged for cash):\n"
+                for line in unmortgaged_properties:
+                    prompt += line + "\n"
+            
+            if mortgaged_properties:
+                prompt += "  🏦 MORTGAGED (already mortgaged, cannot mortgage again):\n"
+                for line in mortgaged_properties:
+                    prompt += line + "\n"
         
         gooj_cards = game_state.get('my_get_out_of_jail_cards', {})
         prompt += f"Get Out of Jail Cards: Chance: {gooj_cards.get('chance')}, Community Chest: {gooj_cards.get('community_chest')}\n"
@@ -167,24 +187,70 @@ class OpenAIAgent(BaseAgent):
                     # 🎯 CRITICAL: Show detailed property ownership for accurate trading
                     properties_owned = p_info.get('properties_owned', [])
                     if properties_owned:
-                        prompt += f"  Properties owned by {p_info['name']}:\n"
+                        prompt += f"\n  🏠 Properties owned by {p_info['name']} (use these IDs for requesting in trades):\n"
+                        
+                        # Group by mortgage status for clarity
+                        unmortgaged_props = []
+                        mortgaged_props = []
+                        
                         for prop in properties_owned:
-                            mortgaged_status = " (Mortgaged)" if prop.get('is_mortgaged') else ""
                             houses_str = ""
                             if prop.get('num_houses', 0) > 0:
                                 houses_str = f", {prop['num_houses']} houses" if prop['num_houses'] < 5 else ", HOTEL"
                             color_group_str = f" [{prop.get('color_group', 'N/A')}]" if prop.get('color_group') else ""
-                            prompt += f"    - {prop['name']} (ID: {prop['id']}){color_group_str}{houses_str}{mortgaged_status}\n"
+                            
+                            prop_line = f"    - {prop['name']} (ID: {prop['id']}){color_group_str}{houses_str}"
+                            
+                            if prop.get('is_mortgaged'):
+                                mortgaged_props.append(prop_line + " [MORTGAGED]")
+                            else:
+                                unmortgaged_props.append(prop_line + " [AVAILABLE]")
+                        
+                        # Display available properties first (more likely to be tradeable)
+                        if unmortgaged_props:
+                            prompt += f"    💰 AVAILABLE for trade:\n"
+                            for line in unmortgaged_props:
+                                prompt += line + "\n"
+                        
+                        if mortgaged_props:
+                            prompt += f"    🏦 MORTGAGED (may be less desirable):\n"
+                            for line in mortgaged_props:
+                                prompt += line + "\n"
                     else:
-                        prompt += f"  {p_info['name']} owns no properties\n"
+                        prompt += f"  ❌ {p_info['name']} owns no properties\n"
+                prompt += "\n"  # Add spacing between players
         
         # Recent Game Events
         prompt += "\n--- Recent Game Events (Last 5) ---\n"
         if not game_state.get('game_log_tail', []):
             prompt += "  (No recent events)\n"
         else:
-            for log_entry in game_state.get('game_log_tail', [])[-5:]:
-                prompt += f"- {log_entry}\n"
+            # 🎯 ENHANCED: Highlight error/failure events for better AI awareness
+            recent_events = game_state.get('game_log_tail', [])[-5:]
+            
+            # Separate successful events from error events
+            error_events = []
+            success_events = []
+            
+            for log_entry in recent_events:
+                # Check for error/failure keywords
+                error_keywords = ['failed', 'failure', 'error', 'cannot', 'invalid', 'already mortgaged', 'not owned', 'insufficient']
+                if any(keyword.lower() in log_entry.lower() for keyword in error_keywords):
+                    error_events.append(log_entry)
+                else:
+                    success_events.append(log_entry)
+            
+            # Display error events first with warning emoji
+            if error_events:
+                prompt += "  ⚠️ RECENT ERRORS/FAILURES (learn from these!):\n"
+                for event in error_events:
+                    prompt += f"    ❌ {event}\n"
+            
+            if success_events:
+                if error_events:  # Add separator if there were errors
+                    prompt += "\n  ✅ SUCCESSFUL EVENTS:\n"
+                for event in success_events:
+                    prompt += f"    • {event}\n"
 
         # Current Trade Information (if applicable)
         current_trade_info = game_state.get('current_trade_info')
@@ -458,8 +524,8 @@ class OpenAIAgent(BaseAgent):
             "tool_pass_on_buying_property": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",
             "tool_build_house": "Parameters: {\"property_id\": <integer>} (builds ONE house on the specified property)",
             "tool_sell_house": "Parameters: {\"property_id\": <integer>} (sells ONE house from the specified property)",
-            "tool_mortgage_property": "Parameters: {\"property_id\": <integer>}",
-            "tool_unmortgage_property": "Parameters: {\"property_id\": <integer>}",
+            "tool_mortgage_property": "Parameters: {\"property_id\": <integer>} - 🚨 ONLY for UNMORTGAGED properties!",
+            "tool_unmortgage_property": "Parameters: {\"property_id\": <integer>} - 🚨 ONLY for MORTGAGED properties!",
             "tool_pay_bail": "Parameters: {} (no parameters needed)",
             "tool_use_get_out_of_jail_card": "Parameters: {} (no parameters needed)",
             "tool_roll_for_doubles_to_get_out_of_jail": "Parameters: {} (no parameters needed)",
@@ -485,6 +551,44 @@ class OpenAIAgent(BaseAgent):
             else:
                 prompt += f"• {action_name}: Parameters: {{}} (unknown tool, use no parameters)\n"
         
+        # 🚨 CRITICAL OPERATION VALIDATION - Add comprehensive guidance
+        prompt += "\n🚨 CRITICAL OPERATION VALIDATION CHECKLIST:\n"
+        prompt += "Before taking ANY action, you MUST verify:\n\n"
+        
+        # Mortgage-specific validation
+        if "tool_mortgage_property" in available_actions:
+            prompt += "💰 MORTGAGE PROPERTY VALIDATION:\n"
+            prompt += "1. ✅ Check 'UNMORTGAGED' section above - property must be listed there\n"
+            prompt += "2. ❌ NEVER mortgage properties listed in 'MORTGAGED' section\n"
+            prompt += "3. ❌ If property shows '[MORTGAGED]' - it's ALREADY mortgaged!\n"
+            prompt += "4. ❌ If you just mortgaged a property this turn - DON'T mortgage it again!\n"
+            prompt += "5. ✅ Only use property_id from your own properties in UNMORTGAGED section\n\n"
+        
+        if "tool_unmortgage_property" in available_actions:
+            prompt += "🏦 UNMORTGAGE PROPERTY VALIDATION:\n"
+            prompt += "1. ✅ Check 'MORTGAGED' section above - property must be listed there\n"
+            prompt += "2. ❌ NEVER unmortgage properties listed in 'UNMORTGAGED' section\n"
+            prompt += "3. ❌ If property shows '[UNMORTGAGED]' - it's NOT mortgaged!\n"
+            prompt += "4. ✅ Only use property_id from your own properties in MORTGAGED section\n\n"
+        
+        # Trade-specific validation
+        if "tool_propose_trade" in available_actions or "tool_propose_counter_offer" in available_actions:
+            prompt += "🤝 TRADE PROPOSAL VALIDATION:\n"
+            prompt += "1. ✅ For offered_property_ids: Use ONLY properties from YOUR 'Properties Owned' section\n"
+            prompt += "2. ✅ For requested_property_ids: Use ONLY properties from TARGET PLAYER's property list\n"
+            prompt += "3. ❌ NEVER offer properties you don't own (not in your Properties Owned section)\n"
+            prompt += "4. ❌ NEVER request properties the other player doesn't own\n"
+            prompt += "5. ✅ Cross-reference 'Properties owned by [Player]' section for exact property IDs\n"
+            prompt += "6. ✅ Double-check property ownership in 'Opponent Status' section above\n\n"
+        
+        # General validation
+        prompt += "⚡ GENERAL ACTION VALIDATION:\n"
+        prompt += "1. 🔄 READ recent game events - avoid repeating failed actions immediately\n"
+        prompt += "2. 🎯 Check 'Available actions' - only use actions from this list\n"
+        prompt += "3. 💡 If an action just failed - understand WHY before trying similar actions\n"
+        prompt += "4. 🧠 THINK: Does this action make sense given current game state?\n"
+        prompt += "5. 📋 Verify all parameters match the specifications above exactly\n\n"
+
         # 🚨 CRITICAL: Add property ID verification for trades AND counter offers
         if "tool_propose_trade" in available_actions or "tool_propose_counter_offer" in available_actions:
             prompt += "\n🔍 PROPERTY ID VERIFICATION - READ CAREFULLY!\n"
@@ -524,7 +628,20 @@ class OpenAIAgent(BaseAgent):
         prompt += "\n2. 'tool_name': The exact name of the chosen action from the available actions list\n"
         prompt += "3. 'parameters': A JSON object containing the action parameters (use {} if no parameters needed)\n"        
         # Error handling
-        prompt += "\n🚨 If previous actions failed: Read error messages and adjust parameters. Don't repeat failed actions.\n"
+        prompt += "\n🚨 CRITICAL ERROR HANDLING AND STRATEGY ADJUSTMENT:\n"
+        prompt += "If your previous action FAILED (you see error messages), you MUST:\n"
+        prompt += "1. 📖 READ the error message carefully for specific failure reasons\n"
+        prompt += "2. 🚫 DO NOT repeat the same action with same parameters immediately\n"
+        prompt += "3. 🔍 ANALYZE why it failed (wrong property ID, already mortgaged, don't own property, etc.)\n"
+        prompt += "4. ✅ CHOOSE a different action OR different parameters that address the failure reason\n"
+        prompt += "5. 🎯 If you can't fix the issue, choose tool_end_turn to avoid infinite loops\n\n"
+        
+        prompt += "COMMON FAILURE PATTERNS TO AVOID:\n"
+        prompt += "❌ Trying to mortgage already mortgaged properties\n"
+        prompt += "❌ Trying to unmortgage already unmortgaged properties\n"
+        prompt += "❌ Proposing trades with properties you don't own\n"
+        prompt += "❌ Requesting properties the other player doesn't own\n"
+        prompt += "❌ Repeating identical failed actions without understanding why they failed\n\n"
         
         prompt += "\nExamples:\n"
         if self.personality:
@@ -540,7 +657,10 @@ class OpenAIAgent(BaseAgent):
             "You are an expert Monopoly AI player. Your goal: win by bankrupting opponents while avoiding bankruptcy. "
             "Respond with valid JSON: {'thoughts': 'reasoning', 'tool_name': 'action', 'parameters': {}}. "
             "Building houses and completing monopolies are highest priorities. "
-            "Use exact property IDs from the provided information - never guess."
+            "Use exact property IDs from the provided information - never guess. "
+            "CRITICAL: Always verify property states (mortgaged/unmortgaged) and ownership before acting. "
+            "Never repeat failed actions immediately - learn from errors and adjust strategy. "
+            "When mortgaging: only use UNMORTGAGED properties. When trading: only offer/request properties actually owned by the respective players."
         )
         
         messages = [

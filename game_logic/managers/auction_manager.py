@@ -107,6 +107,36 @@ class AuctionManager(BaseManager):
         
         self.gc._resolve_current_action_segment()
         
+    def handle_auction_pass(self, player_id: int) -> bool:
+        """
+        Handle a player passing on the auction.
+        
+        Args:
+            player_id: ID of the player passing
+            
+        Returns:
+            bool: True if pass was processed, False otherwise
+        """
+        if not self.gc.auction_in_progress:
+            self.log_event(f"No auction in progress for pass from player {player_id}", "error_auction")
+            return False
+            
+        player = self.players[player_id]
+        
+        # Remove player from active bidders
+        if player in self.gc.auction_active_bidders:
+            self.gc.auction_active_bidders.remove(player)
+            
+        self.gc.auction_player_has_bid_this_round[player_id] = True
+        
+        prop_name = self.board.get_square(self.gc.auction_property_id).name
+        self.log_event(f"{player.name} passes on auction for {prop_name}", "auction_event")
+        
+        # 🎪 CRITICAL: Progress auction after pass
+        self._progress_auction()
+        
+        return True
+        
     def handle_auction_bid(self, player_id: int, bid_amount: int) -> bool:
         """
         Handle a player's auction bid.
@@ -140,31 +170,67 @@ class AuctionManager(BaseManager):
         prop_name = self.board.get_square(self.gc.auction_property_id).name
         self.log_event(f"{player.name} bids ${bid_amount} for {prop_name}", "auction_event")
         
+        # 🎪 CRITICAL: Progress auction after bid
+        self._progress_auction()
+        
         return True
         
-    def handle_auction_pass(self, player_id: int) -> bool:
+    def _progress_auction(self) -> None:
         """
-        Handle a player passing on the auction.
-        
-        Args:
-            player_id: ID of the player passing
-            
-        Returns:
-            bool: True if pass was processed, False otherwise
+        Progress the auction to the next bidder or conclude if finished.
         """
         if not self.gc.auction_in_progress:
-            self.log_event(f"No auction in progress for pass from player {player_id}", "error_auction")
-            return False
+            return
             
-        player = self.players[player_id]
-        
-        # Remove player from active bidders
-        if player in self.gc.auction_active_bidders:
-            self.gc.auction_active_bidders.remove(player)
+        # Check if auction should end
+        if len(self.gc.auction_active_bidders) <= 1:
+            # Only one or no bidders left - end auction
+            self.log_event(f"🎪 [AUCTION END] Only {len(self.gc.auction_active_bidders)} active bidders remaining", "auction_event")
+            import asyncio
+            # Run conclude_auction in async context
+            task = asyncio.create_task(self.conclude_auction())
+            # Schedule it to run in the current event loop
+            return
             
-        self.gc.auction_player_has_bid_this_round[player_id] = True
+        # Find next bidder
+        current_bidder_id = self.gc.pending_decision_context.get("player_id")
         
-        prop_name = self.board.get_square(self.gc.auction_property_id).name
-        self.log_event(f"{player.name} passes on auction for {prop_name}", "auction_event")
+        # Find next active bidder
+        next_bidder = None
+        current_index = -1
         
-        return True 
+        # Find current bidder's index in active bidders
+        for i, bidder in enumerate(self.gc.auction_active_bidders):
+            if bidder.player_id == current_bidder_id:
+                current_index = i
+                break
+                
+        if current_index >= 0:
+            # Get next bidder (wrap around if necessary)
+            next_index = (current_index + 1) % len(self.gc.auction_active_bidders)
+            next_bidder = self.gc.auction_active_bidders[next_index]
+        else:
+            # If current bidder not found, start with first active bidder
+            next_bidder = self.gc.auction_active_bidders[0] if self.gc.auction_active_bidders else None
+            
+        if next_bidder:
+            # Set pending decision for next bidder
+            prop_name = self.board.get_square(self.gc.auction_property_id).name
+            self.log_event(f"🎪 [AUCTION PROGRESS] Next bidder: {next_bidder.name} for {prop_name} (current bid: ${self.gc.auction_current_bid})", "auction_event")
+            
+            self.gc._set_pending_decision(
+                "auction_bid_decision",
+                context={
+                    "player_id": next_bidder.player_id,
+                    "property_id": self.gc.auction_property_id,
+                    "current_bid": self.gc.auction_current_bid,
+                    "property_name": prop_name,
+                    "active_bidders": len(self.gc.auction_active_bidders)
+                },
+                outcome_processed=False
+            )
+        else:
+            # No more bidders - end auction
+            self.log_event(f"🎪 [AUCTION END] No more active bidders", "auction_event")
+            import asyncio
+            task = asyncio.create_task(self.conclude_auction()) 

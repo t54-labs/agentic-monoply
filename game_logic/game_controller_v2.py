@@ -1296,6 +1296,18 @@ class GameControllerV2:
         if player.is_bankrupt: 
             return ["tool_wait"]
 
+        # 💸 CRITICAL: Auto-bankruptcy check for players with very low funds
+        if player.money <= 10 and not player.is_bankrupt:  # Very low threshold
+            # Check if player has any assets to liquidate
+            total_asset_value = self.bankruptcy_manager._calculate_total_asset_value(player)
+            
+            if total_asset_value <= 50:  # Including properties, player is nearly worthless
+                self.log_event(f"💸 [AUTO BANKRUPTCY CHECK] {player.name} has only ${player.money} and ${total_asset_value} total assets", "bankruptcy_event")
+                
+                # Check if player owes any debts that would trigger bankruptcy
+                # For now, just log the warning - bankruptcy will be triggered when they actually owe money
+                self.log_event(f"⚠️ [BANKRUPTCY WARNING] {player.name} is very close to bankruptcy", "bankruptcy_event")
+        
         # Handle specific decision types that override normal turn actions
         if self.pending_decision_type == "jail_options":
             if self.pending_decision_context.get("player_id") == player_id: 
@@ -1396,11 +1408,17 @@ class GameControllerV2:
             else: 
                 self._clear_pending_decision()
                 
-        elif self.pending_decision_type == "auction_bid": 
-            if self.pending_decision_context.get("player_to_bid_id") == player_id and player_id in [p.player_id for p in self.auction_active_bidders]: 
+        elif self.pending_decision_type == "auction_bid_decision": 
+            # 🎪 AUCTION: Player needs to bid or pass on auction
+            auction_player_id = self.pending_decision_context.get("player_id")
+            if auction_player_id == player_id and player_id in [p.player_id for p in self.auction_active_bidders]: 
                 actions.extend(["tool_bid_on_auction", "tool_pass_auction_bid"]) 
+                self.log_event(f"🎪 [AUCTION ACTIONS] {player.name} can bid or pass on auction", "debug_auction")
             elif player_id in [p.player_id for p in self.auction_active_bidders]: 
                 actions.append("tool_wait")
+                self.log_event(f"🎪 [AUCTION WAIT] {player.name} waiting for auction turn", "debug_auction")
+            else:
+                self.log_event(f"🎪 [AUCTION SKIP] {player.name} not participating in auction", "debug_auction")
                 
         elif self.pending_decision_type == "action_card_draw":
             if self.pending_decision_context.get("player_id") == player_id:

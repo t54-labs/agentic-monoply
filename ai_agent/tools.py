@@ -599,27 +599,72 @@ def tool_bid_on_auction(gc: Any, player_id: int, bid_amount: int) -> Dict[str, A
     """Player places a bid in an ongoing auction."""
     player = gc.players[player_id]
     try:
-        if not (gc.auction_in_progress and gc.pending_decision_type == "auction_bid" and gc.pending_decision_context.get("player_to_bid_id") == player_id):
-            return {"status": "failure", "message": "Not player's turn to bid or auction not active."}
-        gc._handle_auction_bid(player, bid_amount)
-        message = f"{player.name} bids ${bid_amount}. GC logs actual acceptance."
-        result = {"status": "success", "message": message}
+        # 🎪 AUCTION BID: Check if it's player's turn to bid
+        if not gc.auction_in_progress:
+            return {"status": "failure", "message": "No auction in progress."}
+        
+        if gc.pending_decision_type != "auction_bid_decision":
+            return {"status": "failure", "message": f"Not in auction bidding phase. Current decision: {gc.pending_decision_type}"}
+            
+        auction_player_id = gc.pending_decision_context.get("player_id")
+        if auction_player_id != player_id:
+            return {"status": "failure", "message": f"Not your turn to bid. Current bidder: {auction_player_id}"}
+        
+        # Validate bid amount
+        current_bid = gc.auction_current_bid
+        if bid_amount <= current_bid:
+            return {"status": "failure", "message": f"Bid ${bid_amount} must be higher than current bid ${current_bid}"}
+            
+        if player.money < bid_amount:
+            return {"status": "failure", "message": f"Cannot afford bid ${bid_amount}. You have ${player.money}"}
+        
+        # Execute bid through auction manager
+        success = gc.auction_manager.handle_auction_bid(player_id, bid_amount)
+        
+        if success:
+            message = f"{player.name} successfully bid ${bid_amount}"
+            result = {"status": "success", "message": message, "bid_amount": bid_amount}
+        else:
+            result = {"status": "failure", "message": f"Bid ${bid_amount} was rejected"}
+            
         _log_agent_action(gc, player_id, "tool_bid_on_auction", {"bid_amount": bid_amount}, result)
         return result
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e: 
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "message": f"Auction bid error: {str(e)}"}
 
 @tradar_verifier
 def tool_pass_auction_bid(gc: Any, player_id: int) -> Dict[str, Any]:
     """Player passes their turn to bid in an ongoing auction."""
     player = gc.players[player_id]
     try:
-        if not (gc.auction_in_progress and gc.pending_decision_type == "auction_bid" and gc.pending_decision_context.get("player_to_bid_id") == player_id):
-            return {"status": "failure", "message": "Not player's turn to pass bid or auction not active."}
-        gc._handle_auction_pass(player)
-        result = {"status": "success", "message": f"{player.name} passed auction bid."}
+        # 🎪 AUCTION PASS: Check if it's player's turn to pass
+        if not gc.auction_in_progress:
+            return {"status": "failure", "message": "No auction in progress."}
+        
+        if gc.pending_decision_type != "auction_bid_decision":
+            return {"status": "failure", "message": f"Not in auction bidding phase. Current decision: {gc.pending_decision_type}"}
+            
+        auction_player_id = gc.pending_decision_context.get("player_id")
+        if auction_player_id != player_id:
+            return {"status": "failure", "message": f"Not your turn to pass. Current bidder: {auction_player_id}"}
+        
+        # Execute pass through auction manager
+        success = gc.auction_manager.handle_auction_pass(player_id)
+        
+        if success:
+            message = f"{player.name} passed on auction bid"
+            result = {"status": "success", "message": message}
+        else:
+            result = {"status": "failure", "message": "Failed to pass auction bid"}
+            
         _log_agent_action(gc, player_id, "tool_pass_auction_bid", {}, result)
         return result
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e: 
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "message": f"Auction pass error: {str(e)}"}
 
 @tradar_verifier
 def tool_withdraw_from_auction(gc: Any, player_id: int) -> Dict[str, Any]:

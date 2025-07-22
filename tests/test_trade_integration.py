@@ -162,7 +162,7 @@ async def execute_agent_action(gc: GameControllerV2, player_id: int, tool_name: 
 class RealLLMTradeIntegrationAgent(OpenAIAgent):
     """Real LLM agent for trade testing that uses actual OpenAI API calls"""
     
-    def __init__(self, player_id: int, name: str, model_name: str = "gpt-4o-mini", 
+    def __init__(self, player_id: int, name: str, model_name: str = "gpt-4o", 
                  fallback_decisions: List[Dict[str, Any]] = None, enable_llm: bool = True):
         # Generate unique IDs for the agent
         agent_uid = f"trade_test_agent_{player_id}_{uuid.uuid4().hex[:6]}"

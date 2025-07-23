@@ -186,7 +186,7 @@ class PropertyManager(BaseManager):
         
         # Get the property square
         try:
-            property_square = self.board.get_square(property_id)
+        property_square = self.board.get_square(property_id)
         except Exception as e:
             error_msg = f"Failed to get property {property_id}: {e}"
             self.log_event(error_msg, "error_property")
@@ -239,8 +239,8 @@ class PropertyManager(BaseManager):
                 error_msg = f"Cannot mortgage {property_square.name} - other {color_group} properties have houses: {house_info}"
                 self.log_event(error_msg, "error_property")
                 self.gc._last_mortgage_error = error_msg
-                return False
-        
+            return False
+            
         # Calculate mortgage amount (50% of property price)
         mortgage_amount = property_square.price // 2
         
@@ -268,23 +268,23 @@ class PropertyManager(BaseManager):
         
         # Production mode: Use TPay payment
         try:
-            # Execute TPay payment from system to player (mortgage loan)
-            payment_success = await self.gc.payment_manager.create_tpay_payment_system_to_player(
-                recipient=player,
-                amount=float(mortgage_amount),
-                reason=f"mortgage loan for {property_square.name}",
-                event_description=f"{player.name} mortgaged {property_square.name}"
-            )
+        # Execute TPay payment from system to player (mortgage loan)
+        payment_success = await self.gc.payment_manager.create_tpay_payment_system_to_player(
+            recipient=player,
+            amount=float(mortgage_amount),
+            reason=f"mortgage loan for {property_square.name}",
+            event_description=f"{player.name} mortgaged {property_square.name}"
+        )
+        
+        if payment_success:
+            # Mortgage the property
+            property_square.is_mortgaged = True
             
-            if payment_success:
-                # Mortgage the property
-                property_square.is_mortgaged = True
-                
-                self.log_event(f"{player.name} mortgaged {property_square.name} for ${mortgage_amount}", "success_property")
+            self.log_event(f"{player.name} mortgaged {property_square.name} for ${mortgage_amount}", "success_property")
                 self.gc._last_mortgage_error = None  # Clear error on success
                 print(f"🏦 [MORTGAGE SUCCESS] {player.name} money after: ${player.money}")
-                return True
-            else:
+            return True
+        else:
                 error_msg = f"TPay payment failed for mortgaging {property_square.name}"
                 self.log_event(error_msg, "error_property")
                 self.gc._last_mortgage_error = error_msg

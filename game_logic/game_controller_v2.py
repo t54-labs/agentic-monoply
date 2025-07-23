@@ -130,7 +130,7 @@ class GameControllerV2:
             print(f"💳 [GAME CONTROLLER INIT] Using LocalPaymentManager (test environment)")
             self.log_event(f"💳 [PAYMENT MANAGER] Using LocalPaymentManager (test environment)", "game_log_event")
         else:
-            self.payment_manager = PaymentManager(self)
+        self.payment_manager = PaymentManager(self)
             print(f"💳 [GAME CONTROLLER INIT] Using PaymentManager (production environment)")
             self.log_event(f"💳 [PAYMENT MANAGER] Using PaymentManager (production environment)", "game_log_event")
             
@@ -228,7 +228,7 @@ class GameControllerV2:
                     await event_handler.handle_special_event(self.game_uid, event_type, player_name, combined_event_data)
         except Exception as e:
             self.log_event(f"[Warning] Failed to send special event notification: {e}", "warning_log")
-
+        
     async def send_event_to_frontend(self, message_data: Dict[str, Any]):
         """Send events to frontend - Thread-safe via message queue"""
         if "game_id" not in message_data:
@@ -510,7 +510,7 @@ class GameControllerV2:
             self.log_event(f"{player.name} still has {len(player.pending_mortgaged_properties_to_handle)} mortgaged properties to handle", "debug_mortgage")
         
         return True
-
+        
     def next_turn(self) -> None:
         """Delegate to StateManager"""
         self.state_manager.next_turn()
@@ -1140,7 +1140,7 @@ class GameControllerV2:
         
         # 🎯 When rolling dice, we're in "processing" state - not pre_roll or post_roll
         # This will be set to post_roll after movement and landing are processed
-        
+
         if self.is_double_roll():
             self.doubles_streak += 1
             self.log_event(f"🎯 [DOUBLES ROLLED] {current_player.name} rolled doubles! Current streak: {self.doubles_streak}", "game_log_event")
@@ -1381,13 +1381,13 @@ class GameControllerV2:
                     can_liquidate_assets = False
                     
                     # Check for houses to sell
-                    if any(isinstance(sq := self.board.get_square(pid), PropertySquare) and sq.owner_id == player_id and sq.num_houses > 0 for pid in player.properties_owned_ids): 
-                        actions.append("tool_sell_house")
+                if any(isinstance(sq := self.board.get_square(pid), PropertySquare) and sq.owner_id == player_id and sq.num_houses > 0 for pid in player.properties_owned_ids): 
+                    actions.append("tool_sell_house")
                         can_liquidate_assets = True
                         
                     # Check for properties to mortgage
                     if self._should_add_mortgage_action(player_id):
-                        actions.append("tool_mortgage_property")
+                    actions.append("tool_mortgage_property")
                         can_liquidate_assets = True
                     
                     # Check if player can still propose trades (last resort before bankruptcy)
@@ -1404,7 +1404,7 @@ class GameControllerV2:
                         return []  # Return empty actions as player is now bankrupt
                     
                     # Always provide option to confirm done (even if they can't pay - will trigger bankruptcy)
-                    actions.append("tool_confirm_asset_liquidation_actions_done")
+                actions.append("tool_confirm_asset_liquidation_actions_done") 
             else: 
                 self._clear_pending_decision()
                 
@@ -1415,7 +1415,7 @@ class GameControllerV2:
                 actions.extend(["tool_bid_on_auction", "tool_pass_auction_bid"]) 
                 self.log_event(f"🎪 [AUCTION ACTIONS] {player.name} can bid or pass on auction", "debug_auction")
             elif player_id in [p.player_id for p in self.auction_active_bidders]: 
-                actions.append("tool_wait")
+                actions.append("tool_wait") 
                 self.log_event(f"🎪 [AUCTION WAIT] {player.name} waiting for auction turn", "debug_auction")
             else:
                 self.log_event(f"🎪 [AUCTION SKIP] {player.name} not participating in auction", "debug_auction")
@@ -1549,7 +1549,7 @@ class GameControllerV2:
                         except Exception as e:
                             self.log_event(f"[ERROR] Auto dice roll failed for {player.name}: {e}", "error_log")
                             # Fallback to manual dice rolling
-                            actions.append("tool_roll_dice")
+                        actions.append("tool_roll_dice")
                             return actions
                         
                     elif self.turn_phase == "post_roll":
@@ -1582,11 +1582,11 @@ class GameControllerV2:
                                    square_check.num_houses < 5 and \
                                    player.money >= square_check.house_price:
                                     
-                                    # Check if owns all properties in the color group
-                                    color_group_properties = self.board.get_properties_in_group(square_check.color_group)
+                                # Check if owns all properties in the color group
+                                color_group_properties = self.board.get_properties_in_group(square_check.color_group)
                                     self.log_event(f"    * Color group has {len(color_group_properties)} properties total", "debug_build_house")
                                     
-                                    owns_all_in_group_unmortgaged = True
+                                owns_all_in_group_unmortgaged = True
                                     owned_count = 0
                                     mortgaged_count = 0
                                     
@@ -1606,13 +1606,13 @@ class GameControllerV2:
                                         if not (isinstance(prop_square, PropertySquare) and 
                                                prop_square.owner_id == player_id and 
                                                not prop_square.is_mortgaged):
-                                            owns_all_in_group_unmortgaged = False
+                                        owns_all_in_group_unmortgaged = False
                                     
                                     self.log_event(f"    * Owned in group: {owned_count}/{len(color_group_properties)}", "debug_build_house")
                                     self.log_event(f"    * Mortgaged in group: {mortgaged_count}", "debug_build_house")
                                     self.log_event(f"    * Owns all unmortgaged: {owns_all_in_group_unmortgaged}", "debug_build_house")
                                     
-                                    if owns_all_in_group_unmortgaged:
+                                if owns_all_in_group_unmortgaged:
                                         # Check even building rule
                                         min_houses_in_group = min(prop.num_houses for prop in color_group_properties 
                                                                  if isinstance(prop, PropertySquare) and prop.owner_id == player_id)
@@ -1620,10 +1620,10 @@ class GameControllerV2:
                                         self.log_event(f"    * This property houses: {square_check.num_houses}", "debug_build_house")
                                         self.log_event(f"    * Can build (even rule): {square_check.num_houses == min_houses_in_group}", "debug_build_house")
                                         
-                                        if square_check.num_houses == min_houses_in_group:
-                                            can_build_on_any_property = True
+                                    if square_check.num_houses == min_houses_in_group: 
+                                        can_build_on_any_property = True
                                             self.log_event(f"    ✅ CAN BUILD on {square_check.name}!", "debug_build_house")
-                                            break
+                                        break
                                         else:
                                             self.log_event(f"    ❌ Cannot build - must build on properties with {min_houses_in_group} houses first", "debug_build_house")
                                     else:
@@ -1654,7 +1654,7 @@ class GameControllerV2:
                         if len([p_other for p_other in self.players if not p_other.is_bankrupt and p_other.player_id != player_id]) > 0: 
                             # Check if player can still propose trades this turn
                             if self.trade_manager._check_turn_trade_limit(player_id):
-                                actions.append("tool_propose_trade")
+                            actions.append("tool_propose_trade")
                             else:
                                 self.log_event(f"[TRADE LIMIT] {player.name} cannot propose more trades this turn", "debug_trade")
                         

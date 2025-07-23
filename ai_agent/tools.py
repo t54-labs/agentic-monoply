@@ -8,9 +8,180 @@ from tpay.tools import tradar_verifier
 # from game_logic.game_controller import GameController # Ideal import
 
 # --- Helper to log tool usage (optional, can be integrated into each tool)
-def _log_agent_action(gc: Any, player_id: int, tool_name: str, params: Dict[str, Any], result: Dict[str, Any]):
+def generate_smart_action_suggestions(gc, player_id: int, failed_action: str, failed_params: Dict[str, Any], error_message: str) -> str:
+    """
+    Generate smart suggestions for fixing failed actions.
+    
+    Args:
+        gc: Game controller instance
+        player_id: ID of the player who had the failed action
+        failed_action: Name of the failed action (e.g., 'tool_propose_trade')
+        failed_params: Parameters that were used in the failed action
+        error_message: The error message returned
+        
+    Returns:
+        str: Smart suggestions for fixing the action
+    """
+    suggestions = []
     player = gc.players[player_id]
-    gc.log_event(f"Agent {player.name} (P{player_id}) used Tool '{tool_name}' with {params}. Result: {result.get('status')} - {result.get('message', '')}")
+    
+    try:
+        if "ownership" in error_message.lower() or "doesn't own" in error_message.lower():
+            # Property ownership issues
+            if failed_action in ["tool_propose_trade", "tool_propose_counter_offer"]:
+                suggestions.append("🎯 PROPERTY OWNERSHIP FIX:")
+                
+                # Suggest correct properties to offer
+                if player.properties_owned_ids:
+                    suggestions.append(f"✅ Properties you CAN offer: {[f'{gc.board.get_square(pid).name}(ID:{pid})' for pid in sorted(player.properties_owned_ids)]}")
+                else:
+                    suggestions.append("❌ You own no properties - consider offering money instead")
+                
+                # If this is a trade action, suggest valid recipients and their properties
+                if "recipient_id" in failed_params:
+                    recipient_id = failed_params.get("recipient_id")
+                    if 0 <= recipient_id < len(gc.players):
+                        recipient = gc.players[recipient_id]
+                        if recipient.properties_owned_ids:
+                            suggestions.append(f"✅ Properties you CAN request from {recipient.name}: {[f'{gc.board.get_square(pid).name}(ID:{pid})' for pid in sorted(recipient.properties_owned_ids)]}")
+                        else:
+                            suggestions.append(f"❌ {recipient.name} owns no properties - consider requesting money instead")
+            
+            elif failed_action == "tool_mortgage_property":
+                # Find properties that can be mortgaged
+                mortgageable = []
+                for pid in player.properties_owned_ids:
+                    square = gc.board.get_square(pid)
+                    if hasattr(square, 'is_mortgaged') and not square.is_mortgaged:
+                        mortgageable.append(f"{square.name}(ID:{pid})")
+                
+                if mortgageable:
+                    suggestions.append(f"✅ Properties you CAN mortgage: {mortgageable}")
+                else:
+                    suggestions.append("❌ No properties available to mortgage (all already mortgaged or you own none)")
+        
+        elif "mortgaged" in error_message.lower():
+            # Mortgage-related issues
+            if "already mortgaged" in error_message.lower():
+                suggestions.append("🏦 MORTGAGE STATUS FIX:")
+                suggestions.append("❌ You tried to mortgage an already mortgaged property")
+                
+                # Find unmortgaged properties
+                unmortgaged = []
+                for pid in player.properties_owned_ids:
+                    square = gc.board.get_square(pid)
+                    if hasattr(square, 'is_mortgaged') and not square.is_mortgaged:
+                        unmortgaged.append(f"{square.name}(ID:{pid})")
+                
+                if unmortgaged:
+                    suggestions.append(f"✅ Try these unmortgaged properties instead: {unmortgaged}")
+                else:
+                    suggestions.append("❌ All your properties are already mortgaged")
+            
+            elif "not mortgaged" in error_message.lower():
+                suggestions.append("🏦 UNMORTGAGE STATUS FIX:")
+                suggestions.append("❌ You tried to unmortgage a property that isn't mortgaged")
+                
+                # Find mortgaged properties
+                mortgaged = []
+                for pid in player.properties_owned_ids:
+                    square = gc.board.get_square(pid)
+                    if hasattr(square, 'is_mortgaged') and square.is_mortgaged:
+                        mortgaged.append(f"{square.name}(ID:{pid})")
+                
+                if mortgaged:
+                    suggestions.append(f"✅ Try these mortgaged properties instead: {mortgaged}")
+                else:
+                    suggestions.append("❌ None of your properties are mortgaged")
+        
+        elif "funds" in error_message.lower() or "money" in error_message.lower() or "afford" in error_message.lower():
+            # Money-related issues
+            suggestions.append("💰 INSUFFICIENT FUNDS FIX:")
+            suggestions.append(f"❌ Current money: ${player.money}")
+            
+            if failed_action == "tool_build_house":
+                property_id = failed_params.get("property_id")
+                if property_id:
+                    square = gc.board.get_square(property_id)
+                    if hasattr(square, 'house_price'):
+                        suggestions.append(f"❌ House cost: ${square.house_price}")
+                        suggestions.append(f"💡 Need ${square.house_price - player.money} more")
+            
+            # Suggest ways to get money
+            money_options = []
+            for pid in player.properties_owned_ids:
+                square = gc.board.get_square(pid)
+                if hasattr(square, 'is_mortgaged') and not square.is_mortgaged:
+                    if hasattr(square, 'mortgage_value'):
+                        money_options.append(f"Mortgage {square.name} for ${square.mortgage_value}")
+            
+            if money_options:
+                suggestions.append(f"💡 Ways to get money: {money_options[:3]}")  # Show first 3 options
+        
+        elif "monopoly" in error_message.lower() or "color group" in error_message.lower():
+            # Monopoly/color group issues
+            suggestions.append("🏠 MONOPOLY REQUIREMENT FIX:")
+            suggestions.append("❌ You need to own ALL properties in a color group to build houses")
+            
+            # Analyze current color group ownership
+            property_id = failed_params.get("property_id")
+            if property_id:
+                square = gc.board.get_square(property_id)
+                if hasattr(square, 'color_group'):
+                    color_group = square.color_group
+                    suggestions.append(f"🎯 For {color_group.name} group, you need:")
+                    
+                    # Find all properties in this color group
+                    all_in_group = []
+                    owned_in_group = []
+                    missing_in_group = []
+                    
+                    for pid in range(40):
+                        try:
+                            sq = gc.board.get_square(pid)
+                            if hasattr(sq, 'color_group') and sq.color_group == color_group:
+                                all_in_group.append(sq)
+                                if sq.owner_id == player_id:
+                                    owned_in_group.append(sq.name)
+                                else:
+                                    owner_name = "Bank" if sq.owner_id is None else gc.players[sq.owner_id].name
+                                    missing_in_group.append(f"{sq.name} (owned by {owner_name})")
+                        except:
+                            pass
+                    
+                    if owned_in_group:
+                        suggestions.append(f"✅ You own: {owned_in_group}")
+                    if missing_in_group:
+                        suggestions.append(f"❌ You need: {missing_in_group}")
+        
+    except Exception as e:
+        suggestions.append(f"❌ Could not generate specific suggestions: {e}")
+    
+    if suggestions:
+        return "\n" + "\n".join(suggestions) + "\n"
+    else:
+        return "\n💡 Check the game state and try a different approach.\n"
+
+
+# 🎯 ENHANCED: Add smart suggestions to error handling
+def _log_agent_action(gc, player_id: int, action_name: str, params: Dict[str, Any], result: Dict[str, Any]) -> None:
+    """Enhanced logging with smart suggestions for failed actions"""
+    player_name = gc.players[player_id].name if 0 <= player_id < len(gc.players) else f"Player {player_id}"
+    status = result.get("status", "unknown")
+    message = result.get("message", "No message")
+    
+    # Basic logging
+    gc.log_event(f"[AGENT ACTION] {player_name}: {action_name} -> {status.upper()}", "agent_action")
+    if message:
+        gc.log_event(f"[AGENT RESULT] {message}", "agent_action")
+    
+    # 🎯 NEW: Add smart suggestions for failed actions
+    if status in ["failure", "error"]:
+        smart_suggestions = generate_smart_action_suggestions(gc, player_id, action_name, params, message)
+        gc.log_event(f"[SMART SUGGESTIONS] {smart_suggestions}", "agent_suggestion")
+        
+        # Track failed action for deadlock prevention
+        gc.track_failed_action(player_id, action_name, params)
 
 # --- Basic Turn Actions ---
 @tradar_verifier
@@ -24,7 +195,7 @@ def tool_roll_dice(gc: Any, player_id: int) -> Dict[str, Any]:
         is_main_turn_player = (gc.current_player_index == player_id)
         
         if not (is_main_turn_player and gc.pending_decision_type is None and not gc.auction_in_progress):
-            return {"status": "failure", "message": "Not in state for main turn roll."}
+             return {"status": "failure", "message": "Not in state for main turn roll."}
             
         if not gc.dice_roll_outcome_processed: 
             return {"status": "failure", "message": "Dice outcome pending."}
@@ -145,7 +316,7 @@ def tool_buy_property(gc: Any, player_id: int, property_id: Optional[int] = None
                 status_msg += " (Insufficient funds likely)"
             else:
                 status_msg += " (Reasons in GC log or property already owned/invalid state)"
-            
+
             # 🚨 NEW: If this is the 3rd+ consecutive failure, force clear the stuck state
             if not hasattr(gc, '_buy_property_failure_count'):
                 gc._buy_property_failure_count = {}
@@ -699,6 +870,23 @@ def validate_and_correct_trade_property_ids(gc, proposer_id: int, recipient_id: 
     proposer = gc.players[proposer_id]
     recipient = gc.players[recipient_id]
     
+    # Build property name to ID mappings for smart suggestions
+    all_properties = {}
+    proposer_properties = {}
+    recipient_properties = {}
+    
+    try:
+        for pid in range(40):  # Standard Monopoly board has 40 squares
+            square = gc.board.get_square(pid)
+            if hasattr(square, 'owner_id') and hasattr(square, 'name'):
+                all_properties[square.name.lower()] = pid
+                if square.owner_id == proposer_id:
+                    proposer_properties[square.name.lower()] = pid
+                elif square.owner_id == recipient_id:
+                    recipient_properties[square.name.lower()] = pid
+    except:
+        pass  # Continue without smart suggestions if board access fails
+    
     # Validate offered properties (proposer must own them)
     invalid_offered = []
     for prop_id in offered_property_ids:
@@ -707,15 +895,38 @@ def validate_and_correct_trade_property_ids(gc, proposer_id: int, recipient_id: 
     
     if invalid_offered:
         prop_names = []
+        suggestion_text = ""
+        
         for prop_id in invalid_offered:
             try:
                 square = gc.board.get_square(prop_id)
                 prop_names.append(f"{square.name} (ID: {prop_id})")
+                
+                # Add smart suggestion if this property is owned by recipient
+                if hasattr(square, 'owner_id') and square.owner_id == recipient_id:
+                    suggestion_text += f"\n💡 SUGGESTION: {square.name} is owned by {recipient.name}. Did you mean to REQUEST it instead of OFFER it?\n"
+                    
             except:
-                prop_names.append(f"ID: {prop_id}")
+                prop_names.append(f"Property ID: {prop_id}")
         
         error_messages.append(f"❌ {proposer.name} doesn't own: {', '.join(prop_names)}")
-        error_messages.append(f"✅ {proposer.name} actually owns: {[gc.board.get_square(pid).name + f' (ID: {pid})' for pid in proposer.properties_owned_ids]}")
+        
+        # Show what proposer actually owns in a clear format
+        owned_list = []
+        for pid in sorted(proposer.properties_owned_ids):
+            try:
+                square = gc.board.get_square(pid)
+                owned_list.append(f"{square.name} (ID: {pid})")
+            except:
+                owned_list.append(f"ID: {pid}")
+        
+        if owned_list:
+            error_messages.append(f"✅ {proposer.name} actually owns: {owned_list}")
+        else:
+            error_messages.append(f"✅ {proposer.name} owns no properties")
+            
+        if suggestion_text:
+            error_messages.append(suggestion_text)
         
         # Remove invalid IDs
         corrected_offered = [pid for pid in offered_property_ids if pid in proposer.properties_owned_ids]
@@ -728,22 +939,49 @@ def validate_and_correct_trade_property_ids(gc, proposer_id: int, recipient_id: 
     
     if invalid_requested:
         prop_names = []
+        suggestion_text = ""
+        
         for prop_id in invalid_requested:
             try:
                 square = gc.board.get_square(prop_id)
                 prop_names.append(f"{square.name} (ID: {prop_id})")
+                
+                # Add smart suggestion if this property is owned by proposer
+                if hasattr(square, 'owner_id') and square.owner_id == proposer_id:
+                    suggestion_text += f"\n💡 SUGGESTION: {square.name} is owned by {proposer.name}. Did you mean to OFFER it instead of REQUEST it?\n"
+                    
             except:
-                prop_names.append(f"ID: {prop_id}")
+                prop_names.append(f"Property ID: {prop_id}")
         
         error_messages.append(f"❌ {recipient.name} doesn't own: {', '.join(prop_names)}")
-        error_messages.append(f"✅ {recipient.name} actually owns: {[gc.board.get_square(pid).name + f' (ID: {pid})' for pid in recipient.properties_owned_ids]}")
+        
+        # Show what recipient actually owns in a clear format
+        owned_list = []
+        for pid in sorted(recipient.properties_owned_ids):
+            try:
+                square = gc.board.get_square(pid)
+                owned_list.append(f"{square.name} (ID: {pid})")
+            except:
+                owned_list.append(f"ID: {pid}")
+        
+        if owned_list:
+            error_messages.append(f"✅ {recipient.name} actually owns: {owned_list}")
+        else:
+            error_messages.append(f"✅ {recipient.name} owns no properties")
+            
+        if suggestion_text:
+            error_messages.append(suggestion_text)
         
         # Remove invalid IDs
         corrected_requested = [pid for pid in requested_property_ids if pid in recipient.properties_owned_ids]
     
     if error_messages:
         full_error = "PROPERTY OWNERSHIP VALIDATION FAILED:\n" + "\n".join(error_messages)
-        full_error += f"\n\n💡 SUGGESTION: Check board_squares in your game state to find correct property IDs"
+        full_error += f"\n\n🎯 QUICK FIX GUIDE:"
+        full_error += f"\n1. ✅ Check the 'PROPERTY OWNERSHIP REFERENCE' section in your prompt"
+        full_error += f"\n2. ✅ Use property IDs from 'MY PROPERTIES' for offered_property_ids"
+        full_error += f"\n3. ✅ Use property IDs from '{recipient.name.upper()} PROPERTIES' for requested_property_ids"
+        full_error += f"\n4. ✅ Verify the property name matches the ID you're using"
         return False, corrected_offered, corrected_requested, full_error
     
     return True, corrected_offered, corrected_requested, ""
@@ -882,8 +1120,7 @@ def tool_propose_counter_offer(gc: Any, player_id: int, trade_id: Optional[int] 
                 gc.pending_decision_context.get("trade_id") == original_trade_id and 
                 gc.pending_decision_context.get("player_id") == player_id):
             return {"status": "failure", "message": "Not in state to counter this trade."}
-        
-        # 🎯 ADD PROPERTY VALIDATION FOR COUNTER OFFERS
+
         # Get the original proposer (who will be the recipient of the counter-offer)
         if original_trade_id not in gc.trade_offers:
             return {"status": "failure", "message": f"Original trade {original_trade_id} not found."}
@@ -895,13 +1132,32 @@ def tool_propose_counter_offer(gc: Any, player_id: int, trade_id: Optional[int] 
         offered_property_ids = offered_property_ids or []
         requested_property_ids = requested_property_ids or []
         
-        # Validate properties using our enhanced validation
+        # 🎯 NEW: Use pre-validation for quick error detection
+        counter_params = {
+            "recipient_id": original_proposer_id,
+            "offered_property_ids": offered_property_ids,
+            "offered_money": offered_money,
+            "offered_get_out_of_jail_free_cards": offered_get_out_of_jail_free_cards,
+            "requested_property_ids": requested_property_ids,
+            "requested_money": requested_money,
+            "requested_get_out_of_jail_free_cards": requested_get_out_of_jail_free_cards
+        }
+        
+        is_valid, validation_error = pre_validate_action(gc, player_id, "tool_propose_counter_offer", counter_params)
+        if not is_valid:
+            result = {"status": "failure", "message": f"COUNTER-OFFER PRE-VALIDATION FAILED:\n{validation_error}"}
+            _log_agent_action(gc, player_id, "tool_propose_counter_offer", counter_params, result)
+            return result
+        
+        # Enhanced validation using existing system (for more complex checks)
         is_valid, corrected_offered, corrected_requested, error_msg = validate_and_correct_trade_property_ids(
             gc, player_id, original_proposer_id, offered_property_ids, requested_property_ids
         )
         
         if not is_valid:
-            return {"status": "failure", "message": f"COUNTER-OFFER VALIDATION FAILED:\n{error_msg}"}
+            result = {"status": "failure", "message": f"COUNTER-OFFER VALIDATION FAILED:\n{error_msg}"}
+            _log_agent_action(gc, player_id, "tool_propose_counter_offer", counter_params, result)
+            return result
 
         # Call async GC method properly
         import asyncio
@@ -994,7 +1250,7 @@ def tool_unmortgage_property_immediately(gc: Any, player_id: int, property_id: O
         result = {"status": "success" if success else "failure", "message": message}
         _log_agent_action(gc, player_id, "tool_unmortgage_property_immediately", {"property_id": target_property_id}, result)
         return result
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e: return {"status": "error", "message": str(e)} 
 
 # Add intelligent property name to ID conversion system
 @tradar_verifier
@@ -1146,3 +1402,193 @@ def tool_propose_trade_structured(gc: Any, player_id: int, trade_details: Dict[s
         
     except Exception as e:
         return {"status": "error", "message": f"Error in structured trade: {str(e)}"} 
+
+def pre_validate_action(gc, player_id: int, action_name: str, params: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Pre-validate action parameters before execution to catch common errors early.
+    
+    Args:
+        gc: Game controller instance
+        player_id: ID of the player attempting the action
+        action_name: Name of the action to validate
+        params: Parameters for the action
+        
+    Returns:
+        Tuple[is_valid, error_message]: True if valid, False with error message if invalid
+    """
+    try:
+        player = gc.players[player_id]
+        
+        # Trade action pre-validation
+        if action_name in ["tool_propose_trade", "tool_propose_counter_offer"]:
+            recipient_id = params.get("recipient_id")
+            offered_property_ids = params.get("offered_property_ids", [])
+            requested_property_ids = params.get("requested_property_ids", [])
+            offered_money = params.get("offered_money", 0)
+            requested_money = params.get("requested_money", 0)
+            
+            # Basic recipient validation
+            if recipient_id is None:
+                return False, "❌ QUICK FIX: recipient_id parameter is missing"
+            
+            if not (0 <= recipient_id < len(gc.players)):
+                return False, f"❌ QUICK FIX: recipient_id {recipient_id} is invalid. Valid IDs: 0-{len(gc.players)-1}"
+            
+            if recipient_id == player_id:
+                return False, "❌ QUICK FIX: Cannot trade with yourself. Choose a different recipient_id"
+            
+            recipient = gc.players[recipient_id]
+            if recipient.is_bankrupt:
+                return False, f"❌ QUICK FIX: {recipient.name} is bankrupt. Choose a different recipient"
+            
+            # Quick property ownership check
+            if offered_property_ids:
+                for prop_id in offered_property_ids:
+                    if prop_id not in player.properties_owned_ids:
+                        try:
+                            square = gc.board.get_square(prop_id)
+                            return False, f"❌ QUICK FIX: You don't own {square.name} (ID:{prop_id}). Check your property list"
+                        except:
+                            return False, f"❌ QUICK FIX: Invalid property ID {prop_id} in offered_property_ids"
+            
+            if requested_property_ids:
+                for prop_id in requested_property_ids:
+                    if prop_id not in recipient.properties_owned_ids:
+                        try:
+                            square = gc.board.get_square(prop_id)
+                            return False, f"❌ QUICK FIX: {recipient.name} doesn't own {square.name} (ID:{prop_id}). Check their property list"
+                        except:
+                            return False, f"❌ QUICK FIX: Invalid property ID {prop_id} in requested_property_ids"
+            
+            # Money validation
+            if offered_money > player.money:
+                return False, f"❌ QUICK FIX: You only have ${player.money}, cannot offer ${offered_money}"
+            
+            if requested_money > recipient.money:
+                return False, f"❌ QUICK FIX: {recipient.name} only has ${recipient.money}, cannot request ${requested_money}"
+        
+        # Property action pre-validation
+        elif action_name in ["tool_mortgage_property", "tool_unmortgage_property", "tool_build_house", "tool_sell_house"]:
+            property_id = params.get("property_id")
+            
+            if property_id is None:
+                return False, "❌ QUICK FIX: property_id parameter is missing"
+            
+            if property_id not in player.properties_owned_ids:
+                try:
+                    square = gc.board.get_square(property_id)
+                    if hasattr(square, 'owner_id') and square.owner_id is not None:
+                        owner_name = gc.players[square.owner_id].name if 0 <= square.owner_id < len(gc.players) else f"Player {square.owner_id}"
+                        return False, f"❌ QUICK FIX: You don't own {square.name} (ID:{property_id}). It's owned by {owner_name}"
+                    else:
+                        return False, f"❌ QUICK FIX: {square.name} (ID:{property_id}) is unowned (bank property)"
+                except:
+                    return False, f"❌ QUICK FIX: Invalid property_id {property_id}"
+            
+            # Get the property square for further validation
+            try:
+                square = gc.board.get_square(property_id)
+            except:
+                return False, f"❌ QUICK FIX: Invalid property_id {property_id}"
+            
+            # Mortgage-specific validation
+            if action_name == "tool_mortgage_property":
+                if hasattr(square, 'is_mortgaged') and square.is_mortgaged:
+                    return False, f"❌ QUICK FIX: {square.name} is already mortgaged. Use tool_unmortgage_property instead"
+                
+                # Check for houses
+                if hasattr(square, 'num_houses') and square.num_houses > 0:
+                    houses_str = f"{square.num_houses} houses" if square.num_houses < 5 else "a hotel"
+                    return False, f"❌ QUICK FIX: {square.name} has {houses_str}. Sell houses first with tool_sell_house"
+            
+            elif action_name == "tool_unmortgage_property":
+                if hasattr(square, 'is_mortgaged') and not square.is_mortgaged:
+                    return False, f"❌ QUICK FIX: {square.name} is not mortgaged. Use tool_mortgage_property to mortgage it"
+                
+                # Check if player has enough money to unmortgage
+                if hasattr(square, 'mortgage_value'):
+                    unmortgage_cost = int(square.mortgage_value * 1.1)  # 10% interest
+                    if player.money < unmortgage_cost:
+                        return False, f"❌ QUICK FIX: Need ${unmortgage_cost} to unmortgage {square.name}, you only have ${player.money}"
+            
+            elif action_name == "tool_build_house":
+                # Quick monopoly check
+                if hasattr(square, 'color_group'):
+                    color_group = square.color_group
+                    owned_in_group = 0
+                    total_in_group = 0
+                    
+                    for pid in range(40):
+                        try:
+                            sq = gc.board.get_square(pid)
+                            if hasattr(sq, 'color_group') and sq.color_group == color_group:
+                                total_in_group += 1
+                                if sq.owner_id == player_id:
+                                    owned_in_group += 1
+                        except:
+                            pass
+                    
+                    if owned_in_group < total_in_group:
+                        return False, f"❌ QUICK FIX: You need ALL {color_group.name} properties to build houses. You own {owned_in_group}/{total_in_group}"
+                
+                # Check if already has hotel
+                if hasattr(square, 'num_houses') and square.num_houses >= 5:
+                    return False, f"❌ QUICK FIX: {square.name} already has a hotel (maximum development)"
+                
+                # Check money for house cost
+                if hasattr(square, 'house_price') and player.money < square.house_price:
+                    return False, f"❌ QUICK FIX: House costs ${square.house_price}, you only have ${player.money}"
+        
+        # Buy property validation
+        elif action_name == "tool_buy_property":
+            property_id = params.get("property_id")
+            
+            if property_id is not None:
+                try:
+                    square = gc.board.get_square(property_id)
+                    if hasattr(square, 'owner_id') and square.owner_id is not None:
+                        owner_name = gc.players[square.owner_id].name if 0 <= square.owner_id < len(gc.players) else f"Player {square.owner_id}"
+                        return False, f"❌ QUICK FIX: {square.name} is already owned by {owner_name}"
+                    
+                    if hasattr(square, 'price') and player.money < square.price:
+                        return False, f"❌ QUICK FIX: {square.name} costs ${square.price}, you only have ${player.money}"
+                        
+                except:
+                    return False, f"❌ QUICK FIX: Invalid property_id {property_id}"
+        
+        return True, ""  # No issues found
+        
+    except Exception as e:
+        return False, f"❌ VALIDATION ERROR: {e}"
+
+
+# Enhanced wrapper for tool functions with pre-validation
+def execute_tool_with_validation(gc, player_id: int, tool_name: str, params: Dict[str, Any], tool_function):
+    """
+    Execute a tool function with pre-validation and enhanced error handling.
+    """
+    # 🎯 PRE-VALIDATION: Check for obvious errors before execution
+    is_valid, validation_error = pre_validate_action(gc, player_id, tool_name, params)
+    if not is_valid:
+        result = {"status": "failure", "message": validation_error}
+        _log_agent_action(gc, player_id, tool_name, params, result)
+        return result
+    
+    # 🚨 DEADLOCK PREVENTION: Check for repeated failures
+    if gc.check_repeated_failure(player_id, tool_name, params):
+        result = {
+            "status": "failure", 
+            "message": "🚨 DEADLOCK PREVENTION: This exact action has failed multiple times recently. Try a different approach or end turn."
+        }
+        _log_agent_action(gc, player_id, tool_name, params, result)
+        return result
+    
+    # Execute the actual tool function
+    try:
+        result = tool_function(gc, player_id, **params)
+        _log_agent_action(gc, player_id, tool_name, params, result)
+        return result
+    except Exception as e:
+        result = {"status": "error", "message": f"Tool execution error: {e}"}
+        _log_agent_action(gc, player_id, tool_name, params, result)
+        return result

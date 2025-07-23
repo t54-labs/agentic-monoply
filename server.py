@@ -285,9 +285,9 @@ class AgentManager:
                         
                         # Create agent instance only if it doesn't exist
                         if agent_uid not in self.agent_instances:
-                            agent_instance = OpenAIAgent(
-                                agent_uid=agent_dict['agent_uid'],
-                                player_id=-1,  # Will be set when joining a game
+                        agent_instance = OpenAIAgent(
+                            agent_uid=agent_dict['agent_uid'],
+                            player_id=-1,  # Will be set when joining a game
                                 name=agent_dict['name'],
                                 personality=agent_dict.get('personality_prompt', '')
                             )
@@ -389,19 +389,19 @@ class AgentManager:
                                 session.commit()
                                 
                                 # Now add back to available pool
-                                agent_dict = {
-                                    'id': agent_row.id,
-                                    'agent_uid': agent_row.agent_uid,
-                                    'name': agent_row.name,
-                                    'personality_prompt': agent_row.personality_prompt,
-                                    'memory_data': agent_row.memory_data or {},
-                                    'preferences': agent_row.preferences or {},
-                                    'total_games_played': agent_row.total_games_played,
-                                    'total_wins': agent_row.total_wins,
-                                    'tpay_account_id': agent_row.tpay_account_id,
+                            agent_dict = {
+                                'id': agent_row.id,
+                                'agent_uid': agent_row.agent_uid,
+                                'name': agent_row.name,
+                                'personality_prompt': agent_row.personality_prompt,
+                                'memory_data': agent_row.memory_data or {},
+                                'preferences': agent_row.preferences or {},
+                                'total_games_played': agent_row.total_games_played,
+                                'total_wins': agent_row.total_wins,
+                                'tpay_account_id': agent_row.tpay_account_id,
                                     'status': 'active'  # Set to active since we just updated it
-                                }
-                                self.available_agents.append(agent_dict)
+                            }
+                            self.available_agents.append(agent_dict)
                                 print(f"{Fore.BLUE}[AGENT STATE] 🔄 Agent {agent_dict['name']} released from game {game_uid}{Style.RESET_ALL}")
                                 print(f"{Fore.BLUE}[AGENT STATE]    📊 Status: {agent_row.status} → active, Available pool: {len(self.available_agents)}{Style.RESET_ALL}")
                             else:
@@ -538,7 +538,7 @@ class ThreadSafeGameInstance:
                 except Exception as e:
                     print(f"{Fore.RED}[Game Thread] Error closing loop for {self.game_uid}: {e}{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}[Game Thread] Game {self.game_uid} thread finished{Style.RESET_ALL}")
-    
+            
     async def _run_game_async(self):
         """Run game logic asynchronously in separate thread's event loop"""
         # Run the original start_monopoly_game_instance logic here
@@ -678,7 +678,7 @@ class ThreadSafeGameInstance:
                             print(f"{Fore.RED}[Game Thread] Error sending property landing notification: {e}{Style.RESET_ALL}")
                     else:
                         # Send regular message via connection manager in main thread
-                        await self.connection_manager.broadcast_to_game(self.game_uid, message)
+                    await self.connection_manager.broadcast_to_game(self.game_uid, message)
                     
                     # Mark task as done
                     self._message_queue.task_done()
@@ -791,7 +791,7 @@ async def initialize_agent_tpay_balances(available_agents: List[Dict[str, Any]],
                     payment_id = result.get('payment_id', 'N/A')
                     print(f"{Fore.GREEN}[TPay] ✓ {agent_name}: Received {amount:.2f} from treasury (Payment ID: {payment_id}) - COMPLETED{Style.RESET_ALL}")
                     
-                else:
+            else:
                     success_count += 1
                     print(f"{Fore.GREEN}[TPay] ✓ {agent_name}: Balance adjusted successfully{Style.RESET_ALL}")
                     
@@ -1936,7 +1936,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
                     else:
                         print(f"{Fore.RED}❌ [DICE ROLL] Action failed with status: {action_result.get('status')}{Style.RESET_ALL}")
                         
-                    if not action_result.get("went_to_jail", False):
+                        if not action_result.get("went_to_jail", False):
                             dice_val = action_result.get("dice_roll")
                             if dice_val and sum(dice_val) > 0 : 
                                 await gc._move_player(current_acting_player, sum(dice_val))
@@ -2261,7 +2261,7 @@ async def start_monopoly_game_instance(game_uid: str, connection_manager_param: 
         event_handler = get_game_event_handler()
         await event_handler.handle_critical_error(game_uid, game_logic_e, gc)
         
-        if game_db_id:
+        if game_db_id: 
             try:
                 with Session(engine) as session:
                     stmt_crash = update(games_table).where(games_table.c.id == game_db_id).values(
@@ -2772,7 +2772,7 @@ async def test_balance_adjustment_api():
                 "failures": failed_adjustments
             }
         }
-        
+    
     except Exception as e:
         import traceback
         traceback.print_exc()

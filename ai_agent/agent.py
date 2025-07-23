@@ -61,7 +61,7 @@ class BaseAgent(ABC):
 
 class OpenAIAgent(BaseAgent):
     @taudit_verifier
-    def __init__(self, agent_uid: str, player_id: int, name: str, personality: str = "", model_name: str = "gpt-4o-mini", api_key: str = None):
+    def __init__(self, agent_uid: str, player_id: int, name: str, personality: str = "", model_name: str = "gpt-4o", api_key: str = None):
         super().__init__(player_id, name)
 
         load_dotenv()
@@ -341,6 +341,58 @@ class OpenAIAgent(BaseAgent):
             prompt += "- If tool_build_house is available, it means you CAN build (all requirements met)\n"
             prompt += "- Building houses should be your #1 priority when available\n"
             prompt += "- If you can't build houses, focus on completing color groups through trading\n\n"
+        
+        # Add clearer property information section in the prompt
+        # 🎯 CRITICAL: Show detailed property ownership for accurate trading
+        if "tool_propose_trade" in available_actions or "tool_propose_counter_offer" in available_actions:
+            prompt += "\n" + "="*80 + "\n"
+            prompt += "🎯 PROPERTY OWNERSHIP REFERENCE - FOR TRADE ACTIONS ONLY\n"
+            prompt += "="*80 + "\n"
+            
+            # Show my properties in simple format
+            prompt += f"📋 MY PROPERTIES (use these IDs for 'offered_property_ids'):\n"
+            if not game_state.get('my_properties_owned_ids', []):
+                prompt += "  (None - I own no properties)\n"
+            else:
+                for prop_id in sorted(game_state.get('my_properties_owned_ids', [])):
+                    prop = next((sq for sq in game_state.get('board_squares',[]) if sq['id'] == prop_id), None)
+                    if prop:
+                        mortgage_status = "[MORTGAGED]" if prop.get('is_mortgaged') else "[AVAILABLE]"
+                        houses_info = ""
+                        if prop.get('type') == 'PROPERTY' and prop.get('num_houses', 0) > 0:
+                            houses_info = f" +{prop['num_houses']}H" if prop['num_houses'] < 5 else " +HOTEL"
+                        prompt += f"  ID:{prop_id} = {prop['name']}{houses_info} {mortgage_status}\n"
+            
+            # Show each other player's properties in simple format
+            for other_player in game_state.get('other_players', []):
+                if other_player.get('is_bankrupt', False):
+                    continue
+                    
+                player_name = other_player['name']
+                player_id = other_player['player_id']
+                properties_owned = other_player.get('properties_owned', [])
+                
+                prompt += f"\n📋 {player_name.upper()} (P{player_id}) PROPERTIES (use these IDs for 'requested_property_ids' when trading with P{player_id}):\n"
+                if not properties_owned:
+                    prompt += "  (None - they own no properties)\n"
+                else:
+                    for prop in sorted(properties_owned, key=lambda x: x.get('id', 0)):
+                        prop_id = prop.get('id')
+                        prop_name = prop.get('name', 'Unknown')
+                        mortgage_status = "[MORTGAGED]" if prop.get('is_mortgaged') else "[AVAILABLE]"
+                        houses_info = ""
+                        if prop.get('num_houses', 0) > 0:
+                            houses_info = f" +{prop['num_houses']}H" if prop['num_houses'] < 5 else " +HOTEL"
+                        prompt += f"  ID:{prop_id} = {prop_name}{houses_info} {mortgage_status}\n"
+            
+            prompt += "\n" + "="*80 + "\n"
+            prompt += "🚨 CRITICAL TRADE RULES:\n"
+            prompt += "1. ✅ offered_property_ids = property IDs from MY PROPERTIES section above\n"
+            prompt += "2. ✅ requested_property_ids = property IDs from TARGET PLAYER's properties section above\n"
+            prompt += "3. ❌ NEVER mix up property IDs between players\n"
+            prompt += "4. ❌ NEVER guess property IDs - they are ALL listed above\n"
+            prompt += "5. ✅ Double-check the property name matches the ID you're using\n"
+            prompt += "="*80 + "\n\n"
         
         # 🎯 CONDITIONAL: add strategy note for trading (only in later game stages)
         # 🚨 FIX: Define is_later_stage outside of conditions to avoid UnboundLocalError
@@ -631,17 +683,28 @@ class OpenAIAgent(BaseAgent):
         prompt += "\n🚨 CRITICAL ERROR HANDLING AND STRATEGY ADJUSTMENT:\n"
         prompt += "If your previous action FAILED (you see error messages), you MUST:\n"
         prompt += "1. 📖 READ the error message carefully for specific failure reasons\n"
-        prompt += "2. 🚫 DO NOT repeat the same action with same parameters immediately\n"
-        prompt += "3. 🔍 ANALYZE why it failed (wrong property ID, already mortgaged, don't own property, etc.)\n"
-        prompt += "4. ✅ CHOOSE a different action OR different parameters that address the failure reason\n"
-        prompt += "5. 🎯 If you can't fix the issue, choose tool_end_turn to avoid infinite loops\n\n"
+        prompt += "2. 🔍 UNDERSTAND what went wrong before attempting similar actions\n"
+        prompt += "3. 🛠️ ADJUST your strategy based on the specific error type\n"
+        prompt += "4. ❌ NEVER repeat the exact same action with same parameters immediately\n"
+        prompt += "5. 🎯 Choose a completely different action or fix the parameters\n\n"
         
-        prompt += "COMMON FAILURE PATTERNS TO AVOID:\n"
-        prompt += "❌ Trying to mortgage already mortgaged properties\n"
-        prompt += "❌ Trying to unmortgage already unmortgaged properties\n"
-        prompt += "❌ Proposing trades with properties you don't own\n"
-        prompt += "❌ Requesting properties the other player doesn't own\n"
-        prompt += "❌ Repeating identical failed actions without understanding why they failed\n\n"
+        # 🎯 ENHANCED: Add specific error pattern handling
+        prompt += "📋 COMMON ERROR PATTERNS AND FIXES:\n"
+        prompt += "• Property ownership errors → Check PROPERTY OWNERSHIP REFERENCE section above\n"
+        prompt += "• Already mortgaged errors → Look for [MORTGAGED] status in property listings\n"
+        prompt += "• Insufficient funds errors → Check current money vs. required amount\n"
+        prompt += "• Invalid property ID errors → Use exact IDs from property lists above\n"
+        prompt += "• Trade validation errors → Double-check offered vs. requested property owners\n"
+        prompt += "• House building errors → Verify monopoly ownership and even development rule\n\n"
+        
+        # 🎯 SPECIFIC: Counter-offer guidance
+        if "tool_propose_counter_offer" in available_actions:
+            prompt += "🔄 COUNTER-OFFER SPECIAL GUIDANCE:\n"
+            prompt += "• Remember: YOU are now the proposer, THEY are the recipient\n"
+            prompt += "• offered_property_ids = properties YOU give to THEM (from YOUR properties)\n"
+            prompt += "• requested_property_ids = properties YOU want from THEM (from THEIR properties)\n"
+            prompt += "• Review the original trade details above to understand what they offered/requested\n"
+            prompt += "• Your counter should be a reasonable alternative to their proposal\n\n"
         
         prompt += "\nExamples:\n"
         if self.personality:

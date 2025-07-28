@@ -1381,9 +1381,9 @@ class GameControllerV2:
                     can_liquidate_assets = False
                     
                     # Check for houses to sell
-                if any(isinstance(sq := self.board.get_square(pid), PropertySquare) and sq.owner_id == player_id and sq.num_houses > 0 for pid in player.properties_owned_ids): 
+                if any(isinstance(sq := self.board.get_square(pid), PropertySquare) and sq.owner_id == player_id and sq.num_houses > 0 for pid in player.properties_owned_ids):
                     actions.append("tool_sell_house")
-                        can_liquidate_assets = True
+                    can_liquidate_assets = True
                         
                     # Check for properties to mortgage
                     if self._should_add_mortgage_action(player_id):

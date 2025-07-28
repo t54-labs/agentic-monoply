@@ -151,13 +151,21 @@ async def _wait_for_payment_completion(payment_result: dict, timeout_seconds: in
                 if status in ['success', 'completed']:
                     print(f"[Utils] ✅ Payment {payment_id} completed successfully (status: {status})")
                     return True
-                elif status in ['failed', 'rejected', 'cancelled']:
+                elif status in ['failed']:
                     print(f"[Utils] ❌ Payment {payment_id} failed (status: {status})")
                     return False
-                elif status in ['pending', 'processing', 'initiated', 'created', 'submitted', 'approved', 'pending_confirmation']:
-                    # async wait - approved means approved for blockchain submission, still in progress
-                    # pending_confirmation means waiting for blockchain confirmation
-                    await asyncio.sleep(poll_interval)
+                elif status in ['initiated', 'reviewing', 'preparing', 'processing', 'confirming']:
+                    # async wait - different states in payment workflow
+                    # initiated: payment just created
+                    # reviewing: risk control in progress  
+                    # preparing: passed risk control, preparing for settlement
+                    # processing: transaction submitted (equivalent to old 'submitted')
+                    # confirming: waiting for blockchain confirmation (equivalent to old 'pending_confirmation')
+                    if status == 'confirming':
+                        # Use shorter poll interval for blockchain confirmation phase
+                        await asyncio.sleep(2.0)  
+                    else:
+                        await asyncio.sleep(poll_interval)
                     continue
                 else:
                     print(f"[Utils] ❓ Unknown payment status: {status}")

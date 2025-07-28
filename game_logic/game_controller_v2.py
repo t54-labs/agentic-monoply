@@ -130,7 +130,7 @@ class GameControllerV2:
             print(f"💳 [GAME CONTROLLER INIT] Using LocalPaymentManager (test environment)")
             self.log_event(f"💳 [PAYMENT MANAGER] Using LocalPaymentManager (test environment)", "game_log_event")
         else:
-        self.payment_manager = PaymentManager(self)
+            self.payment_manager = PaymentManager(self)
             print(f"💳 [GAME CONTROLLER INIT] Using PaymentManager (production environment)")
             self.log_event(f"💳 [PAYMENT MANAGER] Using PaymentManager (production environment)", "game_log_event")
             

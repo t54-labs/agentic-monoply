@@ -1387,7 +1387,7 @@ class GameControllerV2:
                         
                     # Check for properties to mortgage
                     if self._should_add_mortgage_action(player_id):
-                    actions.append("tool_mortgage_property")
+                        actions.append("tool_mortgage_property")
                         can_liquidate_assets = True
                     
                     # Check if player can still propose trades (last resort before bankruptcy)

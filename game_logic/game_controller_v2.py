@@ -1550,7 +1550,7 @@ class GameControllerV2:
                             self.log_event(f"[ERROR] Auto dice roll failed for {player.name}: {e}", "error_log")
                             # Fallback to manual dice rolling
                         actions.append("tool_roll_dice")
-                            return actions
+                        return actions
                         
                     elif self.turn_phase == "post_roll":
                         # 🎲 Dice has been rolled and player has moved to new position

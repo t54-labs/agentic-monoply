@@ -239,7 +239,7 @@ class PropertyManager(BaseManager):
                 error_msg = f"Cannot mortgage {property_square.name} - other {color_group} properties have houses: {house_info}"
                 self.log_event(error_msg, "error_property")
                 self.gc._last_mortgage_error = error_msg
-            return False
+                return False
             
         # Calculate mortgage amount (50% of property price)
         mortgage_amount = property_square.price // 2

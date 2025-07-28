@@ -285,9 +285,9 @@ class AgentManager:
                         
                         # Create agent instance only if it doesn't exist
                         if agent_uid not in self.agent_instances:
-                        agent_instance = OpenAIAgent(
-                            agent_uid=agent_dict['agent_uid'],
-                            player_id=-1,  # Will be set when joining a game
+                            agent_instance = OpenAIAgent(
+                                agent_uid=agent_dict['agent_uid'],
+                                player_id=-1,  # Will be set when joining a game
                                 name=agent_dict['name'],
                                 personality=agent_dict.get('personality_prompt', '')
                             )
@@ -389,19 +389,19 @@ class AgentManager:
                                 session.commit()
                                 
                                 # Now add back to available pool
-                            agent_dict = {
-                                'id': agent_row.id,
-                                'agent_uid': agent_row.agent_uid,
-                                'name': agent_row.name,
-                                'personality_prompt': agent_row.personality_prompt,
-                                'memory_data': agent_row.memory_data or {},
-                                'preferences': agent_row.preferences or {},
-                                'total_games_played': agent_row.total_games_played,
-                                'total_wins': agent_row.total_wins,
-                                'tpay_account_id': agent_row.tpay_account_id,
+                                agent_dict = {
+                                    'id': agent_row.id,
+                                    'agent_uid': agent_row.agent_uid,
+                                    'name': agent_row.name,
+                                    'personality_prompt': agent_row.personality_prompt,
+                                    'memory_data': agent_row.memory_data or {},
+                                    'preferences': agent_row.preferences or {},
+                                    'total_games_played': agent_row.total_games_played,
+                                    'total_wins': agent_row.total_wins,
+                                    'tpay_account_id': agent_row.tpay_account_id,
                                     'status': 'active'  # Set to active since we just updated it
-                            }
-                            self.available_agents.append(agent_dict)
+                                }
+                                self.available_agents.append(agent_dict)
                                 print(f"{Fore.BLUE}[AGENT STATE] 🔄 Agent {agent_dict['name']} released from game {game_uid}{Style.RESET_ALL}")
                                 print(f"{Fore.BLUE}[AGENT STATE]    📊 Status: {agent_row.status} → active, Available pool: {len(self.available_agents)}{Style.RESET_ALL}")
                             else:
@@ -678,7 +678,7 @@ class ThreadSafeGameInstance:
                             print(f"{Fore.RED}[Game Thread] Error sending property landing notification: {e}{Style.RESET_ALL}")
                     else:
                         # Send regular message via connection manager in main thread
-                    await self.connection_manager.broadcast_to_game(self.game_uid, message)
+                        await self.connection_manager.broadcast_to_game(self.game_uid, message)
                     
                     # Mark task as done
                     self._message_queue.task_done()
@@ -791,7 +791,7 @@ async def initialize_agent_tpay_balances(available_agents: List[Dict[str, Any]],
                     payment_id = result.get('payment_id', 'N/A')
                     print(f"{Fore.GREEN}[TPay] ✓ {agent_name}: Received {amount:.2f} from treasury (Payment ID: {payment_id}) - COMPLETED{Style.RESET_ALL}")
                     
-            else:
+                else:
                     success_count += 1
                     print(f"{Fore.GREEN}[TPay] ✓ {agent_name}: Balance adjusted successfully{Style.RESET_ALL}")
                     

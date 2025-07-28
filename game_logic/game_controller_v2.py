@@ -1582,11 +1582,11 @@ class GameControllerV2:
                                    square_check.num_houses < 5 and \
                                    player.money >= square_check.house_price:
                                     
-                                # Check if owns all properties in the color group
-                                color_group_properties = self.board.get_properties_in_group(square_check.color_group)
+                                    # Check if owns all properties in the color group
+                                    color_group_properties = self.board.get_properties_in_group(square_check.color_group)
                                     self.log_event(f"    * Color group has {len(color_group_properties)} properties total", "debug_build_house")
                                     
-                                owns_all_in_group_unmortgaged = True
+                                    owns_all_in_group_unmortgaged = True
                                     owned_count = 0
                                     mortgaged_count = 0
                                     
@@ -1606,13 +1606,13 @@ class GameControllerV2:
                                         if not (isinstance(prop_square, PropertySquare) and 
                                                prop_square.owner_id == player_id and 
                                                not prop_square.is_mortgaged):
-                                        owns_all_in_group_unmortgaged = False
+                                            owns_all_in_group_unmortgaged = False
                                     
                                     self.log_event(f"    * Owned in group: {owned_count}/{len(color_group_properties)}", "debug_build_house")
                                     self.log_event(f"    * Mortgaged in group: {mortgaged_count}", "debug_build_house")
                                     self.log_event(f"    * Owns all unmortgaged: {owns_all_in_group_unmortgaged}", "debug_build_house")
                                     
-                                if owns_all_in_group_unmortgaged:
+                                    if owns_all_in_group_unmortgaged:
                                         # Check even building rule
                                         min_houses_in_group = min(prop.num_houses for prop in color_group_properties 
                                                                  if isinstance(prop, PropertySquare) and prop.owner_id == player_id)
@@ -1620,10 +1620,10 @@ class GameControllerV2:
                                         self.log_event(f"    * This property houses: {square_check.num_houses}", "debug_build_house")
                                         self.log_event(f"    * Can build (even rule): {square_check.num_houses == min_houses_in_group}", "debug_build_house")
                                         
-                                    if square_check.num_houses == min_houses_in_group: 
-                                        can_build_on_any_property = True
+                                        if square_check.num_houses == min_houses_in_group: 
+                                            can_build_on_any_property = True
                                             self.log_event(f"    ✅ CAN BUILD on {square_check.name}!", "debug_build_house")
-                                        break
+                                            break
                                         else:
                                             self.log_event(f"    ❌ Cannot build - must build on properties with {min_houses_in_group} houses first", "debug_build_house")
                                     else:
@@ -1654,7 +1654,7 @@ class GameControllerV2:
                         if len([p_other for p_other in self.players if not p_other.is_bankrupt and p_other.player_id != player_id]) > 0: 
                             # Check if player can still propose trades this turn
                             if self.trade_manager._check_turn_trade_limit(player_id):
-                            actions.append("tool_propose_trade")
+                                actions.append("tool_propose_trade")
                             else:
                                 self.log_event(f"[TRADE LIMIT] {player.name} cannot propose more trades this turn", "debug_trade")
                         

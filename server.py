@@ -2332,16 +2332,24 @@ async def lifespan(app_instance: FastAPI):
         telegram_notifier.register_command_handler('get_game_status', telegram_get_game_status_command_handler)
         telegram_notifier.register_command_handler('start_new_agents', telegram_create_random_agents_command_handler)
         
-        # Start Telegram bot listening for commands
+        # Start Telegram bot listening for commands (non-blocking)
         print("Starting Telegram bot command listening...")
         try:
+            # Start bot in background task to avoid blocking server startup
             asyncio.create_task(telegram_notifier.start_listening())
-            print(f"{Fore.GREEN}✅ Telegram bot is now listening for admin commands{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}✅ Telegram bot startup queued (non-blocking){Style.RESET_ALL}")
         except Exception as e:
-            print(f"{Fore.YELLOW}⚠️ Failed to start Telegram bot listening: {e}{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}⚠️ Failed to queue Telegram bot startup: {e}{Style.RESET_ALL}")
+            # Don't let Telegram bot failure block server startup
     
-    # Send server startup notification
-    await event_handler.handle_server_startup(len(agent_manager.available_agents))
+    # Send server startup notification (non-blocking)
+    try:
+        # Run notification in background task to avoid blocking startup
+        asyncio.create_task(event_handler.handle_server_startup(len(agent_manager.available_agents)))
+        print("✅ Server startup notification queued (non-blocking)")
+    except Exception as e:
+        print(f"⚠️ Failed to queue startup notification: {e}")
+        # Don't let notification failure block server startup
     
     # Check if we have enough agents to start games
     if len(agent_manager.available_agents) < AGENTS_PER_GAME:

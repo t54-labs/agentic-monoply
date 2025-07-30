@@ -511,14 +511,18 @@ Try again later for different randomly generated names.
         current_thread_id = threading.current_thread().ident
         
         if current_thread_id != self.main_thread_id and self.main_event_loop is not None:
-            # We're in a different thread, schedule the call to main thread
+            # We're in a different thread, schedule the call to main thread (non-blocking)
             try:
                 future = asyncio.run_coroutine_threadsafe(
                     self._send_message_internal(message, disable_notification),
                     self.main_event_loop
                 )
-                # Wait for the result with a reasonable timeout
-                return future.result(timeout=10.0)  # 10 seconds timeout
+                # Use non-blocking approach with shorter timeout
+                try:
+                    return future.result(timeout=2.0)  # Reduced to 2 seconds timeout
+                except asyncio.TimeoutError:
+                    print(f"[WARNING] Telegram message send timeout from thread {current_thread_id} - message queued")
+                    return True  # Consider it successful to avoid blocking
             except Exception as e:
                 logger.error(f"Failed to send Telegram message from thread {current_thread_id}: {e}")
                 return False

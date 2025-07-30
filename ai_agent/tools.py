@@ -1456,7 +1456,15 @@ def pre_validate_action(gc, player_id: int, action_name: str, params: Dict[str, 
                     if prop_id not in recipient.properties_owned_ids:
                         try:
                             square = gc.board.get_square(prop_id)
-                            return False, f"❌ QUICK FIX: {recipient.name} doesn't own {square.name} (ID:{prop_id}). Check their property list"
+                            # Find who actually owns this property
+                            actual_owner_name = "Bank"
+                            if hasattr(square, 'owner_id') and square.owner_id is not None:
+                                actual_owner_name = gc.players[square.owner_id].name if 0 <= square.owner_id < len(gc.players) else f"Player {square.owner_id}"
+                            
+                            if action_name == "tool_propose_counter_offer":
+                                return False, f"❌ QUICK FIX: {recipient.name} doesn't own {square.name} (ID:{prop_id}). Check their property list\n💡 COUNTER-OFFER TIP: You can only request properties from {recipient.name}, not from {actual_owner_name}.\n🔄 Consider: 1) Accept/reject current offer, 2) Start new trade with {actual_owner_name}, or 3) Request different properties from {recipient.name}"
+                            else:
+                                return False, f"❌ QUICK FIX: {recipient.name} doesn't own {square.name} (ID:{prop_id}). It's owned by {actual_owner_name}. Check their property list"
                         except:
                             return False, f"❌ QUICK FIX: Invalid property ID {prop_id} in requested_property_ids"
             

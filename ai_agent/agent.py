@@ -392,6 +392,23 @@ class OpenAIAgent(BaseAgent):
             prompt += "3. ❌ NEVER mix up property IDs between players\n"
             prompt += "4. ❌ NEVER guess property IDs - they are ALL listed above\n"
             prompt += "5. ✅ Double-check the property name matches the ID you're using\n"
+            
+            # Add special warning for counter offers
+            current_pending_decision = game_state.get('pending_decision_type')
+            if current_pending_decision == "respond_to_trade_offer" and "tool_propose_counter_offer" in available_actions:
+                decision_context = game_state.get('pending_decision_context', {})
+                proposer_id_ctx = decision_context.get("proposer_id")
+                if proposer_id_ctx is not None:
+                    # Find the proposer's name
+                    proposer_name_ctx = "Unknown Player"
+                    for p_info in game_state.get('other_players', []):
+                        if p_info and p_info.get('player_id') == proposer_id_ctx:
+                            proposer_name_ctx = p_info.get('name', 'Unknown')
+                            break
+                    
+                    prompt += f"6. 🚨 COUNTER-OFFER SPECIAL RULE: You can ONLY request properties from P{proposer_id_ctx} ({proposer_name_ctx})!\n"
+                    prompt += f"   ❌ Do NOT request properties from other players in a counter-offer!\n"
+            
             prompt += "="*80 + "\n\n"
         
         # 🎯 CONDITIONAL: add strategy note for trading (only in later game stages)
@@ -507,7 +524,9 @@ class OpenAIAgent(BaseAgent):
                 prompt += f"You have received a trade offer (ID: {decision_context.get('trade_id')}) from P{proposer_id_ctx} ({proposer_name_ctx}).\n"
                 if message_from_proposer:
                     prompt += f"Message from P{proposer_name_ctx}: \"{message_from_proposer}\"\n"
-                prompt += "Review the offer details (usually logged or in game state if fully detailed) and choose to accept, reject, or propose a counter-offer (tool_propose_counter_offer, you can add a 'counter_message').\n"
+                prompt += f"🚨 COUNTER-OFFER RULE: If you counter-offer, you can ONLY trade with P{proposer_id_ctx} ({proposer_name_ctx}) - NOT with other players!\n"
+                prompt += f"This means requested_property_ids must be from P{proposer_id_ctx}'s property list ONLY.\n"
+                prompt += "Review the offer details and choose to accept, reject, or propose a counter-offer (tool_propose_counter_offer).\n"
             
             elif current_pending_decision == "propose_new_trade_after_rejection":
                 rejected_by_player_id = decision_context.get("rejected_by_player_id")
@@ -587,7 +606,7 @@ class OpenAIAgent(BaseAgent):
             "tool_propose_trade": "Parameters: {\"recipient_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers representing properties index id>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"message\": \"<optional string>\"} ⚠️ CRITICAL: Look up property IDs from board_squares - do NOT guess!",
             "tool_accept_trade": "Parameters: {\"trade_id\": <integer>} (optional, auto-filled if pending)",
             "tool_reject_trade": "Parameters: {\"trade_id\": <integer>} (optional, auto-filled if pending)",
-            "tool_propose_counter_offer": "Parameters: {\"trade_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers representing properties index id>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"counter_message\": \"<optional string>\"} ⚠️ CRITICAL: Look up property IDs from board_squares - do NOT guess!",
+            "tool_propose_counter_offer": "Parameters: {\"trade_id\": <integer>, \"offered_property_ids\": [<list of integers>], \"offered_money\": <integer>, \"offered_get_out_of_jail_free_cards\": <integer>, \"requested_property_ids\": [<list of integers representing properties index id>], \"requested_money\": <integer>, \"requested_get_out_of_jail_free_cards\": <integer>, \"counter_message\": \"<optional string>\"} 🚨 CRITICAL COUNTER-OFFER RULE: You can ONLY request properties from the ORIGINAL trade proposer - NOT from other players!",
             "tool_end_trade_negotiation": "Parameters: {} (no parameters needed)",
             "tool_pay_mortgage_interest_fee": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",
             "tool_unmortgage_property_immediately": "Parameters: {\"property_id\": <integer>} (optional, auto-filled if pending)",

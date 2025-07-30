@@ -181,8 +181,9 @@ class TradeManager(BaseManager):
         
         # Add offered GOOJ cards
         if offered_gooj_cards > 0:
-            if proposer.get_out_of_jail_free_cards < offered_gooj_cards:
-                self.log_event(f"[TRADE DEBUG] {proposer.name} doesn't have {offered_gooj_cards} GOOJ cards (has {proposer.get_out_of_jail_free_cards})", "error_trade")
+            proposer_total_gooj = proposer.get_total_gooj_cards()
+            if proposer_total_gooj < offered_gooj_cards:
+                self.log_event(f"[TRADE DEBUG] {proposer.name} doesn't have {offered_gooj_cards} GOOJ cards (has {proposer_total_gooj})", "error_trade")
                 return None
             offered_items.append(TradeOfferItem(item_type="get_out_of_jail_card", quantity=offered_gooj_cards))
         
@@ -204,8 +205,9 @@ class TradeManager(BaseManager):
         
         # Add requested GOOJ cards
         if requested_gooj_cards > 0:
-            if recipient.get_out_of_jail_free_cards < requested_gooj_cards:
-                self.log_event(f"[TRADE DEBUG] {recipient.name} doesn't have {requested_gooj_cards} GOOJ cards (has {recipient.get_out_of_jail_free_cards})", "error_trade")
+            recipient_total_gooj = recipient.get_total_gooj_cards()
+            if recipient_total_gooj < requested_gooj_cards:
+                self.log_event(f"[TRADE DEBUG] {recipient.name} doesn't have {requested_gooj_cards} GOOJ cards (has {recipient_total_gooj})", "error_trade")
                 return None
             requested_items.append(TradeOfferItem(item_type="get_out_of_jail_card", quantity=requested_gooj_cards))
         
@@ -574,7 +576,7 @@ class TradeManager(BaseManager):
                 if player.money < item.quantity:
                     return False
             elif item.item_type == "get_out_of_jail_card":
-                if player.get_out_of_jail_free_cards < item.quantity:
+                if player.get_total_gooj_cards() < item.quantity:
                     return False
         
         return True
@@ -588,9 +590,18 @@ class TradeManager(BaseManager):
             receiver: Player receiving the card
             card_item_id_hint: Optional hint for card identification
         """
+        # Priority: Transfer generic cards first, then specific cards if needed
         if giver.get_out_of_jail_free_cards > 0:
             giver.get_out_of_jail_free_cards -= 1
             receiver.get_out_of_jail_free_cards += 1
-            self.log_event(f"GOOJ card transferred from {giver.name} to {receiver.name}", "trade_event")
+            self.log_event(f"Generic GOOJ card transferred from {giver.name} to {receiver.name}", "trade_event")
+        elif giver.has_chance_gooj_card:
+            giver.has_chance_gooj_card = False
+            receiver.get_out_of_jail_free_cards += 1  # Convert to generic for receiver
+            self.log_event(f"Chance GOOJ card transferred from {giver.name} to {receiver.name} (converted to generic)", "trade_event")
+        elif giver.has_community_gooj_card:
+            giver.has_community_gooj_card = False
+            receiver.get_out_of_jail_free_cards += 1  # Convert to generic for receiver
+            self.log_event(f"Community GOOJ card transferred from {giver.name} to {receiver.name} (converted to generic)", "trade_event")
         else:
             self.log_event(f"Warning: {giver.name} has no GOOJ cards to transfer", "error_trade") 

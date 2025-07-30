@@ -1310,10 +1310,17 @@ class GameControllerV2:
         
         # Handle specific decision types that override normal turn actions
         if self.pending_decision_type == "jail_options":
-            if self.pending_decision_context.get("player_id") == player_id: 
-                actions.extend(["tool_roll_for_doubles_to_get_out_of_jail", "tool_pay_bail"])
-                if getattr(player, 'has_chance_gooj_card', False) or getattr(player, 'has_community_gooj_card', False):
-                    actions.append("tool_use_get_out_of_jail_card")
+            if self.pending_decision_context.get("player_id") == player_id:
+                # 🚨 CRITICAL FIX: Validate jail state consistency before providing jail actions
+                if not player.in_jail:
+                    self.log_event(f"🔍 [JAIL STATE INCONSISTENCY] {player.name} has jail_options decision but in_jail={player.in_jail}, position={player.position}. Clearing decision.", "error_jail")
+                    self._clear_pending_decision()
+                    # Re-run to get correct actions
+                    return self.get_available_actions(player_id)
+                else:
+                    actions.extend(["tool_roll_for_doubles_to_get_out_of_jail", "tool_pay_bail"])
+                    if getattr(player, 'has_chance_gooj_card', False) or getattr(player, 'has_community_gooj_card', False):
+                        actions.append("tool_use_get_out_of_jail_card")
             else: 
                 self._clear_pending_decision()
         
@@ -1693,8 +1700,17 @@ class GameControllerV2:
                     if not actions: 
                         actions.append("tool_wait") 
                 elif player.in_jail: 
-                    # 🔒 Handle jail scenario properly
-                    self.log_event(f"[Info] P{player_id} ({player.name}) in jail, triggering jail options.", "warning_log")
+                    # 🔒 Handle jail scenario with state validation
+                    # 🚨 CRITICAL: Validate jail state consistency
+                    if player.position != 10:  # Jail position should be 10
+                        self.log_event(f"🔍 [JAIL STATE INCONSISTENCY] {player.name} in_jail=True but position={player.position} (should be 10). Fixing state.", "error_jail")
+                        
+                        # Auto-fix: If player claims to be in jail but is elsewhere, correct the position
+                        if player.in_jail:
+                            player.position = 10  # Force correct jail position
+                            self.log_event(f"✅ [JAIL STATE FIX] {player.name} position corrected to jail (10)", "jail_event")
+                    
+                    self.log_event(f"[Info] P{player_id} ({player.name}) in jail (pos: {player.position}), triggering jail options.", "warning_log")
                     self._set_pending_decision("jail_options", {"player_id": player_id})
                     # Re-run get_available_actions to get jail options
                     return self.get_available_actions(player_id)

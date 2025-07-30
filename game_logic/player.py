@@ -31,6 +31,8 @@ class Player:
         # Specific Get Out of Jail Free cards
         self.has_chance_gooj_card: bool = False
         self.has_community_gooj_card: bool = False 
+        # Generic GOOJ card count for compatibility with trade system
+        self.get_out_of_jail_free_cards: int = 0 
         
         self.is_bankrupt: bool = False
         # New attribute to track mortgaged properties received from trades that need handling
@@ -150,20 +152,44 @@ class Player:
             self.has_chance_gooj_card = True
         elif card_type == "community_chest" or card_type == "community": # Allow short form
             self.has_community_gooj_card = True
+        elif card_type == "generic":
+            self.get_out_of_jail_free_cards += 1
         else:
             # Log error or raise ValueError for robustness, but for now, silent if unknown type
-            print(f"[Warning] Player.add_get_out_of_jail_card: Unknown card type '{card_type}\".")
+            print(f"[Warning] Player.add_get_out_of_jail_card: Unknown card type '{card_type}'.")
+        self._sync_gooj_count()
+    
+    def _sync_gooj_count(self) -> None:
+        """Synchronize the generic GOOJ card count with specific card flags."""
+        # This method ensures consistency between different GOOJ card tracking systems
+        pass  # For now, just a placeholder to prevent errors
+    
+    def get_total_gooj_cards(self) -> int:
+        """Get total number of Get Out of Jail Free cards (all types)."""
+        total = 0
+        if self.has_chance_gooj_card:
+            total += 1
+        if self.has_community_gooj_card:
+            total += 1
+        total += self.get_out_of_jail_free_cards
+        return total
 
     def use_get_out_of_jail_card(self) -> Optional[str]:
         """Uses a Get Out of Jail Free card. Prefers Chance card if both are available. Returns type of card used or None."""
         if self.has_chance_gooj_card:
             self.has_chance_gooj_card = False
+            self._sync_gooj_count()
             self.leave_jail()
             return "chance"
         elif self.has_community_gooj_card:
             self.has_community_gooj_card = False
+            self._sync_gooj_count()
             self.leave_jail()
             return "community_chest"
+        elif self.get_out_of_jail_free_cards > 0:
+            self.get_out_of_jail_free_cards -= 1
+            self.leave_jail()
+            return "generic"
         return None
 
     def declare_bankrupt(self, creditor_id: Optional[int] = None) -> None: # creditor_id=0 for bank

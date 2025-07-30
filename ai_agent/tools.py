@@ -171,7 +171,8 @@ def _log_agent_action(gc, player_id: int, action_name: str, params: Dict[str, An
     message = result.get("message", "No message")
     
     # Basic logging
-    gc.log_event(f"[AGENT ACTION] {player_name}: {action_name} -> {status.upper()}", "agent_action")
+    status_display = status.upper() if status else "UNKNOWN"
+    gc.log_event(f"[AGENT ACTION] {player_name}: {action_name} -> {status_display}", "agent_action")
     if message:
         gc.log_event(f"[AGENT RESULT] {message}", "agent_action")
     
@@ -611,85 +612,236 @@ def tool_pay_bail(gc: Any, player_id: int, params: Dict[str, Any] = None) -> Dic
     player = gc.players[player_id]
     if params is None: params = {} # Ensure params is a dict
     try:
-        if not (player.in_jail and gc.pending_decision_type == "jail_options" and gc.pending_decision_context.get("player_id") == player_id):
+        # 🚨 CRITICAL: Pre-validate jail state to prevent race conditions
+        if not player.in_jail:
+            return {"status": "failure", "message": f"Cannot pay bail: {player.name} is not in jail anymore. Position: {player.position}"}
+            
+        if not (gc.pending_decision_type == "jail_options" and gc.pending_decision_context.get("player_id") == player_id):
              return {"status": "failure", "message": "Cannot pay bail: not in correct jail decision state."}
-        # Call async GC method with player_id and params (even if empty for this specific tool)
+        
+        # 🏛️ JAIL STATE DEBUG: Log current jail state for debugging
+        gc.log_event(f"[JAIL DEBUG] {player.name} pay bail attempt: in_jail={player.in_jail}, position={player.position}, jail_turns={getattr(player, 'jail_turns_remaining', 'N/A')}", "jail_event")
+        
+        # Store initial jail state to detect race conditions
+        initial_jail_state = player.in_jail
+        initial_position = player.position
+        
+        # Call async GC method with player_id and params (non-blocking)
         import asyncio
-        try:
-            # If we're already in an async context, use await
-            loop = asyncio.get_running_loop()
-            # We're in asyncio.to_thread, so we need to call the async method differently
-            action_outcome = asyncio.run_coroutine_threadsafe(
-                gc._pay_to_get_out_of_jail(player_id, params), loop
-            ).result()
-        except RuntimeError:
-            # No event loop running, we can use asyncio.run
-            action_outcome = asyncio.run(gc._pay_to_get_out_of_jail(player_id, params)) 
-        result = {"status": action_outcome.get("status"), "message": action_outcome.get("message", "Pay bail attempt processed.")}
+        import threading
+        
+        def run_pay_bail_async():
+            """Run pay bail in new event loop to avoid blocking"""
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    # Double-check jail state before executing
+                    if not player.in_jail:
+                        return {"status": "failure", "message": "Race condition detected: player left jail during execution"}
+                    
+                    result = loop.run_until_complete(gc._pay_to_get_out_of_jail(player_id, params))
+                    return result
+                finally:
+                    loop.close()
+            except Exception as e:
+                gc.log_event(f"Pay bail thread error: {e}", "error_jail")
+                return {"status": "error", "message": f"Pay bail execution error: {e}"}
+        
+        # Run pay bail in thread with timeout to avoid blocking
+        bail_thread = threading.Thread(target=lambda: setattr(bail_thread, 'result', run_pay_bail_async()))
+        bail_thread.start()
+        bail_thread.join(timeout=30)  # 30 second timeout
+        
+        if bail_thread.is_alive():
+            gc.log_event(f"Pay bail timeout for {player.name}", "error_jail")
+            action_outcome = {"status": "error", "message": "Pay bail operation timed out"}
+        else:
+            action_outcome = getattr(bail_thread, 'result', {"status": "error", "message": "No result from pay bail"})
+        
+        # 🎯 RACE CONDITION CHECK: Verify final state consistency
+        if initial_jail_state and not player.in_jail and player.position != initial_position:
+            # Player was released and moved - this is expected
+            gc.log_event(f"✅ [JAIL RELEASE] {player.name} paid bail and moved to position {player.position}", "jail_event")
+        
+        # Extract result data safely
+        status = action_outcome.get("status", "unknown")
+        message = action_outcome.get("message", "Pay bail attempt processed.")
+        
+        # Convert jail manager response format to tool format
+        if action_outcome.get("success") is True:
+            status = "success"
+        elif action_outcome.get("success") is False:
+            status = "failure"
+        elif status not in ["success", "failure", "error"]:
+            status = "unknown"
+        
+        result = {"status": status, "message": message}
         _log_agent_action(gc, player_id, "tool_pay_bail", params, result)
         return result
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e: 
+        gc.log_event(f"[ERROR] tool_pay_bail P{player_id}: {type(e).__name__}: {str(e)}", "error_log")
+        return {"status": "error", "message": str(e)}
 
 @tradar_verifier
 def tool_use_get_out_of_jail_card(gc: Any, player_id: int, params: Dict[str, Any] = None) -> Dict[str, Any]:
     player = gc.players[player_id]
     if params is None: params = {} # Ensure params is a dict
     try:
-        if not (player.in_jail and gc.pending_decision_type == "jail_options" and gc.pending_decision_context.get("player_id") == player_id):
+        # 🚨 CRITICAL: Pre-validate jail state to prevent race conditions
+        if not player.in_jail:
+            return {"status": "failure", "message": f"Cannot use GOOJ card: {player.name} is not in jail anymore. Position: {player.position}"}
+            
+        if not (gc.pending_decision_type == "jail_options" and gc.pending_decision_context.get("player_id") == player_id):
              return {"status": "failure", "message": "Cannot use GOOJ card: not in correct jail decision state."}
-        if not (player.has_chance_gooj_card or player.has_community_gooj_card):
+        
+        if not (player.has_chance_gooj_card or player.has_community_gooj_card or player.get_out_of_jail_free_cards > 0):
             return {"status": "failure", "message": "No GOOJ card to use."}
-        # Call async GC method with player_id and params
+        
+        # 🏛️ JAIL STATE DEBUG: Log current jail state for debugging
+        gc.log_event(f"[JAIL DEBUG] {player.name} GOOJ card attempt: in_jail={player.in_jail}, position={player.position}, chance={player.has_chance_gooj_card}, community={player.has_community_gooj_card}, generic={player.get_out_of_jail_free_cards}", "jail_event")
+        
+        # Store initial jail state to detect race conditions
+        initial_jail_state = player.in_jail
+        initial_position = player.position
+        
+        # Call async GC method with player_id and params (non-blocking)
         import asyncio
-        try:
-            # If we're already in an async context, use await
-            loop = asyncio.get_running_loop()
-            # We're in asyncio.to_thread, so we need to call the async method differently
-            action_outcome = asyncio.run_coroutine_threadsafe(
-                gc._use_card_to_get_out_of_jail(player_id, params), loop
-            ).result()
-        except RuntimeError:
-            # No event loop running, we can use asyncio.run
-            action_outcome = asyncio.run(gc._use_card_to_get_out_of_jail(player_id, params))
-        result = {"status": action_outcome.get("status"), "message": action_outcome.get("message", "Use GOOJ card attempt processed.")}
+        import threading
+        
+        def run_gooj_card_async():
+            """Run GOOJ card in new event loop to avoid blocking"""
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    # Double-check jail state before executing
+                    if not player.in_jail:
+                        return {"status": "failure", "message": "Race condition detected: player left jail during execution"}
+                    
+                    result = loop.run_until_complete(gc._use_card_to_get_out_of_jail(player_id, params))
+                    return result
+                finally:
+                    loop.close()
+            except Exception as e:
+                gc.log_event(f"GOOJ card thread error: {e}", "error_jail")
+                return {"status": "error", "message": f"GOOJ card execution error: {e}"}
+        
+        # Run GOOJ card in thread with timeout to avoid blocking
+        gooj_thread = threading.Thread(target=lambda: setattr(gooj_thread, 'result', run_gooj_card_async()))
+        gooj_thread.start()
+        gooj_thread.join(timeout=30)  # 30 second timeout
+        
+        if gooj_thread.is_alive():
+            gc.log_event(f"GOOJ card timeout for {player.name}", "error_jail")
+            action_outcome = {"status": "error", "message": "GOOJ card operation timed out"}
+        else:
+            action_outcome = getattr(gooj_thread, 'result', {"status": "error", "message": "No result from GOOJ card"})
+        
+        # 🎯 RACE CONDITION CHECK: Verify final state consistency
+        if initial_jail_state and not player.in_jail and player.position != initial_position:
+            # Player was released and moved - this is expected
+            gc.log_event(f"✅ [JAIL RELEASE] {player.name} used GOOJ card and moved to position {player.position}", "jail_event")
+        
+        # Extract result data safely
+        status = action_outcome.get("status", "unknown")
+        message = action_outcome.get("message", "Use GOOJ card attempt processed.")
+        
+        # Convert jail manager response format to tool format
+        if action_outcome.get("success") is True:
+            status = "success"
+        elif action_outcome.get("success") is False:
+            status = "failure"
+        elif status not in ["success", "failure", "error"]:
+            status = "unknown"
+        
+        result = {"status": status, "message": message}
         _log_agent_action(gc, player_id, "tool_use_get_out_of_jail_card", params, result)
         return result
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e: 
+        gc.log_event(f"[ERROR] tool_use_get_out_of_jail_card P{player_id}: {type(e).__name__}: {str(e)}", "error_log")
+        return {"status": "error", "message": str(e)}
 
 @tradar_verifier
 def tool_roll_for_doubles_to_get_out_of_jail(gc: Any, player_id: int, params: Dict[str, Any] = None) -> Dict[str, Any]:
     player = gc.players[player_id]
     if params is None: params = {} # Ensure params is a dict
     try:
-        if not (player.in_jail and gc.pending_decision_type == "jail_options" and gc.pending_decision_context.get("player_id") == player_id):
+        # 🚨 CRITICAL: Pre-validate jail state to prevent race conditions
+        if not player.in_jail:
+            return {"status": "failure", "message": "Cannot roll for jail: player is not in jail anymore."}
+            
+        if not (gc.pending_decision_type == "jail_options" and gc.pending_decision_context.get("player_id") == player_id):
              return {"status": "failure", "message": "Cannot roll for jail: not in correct jail decision state."}
-        # The check for player.jail_turns_remaining >=3 should ideally be handled by GC's _attempt_roll_out_of_jail or get_available_actions
-        # However, keeping a preliminary check here can be useful.
+        
+        # Check if player has already used all roll attempts
         if player.jail_turns_remaining >=3 and not gc.pending_decision_context.get("max_rolls_attempted", False):
              # This condition is a bit redundant if _attempt_roll_out_of_jail handles it robustly by returning error
              # For safety, ensure agent doesn't try to roll if GC logic already determined max attempts.
              pass # Let GC method handle max attempts error
         
+        # Store initial jail state to detect race conditions
+        initial_jail_state = player.in_jail
+        initial_position = player.position
+        
         # Call async GC method with player_id and params
         import asyncio
-        try:
-            # If we're already in an async context, use await
-            loop = asyncio.get_running_loop()
-            # We're in asyncio.to_thread, so we need to call the async method differently
-            action_outcome = asyncio.run_coroutine_threadsafe(
-                gc._attempt_roll_out_of_jail(player_id, params), loop
-            ).result()
-        except RuntimeError:
-            # No event loop running, we can use asyncio.run
-            action_outcome = asyncio.run(gc._attempt_roll_out_of_jail(player_id, params))
-        dice_rolled = action_outcome.get("dice_roll", gc.dice) 
-        got_out = action_outcome.get("got_out", False)
-        message = action_outcome.get("message", f"Roll for doubles (in jail): Dice {dice_rolled}, Got out: {got_out}.")
+        import threading
         
-        result = {"status": action_outcome.get("status"), "message": message, "dice_roll": dice_rolled, "got_out": got_out}
+        def run_jail_roll_async():
+            """Run jail roll in new event loop to avoid blocking"""
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    # Double-check jail state before executing
+                    if not player.in_jail:
+                        return {"status": "failure", "message": "Race condition detected: player left jail during execution"}
+                    
+                    result = loop.run_until_complete(gc._attempt_roll_out_of_jail(player_id, params))
+                    return result
+                finally:
+                    loop.close()
+            except Exception as e:
+                gc.log_event(f"Jail roll thread error: {e}", "error_jail")
+                return {"status": "error", "message": f"Jail roll execution error: {e}"}
+        
+        # Run jail roll in thread with timeout to avoid blocking
+        jail_thread = threading.Thread(target=lambda: setattr(jail_thread, 'result', run_jail_roll_async()))
+        jail_thread.start()
+        jail_thread.join(timeout=30)  # 30 second timeout
+        
+        if jail_thread.is_alive():
+            gc.log_event(f"Jail roll timeout for {player.name}", "error_jail")
+            action_outcome = {"status": "error", "message": "Jail roll operation timed out"}
+        else:
+            action_outcome = getattr(jail_thread, 'result', {"status": "error", "message": "No result from jail roll"})
+        
+        # 🎯 RACE CONDITION CHECK: Verify final state consistency
+        if initial_jail_state and not player.in_jail and player.position != initial_position:
+            # Player was released and moved - this is expected
+            gc.log_event(f"✅ [JAIL RELEASE] {player.name} successfully left jail and moved to position {player.position}", "jail_event")
+        
+        # Extract result data safely
+        dice_rolled = action_outcome.get("dice", action_outcome.get("dice_roll", gc.dice))
+        got_out = action_outcome.get("released", action_outcome.get("got_out", False))
+        message = action_outcome.get("message", f"Roll for doubles (in jail): Dice {dice_rolled}, Got out: {got_out}.")
+        status = action_outcome.get("status", "unknown")
+        
+        # Convert jail manager response format to tool format
+        if action_outcome.get("success") is True:
+            status = "success"
+        elif action_outcome.get("success") is False:
+            status = "failure"
+        elif status not in ["success", "failure", "error"]:
+            status = "unknown"
+        
+        result = {"status": status, "message": message, "dice_roll": dice_rolled, "got_out": got_out}
         _log_agent_action(gc, player_id, "tool_roll_for_doubles_to_get_out_of_jail", params, result)
         return result
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e: 
+        gc.log_event(f"[ERROR] tool_roll_for_doubles_to_get_out_of_jail P{player_id}: {type(e).__name__}: {str(e)}", "error_log")
+        return {"status": "error", "message": str(e)}
 
 # --- Bankruptcy Flow Tool ---
 @tradar_verifier
@@ -1474,6 +1626,23 @@ def pre_validate_action(gc, player_id: int, action_name: str, params: Dict[str, 
             
             if requested_money > recipient.money:
                 return False, f"❌ QUICK FIX: {recipient.name} only has ${recipient.money}, cannot request ${requested_money}"
+        
+        # Jail action pre-validation
+        elif action_name in ["tool_roll_for_doubles_to_get_out_of_jail", "tool_pay_bail", "tool_use_get_out_of_jail_card"]:
+            # These actions should only be available when player is in jail with appropriate decision context
+            if not player.in_jail:
+                return False, f"❌ QUICK FIX: {player.name} is not in jail. Current position: {player.position}"
+            
+            if gc.pending_decision_type != "jail_options":
+                return False, f"❌ QUICK FIX: Not in jail decision state. Current pending decision: {gc.pending_decision_type or 'None'}"
+            
+            if gc.pending_decision_context.get("player_id") != player_id:
+                return False, f"❌ QUICK FIX: Jail decision is not for {player.name}. Wait for your jail turn."
+            
+            # Specific validation for roll attempts
+            if action_name == "tool_roll_for_doubles_to_get_out_of_jail":
+                if gc.pending_decision_context.get("max_rolls_attempted", False):
+                    return False, "❌ QUICK FIX: You have used all your roll attempts. Use tool_pay_bail or tool_use_get_out_of_jail_card"
         
         # Property action pre-validation
         elif action_name in ["tool_mortgage_property", "tool_unmortgage_property", "tool_build_house", "tool_sell_house"]:

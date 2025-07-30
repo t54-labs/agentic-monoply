@@ -201,7 +201,7 @@ class JailManager(BaseManager):
             card_type = "Community Chest"
         else:
             # Use generic GOOJ card count if available
-            if hasattr(player, 'get_out_of_jail_free_cards') and player.get_out_of_jail_free_cards > 0:
+            if player.get_out_of_jail_free_cards > 0:
                 player.get_out_of_jail_free_cards -= 1
                 card_type = "Generic"
             else:
@@ -244,10 +244,10 @@ class JailManager(BaseManager):
         Returns:
             bool: True if player has a GOOJ card to use
         """
-        if hasattr(player, 'has_chance_gooj_card') and player.has_chance_gooj_card:
+        if player.has_chance_gooj_card:
             return True
-        if hasattr(player, 'has_community_gooj_card') and player.has_community_gooj_card:
+        if player.has_community_gooj_card:
             return True
-        if hasattr(player, 'get_out_of_jail_free_cards') and player.get_out_of_jail_free_cards > 0:
+        if player.get_out_of_jail_free_cards > 0:
             return True
         return False 

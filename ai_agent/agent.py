@@ -363,7 +363,7 @@ class OpenAIAgent(BaseAgent):
                             houses_info = f" +{prop['num_houses']}H" if prop['num_houses'] < 5 else " +HOTEL"
                         prompt += f"  ID:{prop_id} = {prop['name']}{houses_info} {mortgage_status}\n"
             
-            # Show each other player's properties in simple format
+            # Show each other player's properties in simple format with enhanced clarity
             for other_player in game_state.get('other_players', []):
                 if other_player.get('is_bankrupt', False):
                     continue
@@ -372,9 +372,12 @@ class OpenAIAgent(BaseAgent):
                 player_id = other_player['player_id']
                 properties_owned = other_player.get('properties_owned', [])
                 
-                prompt += f"\n📋 {player_name.upper()} (P{player_id}) PROPERTIES (use these IDs for 'requested_property_ids' when trading with P{player_id}):\n"
+                prompt += f"\n📋 {player_name.upper()} (P{player_id}) PROPERTIES:\n"
+                prompt += f"   💡 To trade with {player_name}, use 'recipient_id': {player_id}\n"
+                prompt += f"   💡 To request {player_name}'s properties, use these IDs in 'requested_property_ids':\n"
+                
                 if not properties_owned:
-                    prompt += "  (None - they own no properties)\n"
+                    prompt += f"   ❌ {player_name} owns NO properties - cannot request any from them!\n"
                 else:
                     for prop in sorted(properties_owned, key=lambda x: x.get('id', 0)):
                         prop_id = prop.get('id')
@@ -383,7 +386,7 @@ class OpenAIAgent(BaseAgent):
                         houses_info = ""
                         if prop.get('num_houses', 0) > 0:
                             houses_info = f" +{prop['num_houses']}H" if prop['num_houses'] < 5 else " +HOTEL"
-                        prompt += f"  ID:{prop_id} = {prop_name}{houses_info} {mortgage_status}\n"
+                        prompt += f"   ✅ ID:{prop_id} = {prop_name}{houses_info} {mortgage_status}\n"
             
             prompt += "\n" + "="*80 + "\n"
             prompt += "🚨 CRITICAL TRADE RULES:\n"
@@ -392,6 +395,9 @@ class OpenAIAgent(BaseAgent):
             prompt += "3. ❌ NEVER mix up property IDs between players\n"
             prompt += "4. ❌ NEVER guess property IDs - they are ALL listed above\n"
             prompt += "5. ✅ Double-check the property name matches the ID you're using\n"
+            prompt += "6. ⚠️  COMMON ERROR: Requesting a property ID that belongs to Player A when trading with Player B\n"
+            prompt += "7. ⚠️  ALWAYS verify: Does the requested property ID appear in the TARGET PLAYER's property list?\n"
+            prompt += "8. 🔍 EXAMPLE: If trading with P2, only use property IDs listed under 'P2 PROPERTIES'\n"
             
             # Add special warning for counter offers
             current_pending_decision = game_state.get('pending_decision_type')
@@ -524,8 +530,38 @@ class OpenAIAgent(BaseAgent):
                 prompt += f"You have received a trade offer (ID: {decision_context.get('trade_id')}) from P{proposer_id_ctx} ({proposer_name_ctx}).\n"
                 if message_from_proposer:
                     prompt += f"Message from P{proposer_name_ctx}: \"{message_from_proposer}\"\n"
-                prompt += f"🚨 COUNTER-OFFER RULE: If you counter-offer, you can ONLY trade with P{proposer_id_ctx} ({proposer_name_ctx}) - NOT with other players!\n"
-                prompt += f"This means requested_property_ids must be from P{proposer_id_ctx}'s property list ONLY.\n"
+                
+                # 🎯 ENHANCED: Add explicit property list for counter-offers
+                prompt += "\n" + "="*60 + "\n"
+                prompt += "🔒 COUNTER-OFFER RESTRICTION ZONE\n"
+                prompt += "="*60 + "\n"
+                prompt += f"⚠️  CRITICAL: You can ONLY counter-offer with P{proposer_id_ctx} ({proposer_name_ctx})!\n"
+                prompt += f"⚠️  This means requested_property_ids must ONLY be from {proposer_name_ctx}'s properties below:\n\n"
+                
+                # Find and display ONLY the proposer's properties for counter-offers
+                proposer_properties = []
+                for p_info in game_state.get('other_players', []):
+                    if p_info.get('player_id') == proposer_id_ctx:
+                        proposer_properties = p_info.get('properties_owned', [])
+                        break
+                
+                if proposer_properties:
+                    prompt += f"🏠 {proposer_name_ctx}'s PROPERTIES (for requested_property_ids):\n"
+                    for prop in sorted(proposer_properties, key=lambda x: x.get('id', 0)):
+                        prop_id = prop.get('id')
+                        prop_name = prop.get('name', 'Unknown')
+                        mortgage_status = "[MORTGAGED]" if prop.get('is_mortgaged') else "[AVAILABLE]"
+                        houses_info = ""
+                        if prop.get('num_houses', 0) > 0:
+                            houses_info = f" +{prop['num_houses']}H" if prop['num_houses'] < 5 else " +HOTEL"
+                        prompt += f"  ✅ ID:{prop_id} = {prop_name}{houses_info} {mortgage_status}\n"
+                else:
+                    prompt += f"❌ {proposer_name_ctx} owns NO properties - you cannot request any properties in a counter-offer!\n"
+                
+                # Add explicit forbidden action warning
+                prompt += f"\n❌ FORBIDDEN: Do NOT request properties from other players (not {proposer_name_ctx})!\n"
+                prompt += "="*60 + "\n"
+                
                 prompt += "Review the offer details and choose to accept, reject, or propose a counter-offer (tool_propose_counter_offer).\n"
             
             elif current_pending_decision == "propose_new_trade_after_rejection":
